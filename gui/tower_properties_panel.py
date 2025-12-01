@@ -6,7 +6,7 @@
 from __future__ import annotations
 
 from typing import Optional, Dict, Any
-from PyQt6.QtCore import Qt, pyqtSignal
+from PyQt6.QtCore import Qt, pyqtSignal, QTimer
 from PyQt6.QtWidgets import (
     QWidget,
     QVBoxLayout,
@@ -23,6 +23,7 @@ from PyQt6.QtWidgets import (
     QTextEdit,
     QMessageBox,
     QFileDialog,
+    QDialog,
 )
 
 from core.tower_generator import TowerSegmentSpec, TowerSectionSpec, TowerBlueprintV2
@@ -31,6 +32,14 @@ from core.db.profile_manager import ProfileManager
 from core.structure.builder import TowerModelBuilder
 from core.physics.wind_load import WindLoadCalculator, WIND_ZONES, TERRAIN_COEFFS
 import numpy as np
+
+# Словарь русских названий типов профилей
+PROFILE_TYPE_NAMES = {
+    "pipe": "Труба",
+    "angle": "Уголок",
+    "channel": "Швеллер",
+    "i_beam": "Двутавр",
+}
 
 # Импорт для таблицы МКЭ (ленивый импорт в методе для избежания циклических зависимостей)
 
@@ -54,13 +63,18 @@ class TowerPropertiesPanel(QWidget):
         self._last_calculation_result = None
         self._updating = False
         
+        # Таймер для отложенного обновления предпросмотра
+        self._preview_timer = QTimer()
+        self._preview_timer.setSingleShot(True)
+        self._preview_timer.timeout.connect(self._update_preview_deferred)
+        
         self._setup_ui()
     
     def _setup_ui(self) -> None:
         """Настройка интерфейса панели свойств."""
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(4, 4, 4, 4)
-        layout.setSpacing(4)
+        layout.setContentsMargins(6, 6, 6, 6)
+        layout.setSpacing(6)
         
         # Заголовок
         self.title_label = QLabel("Выберите элемент")
@@ -96,6 +110,12 @@ class TowerPropertiesPanel(QWidget):
         self.mke_table = CalculationTableWidget(self.profile_manager)
         self.tabs.addTab(self.mke_table, "Таблица МКЭ")
         
+        # Вкладка: Редактор профиля (последняя, открывается при выборе профиля)
+        from gui.profile_editor_widget import ProfileEditorWidget
+        self.profile_editor = ProfileEditorWidget(self.profile_manager)
+        self.profile_editor.profileChanged.connect(self._on_profile_edited)
+        self.tabs.addTab(self.profile_editor, "Редактор профиля")
+        
         layout.addWidget(self.tabs)
         
         # Кнопки действий
@@ -125,24 +145,62 @@ class TowerPropertiesPanel(QWidget):
         
         profiles_group = QGroupBox("Назначение профилей")
         profiles_form = QFormLayout()
+        profiles_form.setSpacing(8)
         
         # Профиль поясов
+        leg_layout = QHBoxLayout()
         self.leg_profile_combo = QComboBox()
         self._populate_profiles_combo(self.leg_profile_combo)
-        profiles_form.addRow("Пояса:", self.leg_profile_combo)
+        self.leg_profile_combo.setMinimumWidth(200)
+        leg_layout.addWidget(self.leg_profile_combo)
+        edit_leg_btn = QPushButton("✎")
+        edit_leg_btn.setToolTip("Редактировать профиль")
+        edit_leg_btn.setMaximumWidth(32)
+        edit_leg_btn.setMaximumHeight(24)
+        edit_leg_btn.clicked.connect(lambda: self._edit_selected_profile(self.leg_profile_combo))
+        leg_layout.addWidget(edit_leg_btn)
+        profiles_form.addRow("Пояса:", leg_layout)
         
         # Профиль раскосов
+        brace_layout = QHBoxLayout()
         self.brace_profile_combo = QComboBox()
         self._populate_profiles_combo(self.brace_profile_combo)
-        profiles_form.addRow("Раскосы:", self.brace_profile_combo)
+        self.brace_profile_combo.setMinimumWidth(200)
+        brace_layout.addWidget(self.brace_profile_combo)
+        edit_brace_btn = QPushButton("✎")
+        edit_brace_btn.setToolTip("Редактировать профиль")
+        edit_brace_btn.setMaximumWidth(32)
+        edit_brace_btn.setMaximumHeight(24)
+        edit_brace_btn.clicked.connect(lambda: self._edit_selected_profile(self.brace_profile_combo))
+        brace_layout.addWidget(edit_brace_btn)
+        profiles_form.addRow("Раскосы:", brace_layout)
         
         # Профиль распорок
+        strut_layout = QHBoxLayout()
         self.strut_profile_combo = QComboBox()
         self._populate_profiles_combo(self.strut_profile_combo)
-        profiles_form.addRow("Распорки:", self.strut_profile_combo)
+        self.strut_profile_combo.setMinimumWidth(200)
+        strut_layout.addWidget(self.strut_profile_combo)
+        edit_strut_btn = QPushButton("✎")
+        edit_strut_btn.setToolTip("Редактировать профиль")
+        edit_strut_btn.setMaximumWidth(32)
+        edit_strut_btn.setMaximumHeight(24)
+        edit_strut_btn.clicked.connect(lambda: self._edit_selected_profile(self.strut_profile_combo))
+        strut_layout.addWidget(edit_strut_btn)
+        profiles_form.addRow("Распорки:", strut_layout)
         
         profiles_group.setLayout(profiles_form)
         layout.addWidget(profiles_group)
+        
+        # Информация о выбранном профиле
+        info_group = QGroupBox("Информация о профиле")
+        info_layout = QVBoxLayout()
+        self.profile_info_label = QLabel("Выберите профиль для просмотра информации")
+        self.profile_info_label.setWordWrap(True)
+        self.profile_info_label.setStyleSheet("color: #666; padding: 4px;")
+        info_layout.addWidget(self.profile_info_label)
+        info_group.setLayout(info_layout)
+        layout.addWidget(info_group)
         
         # Кнопка группового назначения
         group_btn = QPushButton("Назначить на все элементы")
@@ -225,21 +283,37 @@ class TowerPropertiesPanel(QWidget):
         layout.addStretch()
     
     def _populate_profiles_combo(self, combo: QComboBox) -> None:
-        """Заполнить комбобокс профилями."""
+        """Заполнить комбобокс профилями с русскими названиями."""
         combo.clear()
         combo.addItem("Не задано", None)
+        
+        # Словарь русских названий
+        type_names = {
+            "pipe": "Труба",
+            "angle": "Уголок",
+            "channel": "Швеллер",
+            "i_beam": "Двутавр",
+        }
         
         # Получить все профили
         pipes = self.profile_manager.get_profiles_by_type("pipe")
         angles = self.profile_manager.get_profiles_by_type("angle")
+        channels = self.profile_manager.get_profiles_by_type("channel")
         
         for p in pipes:
-            display_name = f"{p['type']} {p['designation']} ({p['standard']})"
+            type_name = type_names.get(p['type'], p['type'])
+            display_name = f"{type_name} {p['designation']} ({p['standard']})"
             combo.addItem(display_name, p)
         
         for a in angles:
-            display_name = f"{a['type']} {a['designation']} ({a['standard']})"
+            type_name = type_names.get(a['type'], a['type'])
+            display_name = f"{type_name} {a['designation']} ({a['standard']})"
             combo.addItem(display_name, a)
+        
+        for c in channels:
+            type_name = type_names.get(c['type'], c['type'])
+            display_name = f"{type_name} {c['designation']} ({c['standard']})"
+            combo.addItem(display_name, c)
     
     def set_element(self, element_type: str, element_data: Dict[str, Any]) -> None:
         """Установить выбранный элемент для редактирования."""
@@ -449,20 +523,231 @@ class TowerPropertiesPanel(QWidget):
             if section:
                 lattice_type = section.lattice_type
         
+        # Временно отключить сигнал для избежания рекурсии
+        self.lattice_type_combo.blockSignals(True)
         index = self.lattice_type_combo.findText(lattice_type)
         if index >= 0:
             self.lattice_type_combo.setCurrentIndex(index)
+        self.lattice_type_combo.blockSignals(False)
     
     def _on_property_changed(self, property_name: str, value: Any) -> None:
         """Обработка изменения свойства."""
         if self._updating:
             return
+        
+        # Обновить чертеж
+        self._update_blueprint_from_property(property_name, value)
+        
+        # Запустить отложенное обновление предпросмотра
+        self._preview_timer.stop()
+        self._preview_timer.start(300)  # 300 мс задержка
+        
         self.propertyChanged.emit(property_name, value)
+    
+    def _update_blueprint_from_property(self, property_name: str, value: Any) -> None:
+        """Обновить чертеж на основе измененного свойства."""
+        if not self._current_blueprint or not self._current_element_data:
+            return
+        
+        data = self._current_element_data
+        
+        if self._current_element_type == "segment":
+            segment = data.get("data")
+            index = data.get("index")
+            if segment and index is not None and index < len(self._current_blueprint.segments):
+                if property_name == "name":
+                    self._current_blueprint.segments[index].name = str(value)
+                elif property_name == "shape":
+                    self._current_blueprint.segments[index].shape = str(value)
+                elif property_name == "height":
+                    self._current_blueprint.segments[index].height = float(value)
+                elif property_name == "faces":
+                    self._current_blueprint.segments[index].faces = int(value)
+                elif property_name == "base_size":
+                    self._current_blueprint.segments[index].base_size = float(value)
+                elif property_name == "top_size":
+                    self._current_blueprint.segments[index].top_size = float(value)
+        
+        elif self._current_element_type == "section":
+            section = data.get("data")
+            segment = data.get("segment")
+            index = data.get("index")
+            if section and segment and index is not None:
+                if property_name == "name":
+                    section.name = str(value)
+                elif property_name == "height":
+                    section.height = float(value)
+                elif property_name == "offset_x":
+                    section.offset_x = float(value)
+                elif property_name == "offset_y":
+                    section.offset_y = float(value)
+    
+    def _update_preview_deferred(self) -> None:
+        """Отложенное обновление предпросмотра."""
+        # Эмитировать сигнал для обновления предпросмотра
+        if self._current_blueprint:
+            self.propertyChanged.emit("blueprint_updated", self._current_blueprint)
+    
+    def _on_profile_selected(self) -> None:
+        """Обработка выбора профиля - обновить информацию."""
+        sender = self.sender()
+        profile_data = sender.currentData()
+        
+        if profile_data:
+            # Обновить информацию о профиле
+            type_name = PROFILE_TYPE_NAMES.get(profile_data.get("type", ""), profile_data.get("type", ""))
+            designation = profile_data.get("designation", "")
+            standard = profile_data.get("standard", "")
+            A = profile_data.get("A", 0)
+            Ix = profile_data.get("Ix", 0)
+            Iy = profile_data.get("Iy", 0)
+            mass = profile_data.get("mass_per_m", 0)
+            
+            info_text = f"""
+            <b>{type_name} {designation}</b><br>
+            Стандарт: {standard}<br>
+            Площадь: {A:.2f} см²<br>
+            Момент инерции Ix: {Ix:.2f} см⁴<br>
+            Момент инерции Iy: {Iy:.2f} см⁴<br>
+            Масса: {mass:.3f} кг/м
+            """
+            self.profile_info_label.setText(info_text)
+        else:
+            self.profile_info_label.setText("Выберите профиль для просмотра информации")
+    
+    def _edit_selected_profile(self, combo: QComboBox) -> None:
+        """Открыть редактор для выбранного профиля."""
+        profile_data = combo.currentData()
+        if profile_data:
+            self.profile_editor.set_profile(profile_data)
+            # Переключиться на вкладку редактора (последняя вкладка)
+            self.tabs.setCurrentIndex(self.tabs.count() - 1)
+        else:
+            QMessageBox.information(self, "Информация", "Выберите профиль для редактирования")
+    
+    def _on_profile_combo_changed(self) -> None:
+        """Обработка изменения выбора профиля в комбобоксе."""
+        if self._updating:
+            return
+        
+        sender = self.sender()
+        profile_data = sender.currentData()
+        
+        if not profile_data or not self._current_element_data:
+            return
+        
+        # Определить тип профиля
+        profile_type_key = None
+        if sender == self.leg_profile_combo:
+            profile_type_key = "leg_profile"
+        elif sender == self.brace_profile_combo:
+            profile_type_key = "brace_profile"
+        elif sender == self.strut_profile_combo:
+            profile_type_key = "strut_profile"
+        
+        if not profile_type_key:
+            return
+        
+        # Формировать строку профиля
+        type_name = PROFILE_TYPE_NAMES.get(profile_data.get("type", ""), profile_data.get("type", ""))
+        designation = profile_data.get("designation", "")
+        standard = profile_data.get("standard", "")
+        profile_string = f"{type_name} {designation} ({standard})"
+        
+        # Обновить чертеж
+        data = self._current_element_data
+        
+        if self._current_element_type == "segment":
+            segment = data.get("data")
+            index = data.get("index")
+            if segment and index is not None and self._current_blueprint:
+                if index < len(self._current_blueprint.segments):
+                    if not self._current_blueprint.segments[index].profile_spec:
+                        self._current_blueprint.segments[index].profile_spec = {}
+                    self._current_blueprint.segments[index].profile_spec[profile_type_key] = profile_string
+        
+        elif self._current_element_type == "section":
+            section = data.get("data")
+            segment = data.get("segment")
+            if section and segment:
+                if not section.profile_spec:
+                    section.profile_spec = {}
+                section.profile_spec[profile_type_key] = profile_string
+        
+        # Запустить обновление предпросмотра
+        self._preview_timer.stop()
+        self._preview_timer.start(300)
+        
+        self.profileAssigned.emit(profile_type_key, profile_string)
+    
+    def _on_lattice_type_changed(self, lattice_type: str) -> None:
+        """Обработка изменения типа решетки."""
+        if self._updating or not self._current_element_data:
+            return
+        
+        data = self._current_element_data
+        
+        if self._current_element_type == "segment":
+            segment = data.get("data")
+            index = data.get("index")
+            if segment and index is not None and self._current_blueprint:
+                if index < len(self._current_blueprint.segments):
+                    self._current_blueprint.segments[index].lattice_type = lattice_type
+        
+        elif self._current_element_type == "section":
+            section = data.get("data")
+            if section:
+                section.lattice_type = lattice_type
+        
+        # Запустить обновление предпросмотра
+        self._preview_timer.stop()
+        self._preview_timer.start(300)
+    
+    def _on_profile_edited(self, profile_data: Dict[str, Any]) -> None:
+        """Обработка изменения профиля."""
+        # Обновить комбобоксы
+        self._populate_profiles_combo(self.leg_profile_combo)
+        self._populate_profiles_combo(self.brace_profile_combo)
+        self._populate_profiles_combo(self.strut_profile_combo)
+        
+        # Установить выбранный профиль обратно
+        designation = profile_data.get("designation", "")
+        standard = profile_data.get("standard", "")
+        type_name = PROFILE_TYPE_NAMES.get(profile_data.get("type", ""), "")
+        display_name = f"{type_name} {designation} ({standard})"
+        
+        for combo in [self.leg_profile_combo, self.brace_profile_combo, self.strut_profile_combo]:
+            index = combo.findText(display_name)
+            if index >= 0:
+                combo.setCurrentIndex(index)
     
     def _on_group_assign(self) -> None:
         """Групповое назначение профилей."""
-        # Будет реализовано позже
-        QMessageBox.information(self, "Информация", "Групповое назначение будет реализовано в мастере операций")
+        if not self._current_blueprint:
+            QMessageBox.warning(self, "Ошибка", "Нет чертежа башни.")
+            return
+        
+        from gui.tower_builder_master import TowerBuilderMaster
+        from PyQt6.QtWidgets import QDialog
+        
+        master = TowerBuilderMaster(self._current_blueprint, self.profile_manager, self)
+        master.operationCompleted.connect(self._on_master_operation_completed)
+        
+        if master.exec() == QDialog.DialogCode.Accepted:
+            pass
+    
+    def _on_master_operation_completed(self, operation_data: Dict[str, Any]) -> None:
+        """Обработка завершения операции мастера."""
+        from gui.tower_builder_master import TowerBuilderMaster
+        
+        if self._current_blueprint:
+            new_blueprint = TowerBuilderMaster.apply_operation(self._current_blueprint, operation_data)
+            self._current_blueprint = new_blueprint
+            self.set_blueprint(new_blueprint)
+            
+            # Обновить предпросмотр
+            self._preview_timer.stop()
+            self._preview_timer.start(100)
     
     def _on_apply(self) -> None:
         """Применить изменения."""

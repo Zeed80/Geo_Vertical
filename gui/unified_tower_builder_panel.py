@@ -8,7 +8,7 @@
 from __future__ import annotations
 
 from typing import Optional, Dict, Any, List
-from PyQt6.QtCore import Qt, pyqtSignal
+from PyQt6.QtCore import Qt, pyqtSignal, QTimer
 from PyQt6.QtWidgets import (
     QWidget,
     QVBoxLayout,
@@ -16,6 +16,7 @@ from PyQt6.QtWidgets import (
     QSplitter,
     QPushButton,
     QLabel,
+    QMessageBox,
 )
 
 from core.tower_generator import TowerBlueprintV2
@@ -39,30 +40,41 @@ class UnifiedTowerBuilderPanel(QWidget):
         self.profile_manager = ProfileManager()
         self._current_blueprint: Optional[TowerBlueprintV2] = None
         
+        # Таймер для отложенного обновления предпросмотра
+        self._preview_update_timer = QTimer()
+        self._preview_update_timer.setSingleShot(True)
+        self._preview_update_timer.timeout.connect(self._update_preview_now)
+        
         self._setup_ui()
         self._connect_signals()
     
     def _setup_ui(self) -> None:
         """Настройка интерфейса с тремя областями."""
         main_layout = QVBoxLayout(self)
-        main_layout.setContentsMargins(4, 4, 4, 4)
-        main_layout.setSpacing(4)
+        main_layout.setContentsMargins(6, 6, 6, 6)
+        main_layout.setSpacing(6)
         
         # Панель инструментов
-        toolbar = QHBoxLayout()
-        toolbar.setSpacing(4)
+        self.toolbar = QHBoxLayout()
+        self.toolbar.setSpacing(4)
         
         self.generate_btn = QPushButton("Построить башню")
         self.generate_btn.clicked.connect(self._emit_blueprint)
-        toolbar.addWidget(self.generate_btn)
+        self.toolbar.addWidget(self.generate_btn)
         
-        toolbar.addStretch()
+        # Кнопка мастера групповых операций
+        self.master_btn = QPushButton("Мастер операций")
+        self.master_btn.setToolTip("Групповые операции над элементами башни")
+        self.master_btn.clicked.connect(self._open_master)
+        self.toolbar.addWidget(self.master_btn)
+        
+        self.toolbar.addStretch()
         
         self.status_label = QLabel("Готов к работе")
         self.status_label.setStyleSheet("color: #666; font-size: 9pt;")
-        toolbar.addWidget(self.status_label)
+        self.toolbar.addWidget(self.status_label)
         
-        main_layout.addLayout(toolbar)
+        main_layout.addLayout(self.toolbar)
         
         # Основной splitter с тремя областями
         main_splitter = QSplitter(Qt.Orientation.Horizontal)
@@ -71,8 +83,8 @@ class UnifiedTowerBuilderPanel(QWidget):
         
         # Левая область: Дерево структуры
         self.structure_tree = TowerStructureTreeWidget()
-        self.structure_tree.setMinimumWidth(250)
-        self.structure_tree.setMaximumWidth(400)
+        self.structure_tree.setMinimumWidth(280)
+        self.structure_tree.setMaximumWidth(420)
         main_splitter.addWidget(self.structure_tree)
         
         # Центральная область: 3D визуализация
@@ -81,8 +93,8 @@ class UnifiedTowerBuilderPanel(QWidget):
         
         # Правая область: Панель свойств
         self.properties_panel = TowerPropertiesPanel(self.profile_manager)
-        self.properties_panel.setMinimumWidth(300)
-        self.properties_panel.setMaximumWidth(450)
+        self.properties_panel.setMinimumWidth(350)
+        self.properties_panel.setMaximumWidth(500)
         main_splitter.addWidget(self.properties_panel)
         
         # Пропорции: дерево 20%, 3D 50%, свойства 30%
@@ -138,17 +150,58 @@ class UnifiedTowerBuilderPanel(QWidget):
     
     def _on_property_changed(self, property_name: str, value: Any) -> None:
         """Обработка изменения свойства."""
-        # Обновить чертеж и предпросмотр
+        # Если обновлен весь чертеж
+        if property_name == "blueprint_updated":
+            self._current_blueprint = value
+            self._schedule_preview_update()
+            return
+        
+        # Обновить чертеж и предпросмотр в реальном времени
         if self._current_blueprint:
-            # TODO: Реализовать обновление чертежа
+            self._schedule_preview_update()
+    
+    def _schedule_preview_update(self) -> None:
+        """Запланировать обновление предпросмотра."""
+        # Остановить предыдущий таймер и запустить новый
+        self._preview_update_timer.stop()
+        self._preview_update_timer.start(200)  # 200 мс задержка для плавности
+    
+    def _update_preview_now(self) -> None:
+        """Обновить предпросмотр немедленно."""
+        if self._current_blueprint:
+            # Обновить все компоненты
+            self.structure_tree.set_blueprint(self._current_blueprint)
             self.preview_3d.set_blueprint(self._current_blueprint)
+            self.properties_panel.set_blueprint(self._current_blueprint)
     
     def _on_profile_assigned(self, element_type: str, profile_name: str) -> None:
         """Обработка назначения профиля."""
-        # Обновить дерево и предпросмотр
+        # Обновить дерево и предпросмотр через отложенное обновление
         if self._current_blueprint:
-            self.structure_tree.set_blueprint(self._current_blueprint)
-            self.preview_3d.set_blueprint(self._current_blueprint)
+            self._schedule_preview_update()
+    
+    def _open_master(self) -> None:
+        """Открыть мастер групповых операций."""
+        if not self._current_blueprint:
+            QMessageBox.warning(self, "Ошибка", "Нет чертежа башни для операций.")
+            return
+        
+        from gui.tower_builder_master import TowerBuilderMaster
+        from PyQt6.QtWidgets import QMessageBox
+        
+        master = TowerBuilderMaster(self._current_blueprint, self.profile_manager, self)
+        master.operationCompleted.connect(self._on_master_operation)
+        
+        if master.exec() == master.DialogCode.Accepted:
+            pass
+    
+    def _on_master_operation(self, operation_data: Dict[str, Any]) -> None:
+        """Обработка операции из мастера."""
+        from gui.tower_builder_master import TowerBuilderMaster
+        
+        new_blueprint = TowerBuilderMaster.apply_operation(self._current_blueprint, operation_data)
+        self.set_blueprint(new_blueprint)
+        self.statusMessage.emit("Групповая операция применена")
     
     def _emit_blueprint(self) -> None:
         """Эмитировать сигнал с текущим чертежом."""

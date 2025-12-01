@@ -169,6 +169,15 @@ class CalculationTableWidget(QWidget):
             MemberType.BRACE: "Раскос",
             MemberType.STRUT: "Распорка",
             MemberType.DIAPHRAGM: "Диафрагма",
+            MemberType.CROSSBAR: "Перекладина",
+        }
+        
+        # Словарь русских названий типов профилей
+        profile_type_names = {
+            "pipe": "Труба",
+            "angle": "Уголок",
+            "channel": "Швеллер",
+            "i_beam": "Двутавр",
         }
         
         for row, member in enumerate(self._model.members):
@@ -179,7 +188,10 @@ class CalculationTableWidget(QWidget):
             
             # Данные профиля
             if member.profile_data:
-                profile_name = member.profile_data.get('designation', 'Не задано')
+                profile_type = member.profile_data.get('type', '')
+                type_name = profile_type_names.get(profile_type, profile_type)
+                designation = member.profile_data.get('designation', 'Не задано')
+                profile_name = f"{type_name} {designation}" if type_name else designation
                 standard = member.profile_data.get('standard', 'Не задано')
                 A = member.profile_data.get('A', 0.0)
                 Ix = member.profile_data.get('Ix', 0.0)

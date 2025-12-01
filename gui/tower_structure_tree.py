@@ -23,6 +23,14 @@ from PyQt6.QtWidgets import (
 from core.tower_generator import TowerBlueprintV2, TowerSegmentSpec, TowerSectionSpec
 from core.structure.model import MemberType
 
+# Словарь русских названий типов профилей
+PROFILE_TYPE_NAMES = {
+    "pipe": "Труба",
+    "angle": "Уголок",
+    "channel": "Швеллер",
+    "i_beam": "Двутавр",
+}
+
 
 class TowerStructureTreeWidget(QWidget):
     """
@@ -48,8 +56,8 @@ class TowerStructureTreeWidget(QWidget):
     def _setup_ui(self) -> None:
         """Настройка интерфейса дерева."""
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(4, 4, 4, 4)
-        layout.setSpacing(4)
+        layout.setContentsMargins(6, 6, 6, 6)
+        layout.setSpacing(6)
         
         # Заголовок
         header = QHBoxLayout()
@@ -194,7 +202,8 @@ class TowerStructureTreeWidget(QWidget):
         leg_item = QTreeWidgetItem()
         leg_item.setText(0, "Пояса")
         leg_item.setText(1, "Элементы")
-        leg_item.setText(2, leg_profile or "Не задано")
+        leg_display = self._get_profile_display_name(leg_profile) if leg_profile else None
+        leg_item.setText(2, leg_display or "Не задано")
         leg_item.setData(0, Qt.ItemDataRole.UserRole, {
             "type": self.TYPE_ELEMENT,
             "element_type": MemberType.LEG,
@@ -208,7 +217,8 @@ class TowerStructureTreeWidget(QWidget):
         brace_item = QTreeWidgetItem()
         brace_item.setText(0, "Раскосы")
         brace_item.setText(1, "Элементы")
-        brace_item.setText(2, brace_profile or "Не задано")
+        brace_display = self._get_profile_display_name(brace_profile) if brace_profile else None
+        brace_item.setText(2, brace_display or "Не задано")
         brace_item.setData(0, Qt.ItemDataRole.UserRole, {
             "type": self.TYPE_ELEMENT,
             "element_type": MemberType.BRACE,
@@ -222,7 +232,8 @@ class TowerStructureTreeWidget(QWidget):
         strut_item = QTreeWidgetItem()
         strut_item.setText(0, "Распорки")
         strut_item.setText(1, "Элементы")
-        strut_item.setText(2, strut_profile or "Не задано")
+        strut_display = self._get_profile_display_name(strut_profile) if strut_profile else None
+        strut_item.setText(2, strut_display or "Не задано")
         strut_item.setData(0, Qt.ItemDataRole.UserRole, {
             "type": self.TYPE_ELEMENT,
             "element_type": MemberType.STRUT,
@@ -238,19 +249,42 @@ class TowerStructureTreeWidget(QWidget):
             return None
         
         parts = []
-        if profile_spec.get("leg_profile") and profile_spec["leg_profile"] != "Не задано":
-            parts.append(f"Пояса: {self._get_profile_display_name(profile_spec['leg_profile'])}")
-        if profile_spec.get("brace_profile") and profile_spec["brace_profile"] != "Не задано":
-            parts.append(f"Раскосы: {self._get_profile_display_name(profile_spec['brace_profile'])}")
+        leg_profile = profile_spec.get("leg_profile")
+        if leg_profile and leg_profile != "Не задано":
+            leg_display = self._get_profile_display_name(leg_profile)
+            parts.append(f"Пояса: {leg_display}")
+        brace_profile = profile_spec.get("brace_profile")
+        if brace_profile and brace_profile != "Не задано":
+            brace_display = self._get_profile_display_name(brace_profile)
+            parts.append(f"Раскосы: {brace_display}")
         
         return ", ".join(parts) if parts else None
     
     def _get_profile_display_name(self, profile_name: Optional[str]) -> Optional[str]:
-        """Получить отображаемое имя профиля."""
+        """Получить отображаемое имя профиля с русским названием типа."""
         if not profile_name or profile_name == "Не задано":
             return None
-        # Если это уже полное имя (тип + обозначение + стандарт), вернуть как есть
-        return profile_name
+        
+        # Парсинг формата "type designation (standard)" или "Труба designation (standard)"
+        try:
+            if "(" in profile_name:
+                parts = profile_name.split("(")
+                type_and_designation = parts[0].strip()
+                standard = parts[1].rstrip(")").strip()
+                
+                # Проверить, есть ли уже русское название
+                type_parts = type_and_designation.split(" ", 1)
+                if len(type_parts) >= 2:
+                    type_part = type_parts[0]
+                    designation = type_parts[1]
+                    
+                    # Если тип на английском, заменить на русский
+                    if type_part in PROFILE_TYPE_NAMES:
+                        return f"{PROFILE_TYPE_NAMES[type_part]} {designation} ({standard})"
+            
+            return profile_name
+        except:
+            return profile_name
     
     def _on_selection_changed(self) -> None:
         """Обработка изменения выбора в дереве."""

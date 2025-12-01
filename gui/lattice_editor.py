@@ -50,12 +50,26 @@ class LatticeEditorWidget(QWidget):
         # Fetch pipes and angles from DB
         pipes = self.profile_manager.get_profiles_by_type("pipe")
         angles = self.profile_manager.get_profiles_by_type("angle")
+        channels = self.profile_manager.get_profiles_by_type("channel")
+        
+        # Словарь русских названий
+        type_names = {
+            "pipe": "Труба",
+            "angle": "Уголок",
+            "channel": "Швеллер",
+            "i_beam": "Двутавр",
+        }
         
         items = ["Не задано"]
         for p in pipes:
-            items.append(f"{p['type']} {p['designation']} ({p['standard']})")
+            type_name = type_names.get(p['type'], p['type'])
+            items.append(f"{type_name} {p['designation']} ({p['standard']})")
         for a in angles:
-            items.append(f"{a['type']} {a['designation']} ({a['standard']})")
+            type_name = type_names.get(a['type'], a['type'])
+            items.append(f"{type_name} {a['designation']} ({a['standard']})")
+        for c in channels:
+            type_name = type_names.get(c['type'], c['type'])
+            items.append(f"{type_name} {c['designation']} ({c['standard']})")
             
         self.leg_profile_combo.addItems(items)
         self.brace_profile_combo.addItems(items)
