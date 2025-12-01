@@ -37,6 +37,7 @@ from gui.tower_builder_wizard import TowerBuilderWizard
 from gui.lattice_editor import LatticeEditorWidget
 from gui.equipment_editor import EquipmentEditorWidget
 from gui.calculation_tab import CalculationTab
+from gui.unified_tower_builder_panel import UnifiedTowerBuilderPanel
 
 
 class TowerBuilderPanel(QWidget):
@@ -69,6 +70,10 @@ class TowerBuilderPanel(QWidget):
         # key: part_index, value: dict (lattice_type, profile_spec)
         self._part_lattice_specs: Dict[int, Dict] = {}
         
+        # Режим работы: 'tabs' (вкладки) или 'unified' (единая панель)
+        self._mode = 'tabs'
+        self._unified_panel: Optional[UnifiedTowerBuilderPanel] = None
+        
         self._setup_ui()
         self._reset_parts()
         self._refresh_template_combo()
@@ -78,6 +83,28 @@ class TowerBuilderPanel(QWidget):
         main_layout = QVBoxLayout(self)
         main_layout.setContentsMargins(0, 0, 0, 0)
         
+        # Панель переключения режимов
+        mode_layout = QHBoxLayout()
+        mode_layout.setContentsMargins(4, 4, 4, 4)
+        
+        mode_label = QLabel("Режим конструктора:")
+        mode_layout.addWidget(mode_label)
+        
+        self.mode_combo = QComboBox()
+        self.mode_combo.addItem("Вкладки (классический)", "tabs")
+        self.mode_combo.addItem("Единая панель (новый)", "unified")
+        self.mode_combo.currentIndexChanged.connect(self._on_mode_changed)
+        mode_layout.addWidget(self.mode_combo)
+        
+        mode_layout.addStretch()
+        main_layout.addLayout(mode_layout)
+        
+        # Контейнер для панелей
+        self.panel_container = QWidget()
+        panel_container_layout = QVBoxLayout(self.panel_container)
+        panel_container_layout.setContentsMargins(0, 0, 0, 0)
+        
+        # Старый режим: вкладки
         self.tabs = QTabWidget()
         
         # Tab 1: Geometry
@@ -97,12 +124,18 @@ class TowerBuilderPanel(QWidget):
         self.calculation_tab = CalculationTab()
         self.tabs.addTab(self.calculation_tab, "Расчет нагрузки")
         
-        main_layout.addWidget(self.tabs)
-
-        # Generate Button (Global)
+        panel_container_layout.addWidget(self.tabs)
+        self.panel_container.setLayout(panel_container_layout)
+        
+        main_layout.addWidget(self.panel_container, stretch=1)
+        
+        # Кнопка построения (для режима вкладок)
         self.generate_btn = QPushButton("Построить башню")
         self.generate_btn.clicked.connect(self._emit_blueprint)
         main_layout.addWidget(self.generate_btn)
+        
+        # Инициализировать режим
+        self._on_mode_changed()
 
     def _setup_geometry_ui(self, parent_widget: QWidget) -> None:
         layout = QVBoxLayout(parent_widget)
@@ -950,6 +983,11 @@ class TowerBuilderPanel(QWidget):
         return blueprint
 
     def set_blueprint(self, blueprint: Optional[TowerBlueprintV2]) -> None:
+        """Установить чертеж башни."""
+        if self._mode == 'unified' and self._unified_panel:
+            self._unified_panel.set_blueprint(blueprint)
+            return
+        
         if not blueprint:
             self._reset_parts()
             return
@@ -1210,6 +1248,47 @@ class TowerBuilderPanel(QWidget):
             self.statusMessage.emit("Конфигурация из мастера применена.")
 
     # ------------------------------------------------------------------ summary
+    def _on_mode_changed(self) -> None:
+        """Обработка изменения режима конструктора."""
+        new_mode = self.mode_combo.currentData()
+        if new_mode == self._mode:
+            return
+        
+        # Сохранить текущий чертеж
+        current_blueprint = None
+        try:
+            current_blueprint = self.build_blueprint()
+        except:
+            pass
+        
+        # Удалить старую панель
+        layout = self.panel_container.layout()
+        if self._mode == 'unified' and self._unified_panel:
+            layout.removeWidget(self._unified_panel)
+            self._unified_panel.setParent(None)
+            self._unified_panel = None
+        elif self._mode == 'tabs':
+            layout.removeWidget(self.tabs)
+            self.generate_btn.setVisible(True)
+        
+        # Добавить новую панель
+        self._mode = new_mode
+        if new_mode == 'unified':
+            self._unified_panel = UnifiedTowerBuilderPanel()
+            self._unified_panel.blueprintRequested.connect(self.blueprintRequested.emit)
+            self._unified_panel.statusMessage.connect(self.statusMessage.emit)
+            layout.addWidget(self._unified_panel)
+            self.generate_btn.setVisible(False)
+            
+            if current_blueprint:
+                self._unified_panel.set_blueprint(current_blueprint)
+        else:
+            layout.addWidget(self.tabs)
+            self.generate_btn.setVisible(True)
+            
+            if current_blueprint:
+                self.set_blueprint(current_blueprint)
+    
     def _update_summary(self) -> None:
         segments = self._collect_segments()
         total_height = sum(data["height"] for data in segments)
