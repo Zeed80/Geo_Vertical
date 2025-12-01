@@ -1,0 +1,120 @@
+{
+  "title": "35м_3ч_пир_пр_пр",
+  "segments": [
+    {
+      "name": "Часть 1",
+      "shape": "truncated_pyramid",
+      "faces": 4,
+      "height": 14.0,
+      "levels": 4,
+      "base_size": 2.414,
+      "top_size": 1.44,
+      "sections": [
+        {
+          "name": "Нижняя",
+          "height": 0.0,
+          "deviation_x_mm": 0.0,
+          "deviation_y_mm": -0.0
+        },
+        {
+          "name": "Секция 2",
+          "height": 3.5,
+          "deviation_x_mm": 0.9705641689701919,
+          "deviation_y_mm": -0.05053366732088004
+        },
+        {
+          "name": "Секция 3",
+          "height": 3.5,
+          "deviation_x_mm": 0.0,
+          "deviation_y_mm": 0.0
+        },
+        {
+          "name": "Секция 4",
+          "height": 3.5,
+          "deviation_x_mm": 0.0,
+          "deviation_y_mm": 0.0
+        },
+        {
+          "name": "Верхняя",
+          "height": 3.5,
+          "deviation_x_mm": 0.9428337641424722,
+          "deviation_y_mm": -0.04908984825456919
+        }
+      ]
+    },
+    {
+      "name": "Часть 2",
+      "shape": "prism",
+      "faces": 4,
+      "height": 13.6,
+      "levels": 4,
+      "base_size": 1.44,
+      "top_size": 1.44,
+      "sections": [
+        {
+          "name": "Нижняя",
+          "height": 0.0,
+          "deviation_x_mm": -0.0,
+          "deviation_y_mm": 0.0
+        },
+        {
+          "name": "Секция 2",
+          "height": 3.4,
+          "deviation_x_mm": 0.0,
+          "deviation_y_mm": 0.0
+        },
+        {
+          "name": "Секция 3",
+          "height": 3.4,
+          "deviation_x_mm": 0.0,
+          "deviation_y_mm": 0.0
+        },
+        {
+          "name": "Секция 4",
+          "height": 3.4,
+          "deviation_x_mm": 0.0,
+          "deviation_y_mm": 0.0
+        },
+        {
+          "name": "Верхняя",
+          "height": 3.4000000000000004,
+          "deviation_x_mm": -1.3786071127099842,
+          "deviation_y_mm": 0.30409326692233085
+        }
+      ]
+    },
+    {
+      "name": "Часть 3",
+      "shape": "prism",
+      "faces": 4,
+      "height": 7.0,
+      "levels": 4,
+      "base_size": 1.44,
+      "top_size": 1.44,
+      "sections": [
+        {
+          "name": "Нижняя",
+          "height": 0.0,
+          "deviation_x_mm": 0.0,
+          "deviation_y_mm": -0.0
+        },
+        {
+          "name": "Секция 2",
+          "height": 3.5,
+          "deviation_x_mm": 2.13553410826189,
+          "deviation_y_mm": -0.4505059896838532
+        },
+        {
+          "name": "Верхняя",
+          "height": 3.5,
+          "deviation_x_mm": 2.13553410826189,
+          "deviation_y_mm": -0.4505059896838532
+        }
+      ]
+    }
+  ],
+  "distance": 54.32,
+  "angle": -126.5,
+  "instrument_height": 1.62,
+  "rotation": 1.6
+}

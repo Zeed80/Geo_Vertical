@@ -1,0 +1,41 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<TrimbleAccessLauncher>
+  <Applications>
+    <Application>
+      <Name>General Survey</Name>
+      <IsVisible>true</IsVisible>
+    </Application>
+    <Application>
+      <Name>Equip Manager</Name>
+      <IsVisible>true</IsVisible>
+    </Application>
+    <Application>
+      <Name>AccessSync</Name>
+      <IsVisible>true</IsVisible>
+    </Application>
+    <Application>
+      <Name>Settings</Name>
+      <IsVisible>true</IsVisible>
+    </Application>
+    <Application>
+      <Name>Internet Setup</Name>
+      <IsVisible>true</IsVisible>
+    </Application>
+    <Application>
+      <Name>Files</Name>
+      <IsVisible>true</IsVisible>
+    </Application>
+    <Application>
+      <Name>Internet</Name>
+      <IsVisible>true</IsVisible>
+    </Application>
+    <Application>
+      <Name>Remote Support</Name>
+      <IsVisible>true</IsVisible>
+    </Application>
+    <Application>
+      <Name>Market Place</Name>
+      <IsVisible>true</IsVisible>
+    </Application>
+  </Applications>
+</TrimbleAccessLauncher>

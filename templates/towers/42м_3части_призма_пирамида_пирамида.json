@@ -1,0 +1,78 @@
+{
+  "title": "42м_3части_призма_пирамида_пирамида",
+  "segments": [
+    {
+      "name": "Часть 1",
+      "shape": "truncated_pyramid",
+      "faces": 4,
+      "height": 20.8,
+      "levels": 4,
+      "base_size": 2.914,
+      "top_size": 1.44,
+      "sections": [
+        {
+          "name": "Нижняя",
+          "height": 0.0,
+          "deviation_x_mm": 0.0,
+          "deviation_y_mm": 0.0
+        },
+        {
+          "name": "Верхняя",
+          "height": 20.8,
+          "deviation_x_mm": 0.0,
+          "deviation_y_mm": 0.0
+        }
+      ]
+    },
+    {
+      "name": "Часть 2",
+      "shape": "prism",
+      "faces": 4,
+      "height": 13.6,
+      "levels": 4,
+      "base_size": 1.44,
+      "top_size": 1.44,
+      "sections": [
+        {
+          "name": "Нижняя",
+          "height": 0.0,
+          "deviation_x_mm": 0.0,
+          "deviation_y_mm": 0.0
+        },
+        {
+          "name": "Верхняя",
+          "height": 13.6,
+          "deviation_x_mm": 0.0,
+          "deviation_y_mm": 0.0
+        }
+      ]
+    },
+    {
+      "name": "Часть 3",
+      "shape": "prism",
+      "faces": 4,
+      "height": 7.0,
+      "levels": 4,
+      "base_size": 1.44,
+      "top_size": 1.44,
+      "sections": [
+        {
+          "name": "Нижняя",
+          "height": 0.0,
+          "deviation_x_mm": 0.0,
+          "deviation_y_mm": 0.0
+        },
+        {
+          "name": "Верхняя",
+          "height": 7.0,
+          "deviation_x_mm": 0.0,
+          "deviation_y_mm": 0.0
+        }
+      ]
+    }
+  ],
+  "distance": 61.24,
+  "angle": 0.0,
+  "instrument_height": 1.69,
+  "rotation": 1.2
+}

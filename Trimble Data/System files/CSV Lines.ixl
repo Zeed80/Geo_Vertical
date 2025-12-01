@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<ImportFormat version="1.0">
+  <FormatType>CSV</FormatType>                            <!-- Options are CSV or Fixed -->
+  <EntityType>Line</EntityType>                           <!-- Options are Point or Line -->
+  <CommaAsDecimalSeparator>No</CommaAsDecimalSeparator>   <!-- Options are Yes or No -->
+  <FileSpecification>*.csv</FileSpecification>
+  <HeaderLinesToSkip>0</HeaderLinesToSkip>
+  <Fields>
+    <LineName>
+      <Component>
+        <CSVField>1</CSVField>
+        <Suffix>-</Suffix>
+      </Component>
+      <Component>
+        <CSVField>2</CSVField>
+      </Component>
+    </LineName>
+
+    <StartPointName>
+      <CSVField>1</CSVField>
+    </StartPointName>
+
+    <EndPointName>
+      <CSVField>2</CSVField>
+    </EndPointName>
+
+    <StartStation>
+      <CSVField>3</CSVField>
+    </StartStation>
+
+    <StationInterval>
+      <CSVField>4</CSVField>
+    </StationInterval>
+  </Fields>
+</ImportFormat>

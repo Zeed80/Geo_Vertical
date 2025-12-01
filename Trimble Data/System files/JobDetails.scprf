@@ -1,0 +1,55 @@
+
+% The following are the form definitions providing specific control on the job properties.
+
+% The settable options for a Form definition are as follow:
+% Form formName [itemName] [HideAll] [Title="text"]
+% This statement customizes the fields on the form as given by formName. If itemName is not given then the 
+% modifications apply to all forms of this name, however the form is invoked. This is known as a globally 
+% customized form. If itemName is supplied then only forms displayed as a result of choosing the itemName 
+% menu item will be modified - known as a specifically customized form.
+% An alternate title may be given, and is displayed in the caption bar at the top of the form. Using HideAll 
+% hides all fields on the form and Field statements must be used to show the fields that are required.  If 
+% HideAll is omitted, then all fields are shown by default, and fields may be removed by using Field statements 
+% with the Show=No parameter.
+% A Form statement is followed by a series of Field statements and finally an End statement.
+
+% The settable options for a Field definition are as follow:
+% Field fieldName [Value="text"] [Prompt="text"] [Readonly=Yes] [Show=Yes|No] [MustEnter=Yes|No]
+%   Specifies a field to be modified.
+%   Value is optional and supplies a default value for the field (placed in the field when the form is displayed).
+%   Prompt is optional and modifies the field prompt to the given text.
+%   Specifying Readonly=Yes prevents the contents of the field from being changed.
+%   Show is used to display (Yes) or hide (No) the field.  The default is Show=Yes.
+%   MustEnter is used to specify whether or not a field must have text entered into it. The default is MustEnter=No.
+%   Note: Care must be taken to ensure that an impossible situation is not created eg. Setting MustEnter to Yes
+%         and Show to No or ReadOnly to Yes with no default value supplied creates a situation where the form 
+%         cannot be completed because there is a required field not completed, but the field is not displayed or not
+%         editable so it is not possible to enter anything into it. 
+
+Form JobDetailsTitleProp
+  Field JobDetailsReference MustEnter=No
+  Field JobDetailsDescription MustEnter=No
+  Field JobDetailsOperator MustEnter=No
+  Field MenuNotes MustEnter=No
+End
+
+Form JobDetailsTitleNew
+  Field JobDetailsReference MustEnter=No
+  Field JobDetailsDescription MustEnter=No
+  Field JobDetailsOperator MustEnter=No
+  Field MenuNotes MustEnter=No
+End
+
+Form JobTemplateProperties
+  Field JobDetailsReference MustEnter=No
+  Field JobDetailsDescription MustEnter=No
+  Field JobDetailsOperator MustEnter=No
+  Field MenuNotes MustEnter=No
+End
+
+Form JobNewTemplate
+  Field JobDetailsReference MustEnter=No
+  Field JobDetailsDescription MustEnter=No
+  Field JobDetailsOperator MustEnter=No
+  Field MenuNotes MustEnter=No
+End

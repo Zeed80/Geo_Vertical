@@ -1,0 +1,789 @@
+﻿<?xml version="1.0" encoding="UTF-8"?>
+<serviceproviders>
+  <!-- Copyright Trimble Inc. 2017 -->
+  <!--         All rights reserved            -->
+  <version format="1.1" modifiedDateUTCInvariant="01/17/2014" createdDateUTCInvariant="01/17/2014" />
+  <location name="Albania" code="AL" mobilecountrycode="276">
+    <provider name="Vodafone" mobilenetworkcodes="276 2">
+      <plan name="default" apn="vodadoneweb" dialstring="*99***1#" />
+    </provider>
+  </location>
+  <location name="Argentina" code="AR" mobilecountrycode="722">
+    <provider name="Claro" mobilenetworkcodes="722 310, 722 320, 722 330">
+      <plan name="default" apn="igprs.claro.com.ar" username="clarogprs" password="clarogprs999" />
+    </provider>
+    <provider name="Movistar" mobilenetworkcodes="722 10, 722 70">
+      <plan name="default" apn="internet" username="internet" password="internet" />
+    </provider>
+    <provider name="Personal" mobilenetworkcodes="722 340">
+      <plan name="default" apn="gprs.personal.com" username="gprs" password="adgj" />
+    </provider>
+  </location>
+  <location name="Australia" code="AU" mobilecountrycode="505">
+    <provider name="3" mobilenetworkcodes="505 12">
+      <plan name="default" apn="3netaccess" />
+    </provider>
+    <provider name="Optus" mobilenetworkcodes="505 2, 505 90">
+      <plan name="2G" apn="internet" />
+      <plan name="3G" apn="connect" />
+    </provider>
+    <provider name="Telstra" mobilenetworkcodes="505 1, 505 71, 505 72">
+      <plan name="2G" apn="telstra.internet" />
+      <plan name="Next G" apn="telstra.internet" />
+      <plan name="3G" apn="telstra.datapack" password="Telstra" />
+      <plan name="3G data bundles" apn="telstra.pcpack" password="Telstra" />
+      <plan name="3G prepay" apn="telstra.wap" password="Telstra" />
+    </provider>
+    <provider name="Virgin Mobile" mobilenetworkcodes="505 2, 505 90">
+      <plan name="default" apn="VirginInternet" />
+    </provider>
+    <provider name="Vodafone" mobilenetworkcodes="505 3, 505 6">
+      <plan name="default" apn="vfinternet.au" />
+    </provider>
+  </location>
+  <location name="Austria" code="AT" mobilecountrycode="232">
+    <provider name="3" mobilenetworkcodes="232 10, 232 14, 232 16">
+      <plan name="default" apn="drei.at" />
+    </provider>
+    <provider name="A1" mobilenetworkcodes="232 1">
+      <plan name="default" apn="a1.net" username="ppp@a1plus.at" password="ppp" />
+    </provider>
+    <provider name="Orange" mobilenetworkcodes="232 5">
+      <plan name="default" apn="wap.one.at" />
+    </provider>
+    <provider name="T-Mobile" mobilenetworkcodes="232 3">
+      <plan name="default" apn="gprsinternet" username="gprs" />
+      <plan name="default" apn="business.gprsinternet" />
+    </provider>
+    <provider name="Yesss" mobilenetworkcodes="232 12">
+      <plan name="default" apn="web.yesss.at" />
+    </provider>
+  </location>
+  <location name="Bahrain" code="BH" mobilecountrycode="426">
+    <provider name="Batelco" mobilenetworkcodes="426 1">
+      <plan name="default" apn="internet.batelco.com" username="wap" password="wap" />
+    </provider>
+  </location>
+  <location name="Belgium" code="BE" mobilecountrycode="206">
+    <provider name="Mobistar" mobilenetworkcodes="206 10">
+      <plan name="Business" apn="web.pro.be" username="mobistar" password="mobistar" />
+      <plan name="Personal" apn="internet.be" username="mobistar" password="mobistar" />
+    </provider>
+    <provider name="Proximus" mobilenetworkcodes="206 1">
+      <plan name="default" apn="internet.proximus.be" />
+    </provider>
+  </location>
+  <location name="Bosnia i Herzegovina" code="BA" mobilecountrycode="218">
+    <provider name="BH Telecom" mobilenetworkcodes="218 90">
+      <plan name="default" apn="active.bhmobile.ba" dialstring="*99***1#" />
+    </provider>
+    <provider name="Eronet" mobilenetworkcodes="218 3">
+      <plan name="default" apn="gprs.eronet.ba" dialstring="*99***1#" />
+    </provider>
+    <provider name="m:tel" mobilenetworkcodes="218 5">
+      <plan name="default" apn="mtelgprs1" dialstring="*99***1#" />
+      <plan name="mtelgprs2" apn="mtelgprs2" dialstring="*99***1#" />
+      <plan name="mtelgprs3" apn="mtelgprs3" dialstring="*99***1#" />
+      <plan name="mtelgprs4" apn="mtelgprs4" dialstring="*99***1#" />
+      <plan name="mtelsfun" apn="mtelsfun" dialstring="*99***1#" />
+    </provider>
+  </location>
+  <location name="Brazil" code="BR" mobilecountrycode="724">
+    <provider name="Claro" mobilenetworkcodes="724 5">
+      <plan name="default" apn="claro.com.br" username="claro" password="claro" />
+    </provider>
+    <provider name="Oi" mobilenetworkcodes="724 16, 724 24, 724 31">
+      <plan name="default" apn="gprs.oi.com.br" username="oi" password="oi" />
+    </provider>
+    <provider name="TIM" mobilenetworkcodes="724 2, 724 3, 724 4">
+      <plan name="default" apn="tim.br" username="tim" password="tim" />
+    </provider>
+    <provider name="Vivo" mobilenetworkcodes="724 10, 724 11, 724 23, 724 6">
+      <plan name="default" apn="zap.vivo.com.br" username="vivo" password="vivo" />
+    </provider>
+  </location>
+  <location name="Brunei" code="BN" mobilecountrycode="528">
+    <provider name="DSTCom" mobilenetworkcodes="528 11">
+      <plan name="default" apn="dst.internet" username="internet" password="internet" />
+    </provider>
+  </location>
+  <location name="Bulgaria" code="BG" mobilecountrycode="284">
+    <provider name="Globul" mobilenetworkcodes="284 5">
+      <plan name="default" apn="globul" dialstring="*99#" username="globul" />
+    </provider>
+    <provider name="Mtel" mobilenetworkcodes="284 1">
+      <plan name="default" apn="inet-gprs.mtel.bg" dialstring="*99***1#" />
+    </provider>
+    <provider name="Vivacom" mobilenetworkcodes="284 3">
+      <plan name="default" apn="internet.vivatel.bg" dialstring="*99#" username="vivatel" password="vivatel" />
+    </provider>
+  </location>
+  <location name="Canada" code="CA" mobilecountrycode="302">
+    <provider name="Microcell (Fido)" mobilenetworkcodes="302 370">
+      <plan name="default" apn="internet.fido.ca" username="fido" password="fido" />
+    </provider>
+    <provider name="Rogers AT&amp;T" mobilenetworkcodes="302 720">
+      <plan name="default" apn="internet.com" username="wapuser1" password="wap" />
+    </provider>
+  </location>
+  <location name="Chile" code="CL" mobilecountrycode="730">
+    <provider name="Claro" mobilenetworkcodes="730 3">
+      <plan name="default" apn="bam.clarochile.cl" username="clarochile" password="clarochile" />
+    </provider>
+    <provider name="Entel PCS" mobilenetworkcodes="730 1, 730 10">
+      <plan name="default" apn="imovil.entelpcs.cl" username="entelpcs" password="entelpcs" />
+    </provider>
+    <provider name="Movistar" mobilenetworkcodes="730 2">
+      <plan name="default" apn="web.tmovil.cl" />
+    </provider>
+  </location>
+  <location name="China" code="CN" mobilecountrycode="460">
+    <provider name="China Mobile" mobilenetworkcodes="460 0, 460 2">
+      <plan name="default" apn="cmnet" dialstring="*99#" />
+    </provider>
+    <provider name="China Telecom" mobilenetworkcodes="460 3, 460 5">
+      <plan name="default" dialstring="#777" username="card" password="card" />
+    </provider>
+    <provider name="China Unicom" mobilenetworkcodes="460 1, 460 6">
+      <plan name="default" apn="3gnet" dialstring="*99#" />
+    </provider>
+  </location>
+  <location name="Colombia" code="CO" mobilecountrycode="732">
+    <provider name="COMCEL" mobilenetworkcodes="732 101">
+      <plan name="default" apn="internet.comcel.com.co" username="COMCELWEB" password="COMCELWEB" />
+    </provider>
+    <provider name="Movistar" mobilenetworkcodes="732 102, 732 12">
+      <plan name="default" apn="internet.movistar.com.co" username="movistar" password="movistar" />
+    </provider>
+  </location>
+  <location name="Croatia" code="HR" mobilecountrycode="219">
+    <provider name="T-Mobile" mobilenetworkcodes="219 1">
+      <plan name="default" apn="web.htgprs" dialstring="*99***1#" />
+    </provider>
+    <provider name="VIPnet" mobilenetworkcodes="219 10">
+      <plan name="default" apn="data.vip.hr" dialstring="*99***1#" />
+    </provider>
+  </location>
+  <location name="Cyprus" code="CY" mobilecountrycode="280">
+    <provider name="Cytamobile-Vodafone" mobilenetworkcodes="280 1">
+      <plan name="default" apn="internet" />
+    </provider>
+  </location>
+  <location name="Czech Republic" code="CZ" mobilecountrycode="230">
+    <provider name="O2" mobilenetworkcodes="230 2">
+      <plan name="Prepay" apn="cinternet" />
+      <plan name="default" apn="internet" dialstring="*99***1#" />
+      <plan name="Go" apn="gointernet" />
+    </provider>
+    <provider name="T-Mobile" mobilenetworkcodes="230 1">
+      <plan name="default" apn="internet.t-mobile.cz" dialstring="*99***1#" />
+    </provider>
+    <provider name="Vodafone" mobilenetworkcodes="230 3, 230 99">
+      <plan name="Contract" apn="internet" />
+      <plan name="Prepay" apn="ointernet" />
+    </provider>
+  </location>
+  <location name="Denmark" code="DK" mobilecountrycode="238">
+    <provider name="TDCmobil" mobilenetworkcodes="238 1, 238 10">
+      <plan name="default" apn="internet" />
+    </provider>
+  </location>
+  <location name="Dominican Republic" code="DO" mobilecountrycode="370">
+    <provider name="Orange Dominicana" mobilenetworkcodes="370 1">
+      <plan name="default" apn="orangenet.com.do" />
+    </provider>
+  </location>
+  <location name="Egypt" code="EG" mobilecountrycode="602">
+    <provider name="Vodafone" mobilenetworkcodes="602 2">
+      <plan name="default" apn="internet.vodafone.net" />
+    </provider>
+  </location>
+  <location name="Estonia" code="EE" mobilecountrycode="248">
+    <provider name="Elisa" mobilenetworkcodes="248 2">
+      <plan name="default" apn="internet" />
+    </provider>
+    <provider name="EMT" mobilenetworkcodes="248 1">
+      <plan name="default" apn="internet.emt.ee" />
+    </provider>
+    <provider name="Tele2" mobilenetworkcodes="248 3">
+      <plan name="default" apn="internet.tele2.ee" />
+    </provider>
+  </location>
+  <location name="Fiji" code="FJ" mobilecountrycode="542">
+    <provider name="Digicel" mobilenetworkcodes="542 2">
+      <plan name="default" apn="web.digicelpacific.com" />
+    </provider>
+    <provider name="Vodafone" mobilenetworkcodes="542 1">
+      <plan name="default" apn="vfinternet.fj" />
+    </provider>
+  </location>
+  <location name="Finland" code="FI" mobilecountrycode="244">
+    <provider name="DNA" mobilenetworkcodes="244 12, 244 3">
+      <plan name="default" apn="internet" />
+    </provider>
+    <provider name="Saunalahti" mobilenetworkcodes="244 21">
+      <plan name="default" apn="saunalahti" />
+    </provider>
+    <provider name="Sonera" mobilenetworkcodes="244 91">
+      <plan name="default" apn="internet" />
+    </provider>
+  </location>
+  <location name="France" code="FR" mobilecountrycode="208">
+    <provider name="Bouygues Telecom" mobilenetworkcodes="208 20, 208 21, 208 88">
+      <plan name="default" apn="ebouygtel.com" />
+      <plan name="contract" apn="a2bouygtel.com" username="a2b" password="access" />
+    </provider>
+    <provider name="Orange" mobilenetworkcodes="208 0, 208 1, 208 2">
+      <plan name="default" apn="internet-entreprise" />
+      <plan name="contract" apn="orange.fr" />
+    </provider>
+    <provider name="SFR" mobilenetworkcodes="208 10, 208 11, 208 13">
+      <plan name="default" apn="websfr" />
+    </provider>
+  </location>
+  <location name="Germany" code="DE" mobilecountrycode="262">
+    <provider name="D2 Vodafone" mobilenetworkcodes="262 2, 262 9">
+      <plan name="default" apn="web.vodafone.de" />
+    </provider>
+    <provider name="E-Plus" mobilenetworkcodes="262 3, 262 5, 262 77">
+      <plan name="default" apn="internet.eplus.de" username="eplus" password="gprs" />
+    </provider>
+    <provider name="O2" mobilenetworkcodes="262 11, 262 7, 262 8">
+      <plan name="default" apn="internet" />
+      <plan name="contract" apn="surfo2" />
+      <plan name="prepaid" apn="pinternet.interkom.de" />
+    </provider>
+    <provider name="T-Mobile" mobilenetworkcodes="262 1, 262 6">
+      <plan name="default" apn="internet.t-mobile" username="t-mobile" password="tm" />
+      <plan name="T-Mobile" apn="internet.t-mobile" username="t-mobile" password="tm" />
+      <plan name="D1" apn="internet.t-d1.de" username="t-mobile" password="tm" />
+      <plan name="M2M-2" apn="internet.m2mportal.de" username="m2m" password="sim" />
+      <plan name="M2M-1" apn="m2m-net2.sa.t-mobile" username="m2m" password="sim" />        
+    </provider>
+    <provider name="Vodafone" mobilenetworkcodes="262 2, 262 4, 262 9">
+      <plan name="default" apn="web.vodafone.de" />
+    </provider>
+  </location>
+  <location name="Greece" code="GR" mobilecountrycode="202">
+    <provider name="Cosmote" mobilenetworkcodes="202 1">
+      <plan name="default" apn="internet" />
+    </provider>
+    <provider name="Vodafone" mobilenetworkcodes="202 5">
+      <plan name="default" apn="internet.vodafone.gr" />
+    </provider>
+    <provider name="Wind" mobilenetworkcodes="202 10, 202 9">
+      <plan name="default" apn="gint.b-online.gr" />
+    </provider>
+  </location>
+  <location name="Hong Kong" code="HK" mobilecountrycode="454">
+    <provider name="3" mobilenetworkcodes="454 14, 454 3, 454 4">
+      <plan name="default" apn="mobile.three.com.hk" />
+    </provider>
+    <provider name="CMCC HK" mobilenetworkcodes="454 12">
+      <plan name="default" apn="internet" />
+    </provider>
+    <provider name="CSL" mobilenetworkcodes="454 0, 454 18, 454 2">
+      <plan name="default" apn="internet" />
+    </provider>
+    <provider name="PCCW Mobile" mobilenetworkcodes="454 16, 454 19, 454 29">
+      <plan name="default" apn="internet" />
+    </provider>
+    <provider name="SmarTone" mobilenetworkcodes="454 15, 454 17, 454 6">
+      <plan name="default" apn="internet" />
+    </provider>
+  </location>
+  <location name="Hungary" code="HU" mobilecountrycode="216">
+    <provider name="Telenor" mobilenetworkcodes="216 20">
+      <plan name="default" apn="net " dialstring="*99***1#" />
+    </provider>
+    <provider name="T-Mobile" mobilenetworkcodes="216 30">
+      <plan name="default" apn="internet" dialstring="*99***1#" />
+    </provider>
+    <provider name="Vodafone" mobilenetworkcodes="216 70">
+      <plan name="Postpaid &quot;Optimized&quot;" apn="internet.vodafone.net" />
+      <plan name="Postpaid &quot;Standard&quot;" apn="standardnet.vodafone.net" />
+      <plan name="default" apn="vodafone.internet " dialstring="*99***1#" />
+      <plan name="Prepaid &quot;Optimized&quot;" apn="vitamax.internet.vodafone.net" />
+      <plan name="Prepaid &quot;Standard&quot;" apn="vitamax.snet.vodafone.net" />
+    </provider>
+  </location>
+  <location name="Iceland" code="IS" mobilecountrycode="274">
+    <provider name="Siminn" mobilenetworkcodes="274 1">
+      <plan name="default" apn="gprs.simi.is" />
+    </provider>
+  </location>
+  <location name="India" code="IN" mobilecountrycode="404, 405">
+    <provider name="AirTel" mobilenetworkcodes="404 10, 404 2, 404 31, 404 45, 404 90, 404 92, 404 93, 404 96, 405 51, 405 52, 405 54, 405 56">
+      <plan name="default" apn="airtelgprs.com" />
+    </provider>
+    <provider name="BPL Mobile" mobilenetworkcodes="404 21">
+      <plan name="default" apn="bplgprs.com" />
+    </provider>
+    <provider name="BSNL" mobilenetworkcodes="404 80">
+      <plan name="default" apn="celloneportal" />
+    </provider>
+    <provider name="Idea Cellular" mobilenetworkcodes="404 12, 404 14, 404 19, 404 22, 404 24, 404 4, 404 44, 404 56, 404 7, 404 78, 404 82, 405 70, 405 799, 405 845, 405 848, 405 850">
+      <plan name="default" apn="internet" />
+    </provider>
+    <provider name="MTNL (Delhi)" mobilenetworkcodes="404 68">
+      <plan name="Contract" apn="gprsmtnldel" />
+      <plan name="Prepaid" apn="gprsppsdel" />
+    </provider>
+    <provider name="MTNL (Mumbai)" mobilenetworkcodes="404 69">
+      <plan name="Contract" apn="gprsmtnlmum" />
+      <plan name="Prepaid" apn="gprsppsmum" />
+    </provider>
+    <provider name="Vodafone" mobilenetworkcodes="404 1, 404 11, 404 13, 404 15, 404 20, 404 27, 404 30, 404 5, 404 60, 404 84, 404 86, 405 66, 405 750, 405 751, 405 752, 405 753, 405 754, 405 755, 405 756">
+      <plan name="Connect" apn="www" />
+      <plan name="Live" apn="portalnmms" />
+    </provider>
+  </location>
+  <location name="Indonesia" code="ID" mobilecountrycode="510">
+    <provider name="AXIS" mobilenetworkcodes="510 8">
+      <plan name="default" apn="axis" username="axis" password="123456" />
+    </provider>
+    <provider name="INDOSAT" mobilenetworkcodes="510 1, 510 21">
+      <plan name="default" apn="indosatgprs" username="indosat" password="indosat" />
+    </provider>
+    <provider name="Telkomsel" mobilenetworkcodes="510 10">
+      <plan name="default" apn="internet" />
+    </provider>
+    <provider name="XL" mobilenetworkcodes="510 11">
+      <plan name="default" apn="www.xlgprs.net" username="xlgprs" password="proxl" />
+    </provider>
+  </location>
+  <location name="Ireland" code="IE" mobilecountrycode="272, 440">
+    <provider name="O2" mobilenetworkcodes="272 2">
+      <plan name="default" apn="internet" />
+      <plan name="Contract" apn="open.internet" />
+      <plan name="Prepay" apn="pp.internet" />
+    </provider>
+    <provider name="Vodafone" mobilenetworkcodes="440 66">
+      <plan name="Prepay" apn="live.vodafone.com" />
+      <plan name="Contract" apn="isp.vodafone.ie" />
+    </provider>
+  </location>
+  <location name="Israel" code="IL" mobilecountrycode="425">
+    <provider name="Orange" mobilenetworkcodes="425 1">
+      <plan name="default" apn="internet" username="orange" password="orange" />
+    </provider>
+  </location>
+  <location name="Italy" code="IT" mobilecountrycode="222">
+    <provider name="TIM" mobilenetworkcodes="222 1">
+      <plan name="default" apn="ibox.tim.it" />
+    </provider>
+    <provider name="Vodafone Omnitel" mobilenetworkcodes="222 10">
+      <plan name="default" apn="web.omnitel.it" />
+    </provider>
+    <provider name="Wind" mobilenetworkcodes="222 88">
+      <plan name="default" apn="internet.wind" />
+    </provider>
+  </location>
+  <location name="Jamaica" code="JM" mobilecountrycode="338">
+    <provider name="Digicel" mobilenetworkcodes="338 50">
+      <plan name="default" apn="web.digiceljamaica.com" />
+    </provider>
+    <provider name="LIME" mobilenetworkcodes="338 180, 338 20">
+      <plan name="default" apn="internet" />
+    </provider>
+  </location>
+  <location name="Japan" code="JP" mobilecountrycode="440">
+    <provider name="Softbank" mobilenetworkcodes="440 20, 440 4, 440 40, 440 41, 440 42, 440 43, 440 44, 440 45, 440 46, 440 47, 440 48, 440 6, 440 90, 440 92, 440 93, 440 94, 440 95, 440 96, 440 97, 440 98">
+      <plan name="default" apn="vodafone" username="ai@vodafone" password="vodafone" />
+    </provider>
+  </location>
+  <location name="Kosovo" code="KO" mobilecountrycode="212">
+    <provider name="Vala" mobilenetworkcodes="212 1">
+      <plan name="default" apn="vala900-int" dialstring="*99***1#" />
+    </provider>
+  </location>
+  <location name="Latvia" code="LV" mobilecountrycode="247">
+    <provider name="Bite" mobilenetworkcodes="247 5">
+      <plan name="default" apn="internet.banga.lt" />
+    </provider>
+    <provider name="Latvia Mobile Telefone" mobilenetworkcodes="247 1">
+      <plan name="default" apn="internet.lmt.lv" />
+    </provider>
+    <provider name="Tele2" mobilenetworkcodes="247 2">
+      <plan name="default" apn="internet.tele2.lv" />
+    </provider>
+    <provider name="TRIATEL" mobilenetworkcodes="247 3">
+      <plan name="default" dialstring="#777" username="triatel@triatel.lv" password="triatel" />
+    </provider>
+  </location>
+  <location name="Lithuania" code="LT" mobilecountrycode="246">
+    <provider name="Bite" mobilenetworkcodes="246 2">
+      <plan name="default" apn="banga" dialstring="*99#" />
+    </provider>
+    <provider name="Omnitel" mobilenetworkcodes="246 1">
+      <plan name="default" apn="omnitel" dialstring="*99#" />
+    </provider>
+    <provider name="Tele2" mobilenetworkcodes="246 3">
+      <plan name="default" apn="internet.tele2.lt" dialstring="*99#" />
+    </provider>
+  </location>
+  <location name="Luxembourg" code="LU" mobilecountrycode="270">
+    <provider name="LUXGSM" mobilenetworkcodes="270 1">
+      <plan name="default" apn="web.pt.lu" />
+    </provider>
+    <provider name="Tango" mobilenetworkcodes="270 77">
+      <plan name="default" apn="internet" />
+    </provider>
+  </location>
+  <location name="Macedonia" code="MK" mobilecountrycode="294">
+    <provider name="One" mobilenetworkcodes="294 2">
+      <plan name="default" apn="internet" dialstring="*99#" />
+    </provider>
+    <provider name="T-Mobile" mobilenetworkcodes="294 1">
+      <plan name="default" apn="internet" dialstring="*99***1#" username="internet" password="t-mobile" />
+    </provider>
+  </location>
+  <location name="Malaysia" code="MY" mobilecountrycode="502">
+    <provider name="Celcom" mobilenetworkcodes="502 13">
+      <plan name="default" apn="celcom.net.my" />
+    </provider>
+  </location>
+  <location name="Maldives" code="MV" mobilecountrycode="472">
+    <provider name="Dhiraagu" mobilenetworkcodes="472 1">
+      <plan name="default" apn="internet.dhimobile" />
+    </provider>
+    <provider name="Wataniya" mobilenetworkcodes="472 2">
+      <plan name="default" apn="WataniyaNet" />
+    </provider>
+  </location>
+  <location name="Mexico" code="MX" mobilecountrycode="334">
+    <provider name="Movistar" mobilenetworkcodes="334 3">
+      <plan name="default" apn="internet.movistar.mx" />
+    </provider>
+    <provider name="Telcel" mobilenetworkcodes="334 2">
+      <plan name="default" apn="internet.itelcel.com" />
+    </provider>
+  </location>
+  <location name="Montenegro" code="ME" mobilecountrycode="297">
+    <provider name="Promonte GSM" mobilenetworkcodes="297 1">
+      <plan name="default" apn="gprs.promonte.com" />
+    </provider>
+    <provider name="T-Mobile" mobilenetworkcodes="297 2">
+      <plan name="Prepaid" apn="internet-prepaid" dialstring="*99***1#" />
+      <plan name="Postpaid" apn="internet-postpaid" dialstring="*99***1#" />
+    </provider>
+  </location>
+  <location name="Netherlands" code="NL" mobilecountrycode="204">
+    <provider name="KPN Mobile" mobilenetworkcodes="204 10, 204 12, 204 18, 204 69, 204 8">
+      <plan name="default" apn="internet" />
+    </provider>
+    <provider name="Orange" mobilenetworkcodes="204 20">
+      <plan name="default" apn="internet" />
+    </provider>
+    <provider name="Telfort" mobilenetworkcodes="204 12, 204 18">
+      <plan name="default" apn="internet" />
+    </provider>
+    <provider name="T-Mobile" mobilenetworkcodes="204 16">
+      <plan name="default" apn="internet" />
+    </provider>
+    <provider name="Vodafone" mobilenetworkcodes="204 4">
+      <plan name="Normal" apn="web.vodafone.nl" />
+      <plan name="Business" apn="office.vodafone.nl" />
+    </provider>
+  </location>
+  <location name="New Caledonia" code="NC" mobilecountrycode="546">
+    <provider name="OPT Mobilis" mobilenetworkcodes="546 1">
+      <plan name="Illimité ou A La Demande (3g)" apn="3g" />
+      <plan name="Illimité + Data Seul (usb)" apn="usb" />
+      <plan name="Internet Mobile au Volume" apn="internet" />
+    </provider>
+  </location>
+  <location name="New Zealand" code="NZ" mobilecountrycode="530">
+    <provider name="2Degrees" mobilenetworkcodes="530 24">
+      <plan name="default" apn="internet" />
+    </provider>
+    <provider name="Spark" mobilenetworkcodes="530 5">
+      <plan name="XT Network" apn="internet" />
+    </provider>
+    <provider name="Vodafone" mobilenetworkcodes="530 1">
+      <plan name="default" apn="vodafone" />
+    </provider>
+  </location>
+  <location name="Norway" code="NO" mobilecountrycode="242">
+    <provider name="Netcom" mobilenetworkcodes="242 2">
+      <plan name="default" apn="internet.netcom.no" username="netcom" password="netcom" />
+      <plan name="TalkMore" apn="internet.netcom.no" />
+    </provider>
+    <provider name="Telenor Mobil" mobilenetworkcodes="242 1">
+      <plan name="default" apn="telenor" />
+    </provider>
+  </location>
+  <location name="Pakistan" code="PK" mobilecountrycode="410">
+    <provider name="UFone" mobilenetworkcodes="410 3">
+      <plan name="default" apn="ufone.internet" />
+    </provider>
+  </location>
+  <location name="Peru" code="PE" mobilecountrycode="716">
+    <provider name="Claro" mobilenetworkcodes="716 10">
+      <plan name="default" apn="wap.claro.pe" username="claro" password="claro" />
+    </provider>
+  </location>
+  <location name="Philippines" code="PH" mobilecountrycode="515">
+    <provider name="Globe" mobilenetworkcodes="515 2">
+      <plan name="default" apn="internet.globe.com.ph" />
+    </provider>
+    <provider name="Smart" mobilenetworkcodes="515 3">
+      <plan name="default" apn="internet" />
+    </provider>
+  </location>
+  <location name="Poland" code="PL" mobilecountrycode="260">
+    <provider name="Era" mobilenetworkcodes="260 2">
+      <plan name="default" apn="erainternet" dialstring="*99***1#" username="erainternet" password="erainternet" />
+    </provider>
+    <provider name="Idea" mobilenetworkcodes="260 3, 260 5">
+      <plan name="default" apn="www.idea.pl" />
+    </provider>
+    <provider name="Play" mobilenetworkcodes="260 6">
+      <plan name="default" apn="internet" />
+    </provider>
+    <provider name="Plus GSM" mobilenetworkcodes="260 1">
+      <plan name="default" apn="internet" dialstring="*99***1#" />
+    </provider>
+  </location>
+  <location name="Portugal" code="PT" mobilecountrycode="268">
+    <provider name="Optimus" mobilenetworkcodes="268 3">
+      <plan name="default" apn="internet" />
+    </provider>
+    <provider name="TMN" mobilenetworkcodes="268 6">
+      <plan name="default" apn="internet" />
+    </provider>
+    <provider name="Vodafone (Telcel)" mobilenetworkcodes="268 1">
+      <plan name="default" apn="internet.vodafone.pt" />
+    </provider>
+  </location>
+  <location name="Puerto Rico" code="PR" mobilecountrycode="330">
+    <provider name="Claro" mobilenetworkcodes="330 11">
+      <plan name="default" apn="internet.claropr.com" />
+    </provider>
+  </location>
+  <location name="Romania" code="RO" mobilecountrycode="226">
+    <provider name="Cosmote" mobilenetworkcodes="226 3, 226 4, 226 6">
+      <plan name="default" apn="internet" dialstring="*99***1#" />
+    </provider>
+    <provider name="Orange" mobilenetworkcodes="226 10">
+      <plan name="default" apn="internet" />
+      <plan name="lant" apn="lant" dialstring="*99#" />
+    </provider>
+    <provider name="Vodafone" mobilenetworkcodes="226 1">
+      <plan name="default" apn="internet" dialstring="*99***1#" username="internet.vodafone.ro" password="vodafone" />
+    </provider>
+  </location>
+  <location name="Russia" code="RU" mobilecountrycode="250">
+    <provider name="BeeLine" mobilenetworkcodes="250 28, 250 99">
+      <plan name="default" apn="internet.beeline.ru" />
+    </provider>
+    <provider name="Megafon" mobilenetworkcodes="250 2">
+      <plan name="default" apn="internet.nw" />
+    </provider>
+    <provider name="MTS" mobilenetworkcodes="250 1">
+      <plan name="default" apn="internet.mts.ru" />
+    </provider>
+    <provider name="PrimTel" mobilenetworkcodes="250 92">
+      <plan name="default" apn="internet.primtel.ru" />
+    </provider>
+  </location>
+  <location name="Saudi Arabia" code="SA" mobilecountrycode="420">
+    <provider name="Saudi Telecom" mobilenetworkcodes="420 1">
+      <plan name="default" apn="Jawalnet.com.sa" />
+    </provider>
+  </location>
+  <location name="Serbia" code="RS" mobilecountrycode="220">
+    <provider name="mt:s" mobilenetworkcodes="220 3">
+      <plan name="default" apn="gprsinternet" dialstring="*99***1#" username="mts" password="&gt;64" />
+    </provider>
+    <provider name="Telenor" mobilenetworkcodes="220 1">
+      <plan name="default" apn="internet" dialstring="*99***1#" username="telenor" password="gprs" />
+    </provider>
+    <provider name="Vip" mobilenetworkcodes="220 5">
+      <plan name="default" apn="vipmobile" dialstring="*99***1#" username="vipmobile" password="vipmobile" />
+    </provider>
+  </location>
+  <location name="Singapore" code="SG" mobilecountrycode="525">
+    <provider name="M1" mobilenetworkcodes="525 3">
+      <plan name="default" apn="sunsurf" />
+    </provider>
+    <provider name="Singtel" mobilenetworkcodes="525 1, 525 2">
+      <plan name="default" apn="internet" />
+    </provider>
+    <provider name="Starhub" mobilenetworkcodes="525 5">
+      <plan name="default" apn="shwapint" />
+    </provider>
+  </location>
+  <location name="Slovak Republic" code="SS" mobilecountrycode="231">
+    <provider name="O2" mobilenetworkcodes="231 6">
+      <plan name="default" apn="internet" dialstring="*99***1#" />
+    </provider>
+    <provider name="Orange" mobilenetworkcodes="231 1">
+      <plan name="default" apn="internet" dialstring="*99***1#" />
+    </provider>
+    <provider name="T-Mobile" mobilenetworkcodes="231 2, 231 4">
+      <plan name="default" apn="internet" dialstring="*99***1#" />
+    </provider>
+  </location>
+  <location name="Slovenia" code="SI" mobilecountrycode="293">
+    <provider name="Mobitel" mobilenetworkcodes="293 41">
+      <plan name="default" apn="internet" dialstring="*99***1#" username="mobitel" password="internet" />
+    </provider>
+    <provider name="Simobil-Vodafone" mobilenetworkcodes="293 40">
+      <plan name="default" apn="internet.simobil.si" dialstring="*99***1#" username="simobil" password="internet" />
+    </provider>
+  </location>
+  <location name="South Africa" code="ZA" mobilecountrycode="655">
+    <provider name="MTN" mobilenetworkcodes="655 10">
+      <plan name="default" apn="internet" />
+    </provider>
+    <provider name="Vodacom" mobilenetworkcodes="655 1">
+      <plan name="default" apn="internet" />
+    </provider>
+  </location>
+  <location name="Spain" code="ES" mobilecountrycode="214">
+    <provider name="Telefonica (Movistar)" mobilenetworkcodes="214 7">
+      <plan name="default" apn="movistar.es" />
+    </provider>
+    <provider name="Vodafone(Airtel)" mobilenetworkcodes="214 1, 214 6">
+      <plan name="default" apn="airtelnet.es" />
+    </provider>
+  </location>
+  <location name="Sweden" code="SE" mobilecountrycode="240">
+    <provider name="Telenor" mobilenetworkcodes="240 6, 240 8">
+      <plan name="default" apn="services.telenor.se" />
+    </provider>
+    <provider name="Telia" mobilenetworkcodes="240 1">
+      <plan name="default" apn="online.telia.se" />
+    </provider>
+  </location>
+  <location name="Switzerland" code="CH" mobilecountrycode="228">
+    <provider name="Orange CH" mobilenetworkcodes="228 3">
+      <plan name="default" apn="internet" />
+    </provider>
+    <provider name="sunrise" mobilenetworkcodes="228 2">
+      <plan name="default" apn="internet" />
+    </provider>
+    <provider name="Swisscom" mobilenetworkcodes="228 1">
+      <plan name="default" apn="gprs.swisscom.ch" />
+    </provider>
+  </location>
+  <location name="Taiwan" code="TW" mobilecountrycode="466">
+    <provider name="Chunghwa Telecom" mobilenetworkcodes="466 11, 466 92">
+      <plan name="default" apn="internet" />
+    </provider>
+    <provider name="Far EasTone" mobilenetworkcodes="466 1">
+      <plan name="default" apn="fetnet01" />
+    </provider>
+    <provider name="KG Telecom" mobilenetworkcodes="466 88">
+      <plan name="default" apn="internet" />
+    </provider>
+    <provider name="Taiwan Cellular" mobilenetworkcodes="466 97">
+      <plan name="default" apn="internet" />
+    </provider>
+  </location>
+  <location name="Thailand" code="TH" mobilecountrycode="520">
+    <provider name="AIS" mobilenetworkcodes="520 1, 520 23">
+      <plan name="default" apn="internet" />
+    </provider>
+    <provider name="DTAC" mobilenetworkcodes="520 18">
+      <plan name="default" apn="www.dtac.co.th" />
+    </provider>
+  </location>
+  <location name="Turkey" code="TR" mobilecountrycode="286">
+    <provider name="Avea" mobilenetworkcodes="286 3">
+      <plan name="default" apn="internet" />
+    </provider>
+    <provider name="Turkcell" mobilenetworkcodes="286 1">
+      <plan name="default" apn="internet" />
+    </provider>
+    <provider name="Vodafone" mobilenetworkcodes="286 2">
+      <plan name="default" apn="telsim" />
+    </provider>
+  </location>
+  <location name="UK" code="GB" mobilecountrycode="234">
+    <provider name="Jersey Telecom" mobilenetworkcodes="234 50">
+      <plan name="default" apn="pepper" />
+    </provider>
+    <provider name="O2" mobilenetworkcodes="234 10, 234 11, 234 2">
+      <plan name="optimised" apn="mobile.o2.co.uk" username="faster" password="web" />
+      <plan name="non-optimised" apn="mobile.o2.co.uk" username="bypass" password="web" />
+      <plan name="pay and go" apn="payandgo.o2.co.uk" username="payandgo" password="payandgo" />
+    </provider>
+    <provider name="Orange" mobilenetworkcodes="234 33, 234 34">
+      <plan name="default" apn="orangeinternet" />
+    </provider>
+    <provider name="T-Mobile" mobilenetworkcodes="234 30">
+      <plan name="default" apn="general.t-mobile.uk" username="user" password="pass" />
+    </provider>
+    <provider name="Vodafone" mobilenetworkcodes="234 15">
+      <plan name="contract" apn="internet" username="web" password="web" />
+      <plan name="pre-pay" apn="pp.vodafone.co.uk" username="web" password="web" />
+    </provider>
+  </location>
+  <location name="Ukraine" code="UA" mobilecountrycode="255">
+    <provider name="Kyivstar GSM" mobilenetworkcodes="255 3">
+      <plan name="default" apn="www.kyivstar.net" />
+    </provider>
+    <provider name="UMC" mobilenetworkcodes="255 1">
+      <plan name="default" apn="www.umc.ua" />
+    </provider>
+  </location>
+  <location name="United Arab Emirates" code="AE" mobilecountrycode="424">
+    <provider name="du" mobilenetworkcodes="424 3">
+      <plan name="default" apn="du" />
+    </provider>
+    <provider name="Etisalat" mobilenetworkcodes="424 2">
+      <plan name="default" apn="etisalat.ae" />
+      <plan name="mnet" apn="mnet" username="mnet" password="mnet" />
+    </provider>
+  </location>
+  <location name="USA" code="US" mobilecountrycode="310, 311">
+    <provider name="Alltel" mobilenetworkcodes="310 500, 310 590">
+      <plan name="default" dialstring="#777" usernamerequired="true" usernameprompt="Phone# (10 digit)" usernameformat="{0}@alltel.net" password="alltel" />
+    </provider>
+    <provider name="AT&amp;T" mobilenetworkcodes="310 150, 310 38, 310 410, 310 560, 310 680, 310 90">
+      <plan name="with acceleration" apn="ISP.CINGULAR" username="ISPDA@CINGULARGPRS.COM" password="CINGULAR1" />
+      <plan name="no acceleration" apn="ISP.CINGULAR" username="ISP@CINGULARGPRS.COM" password="CINGULAR1" />
+      <plan name="non-contract" apn="WAP.CINGULAR" username="WAP@CINGULARGPRS.COM" password="CINGULAR1" />
+      <plan name="ex AT&amp;T" apn="proxy" />
+    </provider>
+    <provider name="Cellcom" mobilenetworkcodes="310 600">
+      <plan name="default" dialstring="#777" usernamerequired="true" usernameprompt="Phone# (10 digit)" usernameformat="{0}@cellcom3g.com" password="1xdata" />
+    </provider>
+    <provider name="Centennial" mobilenetworkcodes="310 30">
+      <plan name="default" dialstring="#777" username="centennial" password="turbonet" />
+    </provider>
+    <provider name="Cincinnati Bell" mobilenetworkcodes="310 420">
+      <plan name="VPN" apn="internet" />
+      <plan name="non VPN" apn="web.gocbw.com" />
+    </provider>
+    <provider name="Sprint" mobilenetworkcodes="310 120">
+      <plan name="default" dialstring="#777" />
+    </provider>
+    <provider name="T-Mobile" mobilenetworkcodes="310 26, 310 260, 310 330, 310 490, 310 580, 310 660">
+      <plan name="Internet" apn="internet2.voicestream.com" />
+      <plan name="VPN" apn="internet3.voicestream.com" />
+      <plan name="non-contract" apn="wap.voicestream.com" />
+      <plan name="T-Mobile Internet (All current plans)" apn="epc.tmobile.com" />
+    </provider>
+    <provider name="Unicel" mobilenetworkcodes="310 890">
+      <plan name="default" apn="apn.unicel.com" />
+    </provider>
+    <provider name="US Cellular" mobilenetworkcodes="311 580">
+      <plan name="default" dialstring="#777" />
+    </provider>
+    <provider name="Verizon" mobilenetworkcodes="310 12, 310 4">
+      <plan name="default" dialstring="#777" usernamerequired="true" usernameprompt="Phone# (10 digit)" usernameformat="{0}@vzw3g.com" password="vzw" />
+    </provider>
+    <provider name="Viaero Wireless" mobilenetworkcodes="310 450">
+      <plan name="Internet" apn="internet.vedge.com" />
+    </provider>
+  </location>
+  <location name="Venezuela" code="VE" mobilecountrycode="734">
+    <provider name="Digital TIM" mobilenetworkcodes="734 1, 734 2, 734 3">
+      <plan name="default" apn="gprsweb.digitel.ve" />
+    </provider>
+  </location>
+  <signature>c+zVlA5uKAWCGv7xiVjPeLkGKOrVn6Ifw+WudtXGSLstz9RGwVMG63bsXSoXFEJWv/8HJb31AM2X65O9IzX1nuWvJeICweyvVeremP+m5UmlL9d3i+erOf4gKx9fLR3s7U4ZT372j0qlghyqYrYmJFiJLWA1AMEdL1zZQ5chgdA=</signature>
+</serviceproviders>

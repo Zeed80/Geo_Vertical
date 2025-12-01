@@ -1,0 +1,131 @@
+{
+  "metadata": {
+    "report_number": "ГМПД-ГТМ-ТСС-0001",
+    "project_name": "Башня ПРС-12",
+    "inventory_number": "0044165",
+    "location": "Воронежская обл., Острогожский р-н, с. Владимировка",
+    "customer_name": "ООО «Газпром трансгаз Москва»",
+    "operator_name": "ООО «ГМП-Диагностика»",
+    "start_date": "2025-09-16",
+    "end_date": "2025-09-17",
+    "approval_person": "В.Е. Середа",
+    "approval_position": "Директор ОП",
+    "approval_city": "Москва",
+    "approval_date": "2025-11-26"
+  },
+  "customer": {
+    "full_name": "ООО «Газпром трансгаз Москва»",
+    "director": "А.В. Бабаков",
+    "legal_address": "117420, г. Москва, ул. Наметкина, 16",
+    "actual_address": "117420, г. Москва, ул. Наметкина, 16",
+    "phone": "+7 (495) 817-93-30",
+    "email": "info@gtm.gazprom.ru"
+  },
+  "contractor": {
+    "full_name": "ООО «ГМП-Диагностика»",
+    "director": "Д.С. Бутусов",
+    "legal_address": "108852, г. Москва, г.о. Щербинка, Симферопольское ш., д. 14а",
+    "postal_address": "108852, г. Москва, г.о. Щербинка, Симферопольское ш., д. 14а",
+    "phone": "+7 (495) 229-23-04",
+    "email": "info@gmpd.ru",
+    "accreditation_certificate": "№ АЦЛНК-38-00028",
+    "sro_certificate": "№ 9718087276-20230912-1011"
+  },
+  "specialists": [
+    {
+      "full_name": "Кожевников В.А.",
+      "certifications": {
+        "ВИК": "АЦСНК-38-II-03705"
+      },
+      "expires_at": {
+        "ВИК": "2027-02-22"
+      }
+    }
+  ],
+  "equipment": [
+    {
+      "name": "Тахеометр Trimble M3DR5",
+      "serial_number": "D056078",
+      "certificate": "С-АКЗ/11-03-2025/415978163",
+      "valid_until": "2026-03-10"
+    }
+  ],
+  "documents": [
+    {
+      "title": "Технический паспорт радиорелейной станции",
+      "identifier": "б/н",
+      "comments": "Содержит сведения о конструкциях"
+    }
+  ],
+  "object_list": [
+    {
+      "name": "Башня ПРС-12",
+      "inventory_number": "0044165",
+      "commissioning_year": 1957,
+      "location": "Воронежская обл., Острогожский р-н, с. Владимировка",
+      "notes": "Эксплуатирующая организация: ООО «Газпром трансгаз Москва»"
+    }
+  ],
+  "loads": null,
+  "soils": [],
+  "climate": null,
+  "structure": null,
+  "objects": [],
+  "documents_review": [
+    {
+      "title": "Технический паспорт радиорелейной станции",
+      "identifier": "б/н",
+      "summary": "Документ подтверждает основные параметры сооружения.",
+      "conclusion": "Принят к исполнению."
+    }
+  ],
+  "normative_list": [
+    "ГОСТ 31937-2011",
+    "СП 13-102-2003"
+  ],
+  "technical_state": [
+    {
+      "structure": "Металлоконструкции",
+      "classification": "Работоспособное",
+      "comments": "Дефекты ограничиваются косметическими отклонениями."
+    }
+  ],
+  "visual_inspection": [
+    {
+      "element": "Пояса",
+      "defects": "Видимых дефектов не обнаружено."
+    }
+  ],
+  "conclusions": [
+    {
+      "label": "Общее состояние",
+      "text": "Конструкция пригодна к безопасной эксплуатации."
+    }
+  ],
+  "measurements": [],
+  "residual_resource": null,
+  "materials_research": [],
+  "geodesic_results": {},
+  "calculation_results": {},
+  "recommendations": [
+    {
+      "text": "Провести плановую окраску металлоконструкций до 09.2030 г."
+    }
+  ],
+  "appendices": [],
+  "structural_elements": [],
+  "title_object": null,
+  "reference_profiles": [],
+  "angle_measurements": [],
+  "vertical_deviation_table": [],
+  "straightness_records": [],
+  "thickness_measurements": [],
+  "coating_measurements": [],
+  "ultrasonic_records": [],
+  "concrete_strength_records": [],
+  "protective_layer_records": [],
+  "vibration_records": [],
+  "settlement_records": [],
+  "resource_calculation": null,
+  "annexes": []
+}

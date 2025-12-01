@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<ExternalDeviceProtocol version="1.0" >
+  <Device name="CeeStar in Basic mode - Low Frequency readings" >
+    <MaxLatency>1.0</MaxLatency>
+    <Protocol type="FixedWidth" lineLength="17" startsWith="_A" >
+      <Field name="DepthHigh"   start="2"  end="7"  type="Number" multiplier="0.01" />
+      <Field name="DepthLow"    start="8"  end="13" type="Number" multiplier="0.01" isDepth="True" />
+      <Field name="Temperature" start="14" end="17" type="Number" multiplier="0.1" />
+    </Protocol>
+  </Device>
+</ExternalDeviceProtocol>

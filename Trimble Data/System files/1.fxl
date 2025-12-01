@@ -1,0 +1,4 @@
+<?xml version="1.0" encoding="utf-8" standalone="yes"?>
+<!--This file represents feature definitions-->
+<FeatureCodingDefinitions Author="" CreationDate="2017-06-20T11:34:51" DateModified="2017-06-20T11:34:51" Description="" SchemaVersion="6" NumericCodes="false" MaxFeatureNameLength="40" MaxAttributeNameLength="20" MaxGroupNameLength="20" MaxCodeLength="20" MaxItemsPerGroup="9" MaxCategoryNameLength="20" xmlns="http://trimble.com/schema/fxl">
+</FeatureCodingDefinitions>

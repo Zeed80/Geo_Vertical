@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<ExternalDeviceProtocol version="1.0" >
+  <Device name="SonarMite in Engineering Mode" >
+    <MaxLatency>0.5</MaxLatency>
+    <Protocol type="Delimited" delimiter="20" startsWith="1" special="SonarMite" requiredFieldCount="8" >
+      <Field name="Depth" fieldNumber="1" type="Number" multiplier="1.0" isDepth="True" />
+      <Field name="Battery Voltage" fieldNumber="5" type="Number" multiplier="1.0" />
+      <Field name="Quality" fieldNumber="6" type="Integer" />
+      <Field name="Flags" fieldNumber="7" type="Integer" sonarMiteFlags="True" />
+    </Protocol>
+  </Device>
+</ExternalDeviceProtocol>

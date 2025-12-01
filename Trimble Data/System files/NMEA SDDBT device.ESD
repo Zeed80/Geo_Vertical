@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<ExternalDeviceProtocol version="1.0" >
+  <Device name="NMEA DBT (Depth Below Transducer) generic device" >
+    <MaxLatency>1.0</MaxLatency>
+    <Protocol type="Delimited" delimiter="2C" startsWith="$SDDBT" special="NMEA" >
+      <Field name="DepthFeet"    fieldNumber="1" type="Number" multiplier="0.3048" isDepth="True" />
+      <Field name="DepthMetres"  fieldNumber="3" type="Number" multiplier="1.0"    isDepth="True" />
+      <Field name="DepthFathoms" fieldNumber="5" type="Number" multiplier="1.8288" isDepth="True" />
+    </Protocol>
+  </Device>
+</ExternalDeviceProtocol>

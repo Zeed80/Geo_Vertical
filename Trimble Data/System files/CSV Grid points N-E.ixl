@@ -1,0 +1,45 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<ImportFormat version="1.0">
+  <FormatType>CSV</FormatType>                            <!-- Options are CSV or Fixed -->
+  <EntityType>Point</EntityType>                          <!-- Options are Point or Line -->
+  <CommaAsDecimalSeparator>No</CommaAsDecimalSeparator>   <!-- Options are Yes or No -->
+  <FileSpecification>*.csv</FileSpecification>
+  <HeaderLinesToSkip>0</HeaderLinesToSkip>
+  <Fields>
+    <PointName>
+      <Component>
+        <CSVField>1</CSVField>                 <!-- Would be omitted for Fixed type files -->
+      </Component>
+    </PointName>
+    
+    <Northing>
+      <CSVField>2</CSVField>
+    </Northing>
+
+    <Easting>
+      <CSVField>3</CSVField>
+    </Easting>
+
+    <Elevation>
+      <CSVField>4</CSVField>
+    </Elevation>
+
+    <Code>
+      <Component>
+        <CSVField>5</CSVField>
+      </Component>
+    </Code>
+
+    <Description1>
+      <Component>
+        <CSVField>6</CSVField>
+      </Component>
+    </Description1>
+
+    <Description2>
+      <Component>
+        <CSVField>7</CSVField>
+      </Component>
+    </Description2>
+  </Fields>
+</ImportFormat>	

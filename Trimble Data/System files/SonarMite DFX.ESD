@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<ExternalDeviceProtocol version="1.0" >
+  <Device name="SonarMite DFX dual frequency" >
+    <MaxLatency>0.5</MaxLatency>
+    <Protocol type="Delimited" delimiter="20" startsWith="1" requiredFieldCount="6" >
+      <Field name="DepthHigh" fieldNumber="1" type="Number" multiplier="1.0" isDepth="True" allowZero="True" />
+      <Field name="DepthLow" fieldNumber="2" type="Number" multiplier="1.0" isSecondaryDepth="True" />
+      <Field name="Temperature" fieldNumber="3" type="Number" multiplier="1.0" />
+      <Field name="Battery Voltage" fieldNumber="4" type="Number" multiplier="1.0" />
+      <Field name="Seen" fieldNumber="5" type="Integer" />
+    </Protocol>
+  </Device>
+</ExternalDeviceProtocol>

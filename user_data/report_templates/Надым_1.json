@@ -1,0 +1,73 @@
+{
+  "metadata": {
+    "report_number": "ГМПД-ГДНад-ТСС-0598-ОПЩ-ДО-2025",
+    "project_name": "Опора антенная куста газовых скважин № 14 Ямсовейского НГКМ",
+    "inventory_number": "562341",
+    "location": "Российская Федерация, Ямало-Ненецкий автономный округ, Пуровский р-н, Ямсовейское НГКМ",
+    "customer_name": "ООО «Газпром добыча Надым»",
+    "operator_name": "ООО \"ГМП-Диагностика\"",
+    "start_date": "2025-07-26",
+    "end_date": "2025-10-30",
+    "approval_person": "В.Е. Середа",
+    "approval_position": "Директор ОП\nООО «ГАЗМАШПРОЕКТ-Диагностика» \nв г. Щербинка",
+    "approval_city": "Москва",
+    "approval_date": "2025-11-26"
+  },
+  "customer": {
+    "full_name": "ООО «Газпром добыча Надым»",
+    "director": "Генеральный директор: Щёголев Дмитрий Павлович",
+    "legal_address": "629736, Ямало-Ненецкий автономный округ, м.о. Надымский район, г. Надым, ул. Пионерская, стр. 14",
+    "actual_address": "629736, Ямало-Ненецкий автономный округ, м.о. Надымский район, г. Надым, ул. Пионерская, стр. 14",
+    "phone": "",
+    "email": "manager@nadym-dobycha.gazprom.ru"
+  },
+  "contractor": {
+    "full_name": "Общество с ограниченной ответственностью «ГАЗМАШПРОЕКТ-Диагностика»",
+    "director": "Бутусов Дмитрий Станиславович",
+    "legal_address": "107014, г. Москва, ул. Большая Остроумовская, д. 12, офис 18",
+    "postal_address": "107014, г. Москва, ул. Большая Остроумовская, д. 12, офис 18",
+    "phone": "+7 (916) 638-60-44",
+    "email": "info@gmpd.ru",
+    "accreditation_certificate": "№ АЦЛНК-38-00028 действительно до 04.06.2027 г.",
+    "sro_certificate": ""
+  },
+  "specialists": [],
+  "equipment": [],
+  "documents": [],
+  "loads": {
+    "snow_load_kpa": 0.0,
+    "wind_pressure_kpa": 0.0,
+    "icing_mm": 0.0,
+    "seismicity": 0,
+    "reliability_factor": 5.0
+  },
+  "soils": [],
+  "climate": {
+    "cold_period": {
+      "text": ""
+    },
+    "warm_period": {
+      "text": ""
+    }
+  },
+  "structure": {
+    "purpose": "",
+    "planning_decisions": "",
+    "structural_scheme": "",
+    "geology": "",
+    "foundations": "",
+    "metal_structure": "",
+    "lattice_notes": ""
+  },
+  "objects": [],
+  "normative_list": [],
+  "visual_inspection": [],
+  "measurements": [],
+  "residual_resource": null,
+  "materials_research": [],
+  "geodesic_results": {},
+  "calculation_results": {},
+  "recommendations": [],
+  "appendices": [],
+  "structural_elements": []
+}

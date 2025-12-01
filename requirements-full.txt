@@ -1,0 +1,15 @@
+# Полные зависимости с поддержкой всех форматов
+# Включая Shapefile и GeoJSON
+
+# Основные зависимости
+-r requirements-minimal.txt
+
+# Геопространственные библиотеки
+pyproj>=3.2.0
+shapely>=1.8.0
+
+# GDAL и GeoPandas требуют специальной установки на Windows
+# См. инструкции в INSTALL_WINDOWS.md
+# GDAL>=3.3.0
+# geopandas>=0.10.0
+
