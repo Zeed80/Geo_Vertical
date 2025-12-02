@@ -23,9 +23,10 @@ import re
 
 from gui.ui_helpers import apply_compact_button_style
 from core.section_operations import get_section_lines, find_section_levels
-from core.tower_generator import TowerBlueprint
+from core.tower_generator import TowerBlueprint, TowerBlueprintV2
 from gui.tower_builder_panel import TowerBuilderPanel
 from gui.index_manager import IndexManager
+from gui.tower_3d_renderer import Tower3DRenderer
 logger = logging.getLogger(__name__)
 
 
@@ -630,10 +631,22 @@ class PointEditor3DWidget(QWidget):
         
         self.processed_results: Optional[Dict[str, Any]] = None
         self._tower_blueprint: Optional[TowerBlueprint] = None
+        self._blueprint_applied: bool = False  # Флаг применения blueprint к точкам
         
         self.active_station_index: Optional[int] = None
         self.station_indices: List[int] = []
         self._index_to_position: Dict[Any, int] = {}
+        
+        # Рендерер для визуализации башни из конструктора
+        # Будет инициализирован после создания glview в init_ui()
+        self._tower_renderer: Optional[Tower3DRenderer] = None
+        
+        # Компоненты для режима unified (будут созданы при необходимости)
+        self._unified_structure_tree: Optional[QWidget] = None
+        self._unified_properties_panel: Optional[QWidget] = None
+        self._unified_toolbar_widget: Optional[QWidget] = None
+        self._unified_mode_active: bool = False
+        self._original_splitter_structure: Optional[tuple] = None  # Для восстановления
         
         self.init_ui()
         self.setup_colors()
@@ -713,6 +726,8 @@ class PointEditor3DWidget(QWidget):
         self.tower_builder_panel = TowerBuilderPanel(self)
         self.tower_builder_panel.blueprintRequested.connect(self._on_tower_blueprint_requested)
         self.tower_builder_panel.statusMessage.connect(self._set_status_message)
+        # Подключить сигнал визуализации для отображения башни в основном окне
+        self.tower_builder_panel.towerVisualizationRequested.connect(self._on_tower_visualization_requested)
         self.side_tabs.addTab(self.tower_builder_panel, "Конструктор")
         self.main_splitter.addWidget(self.side_tabs)
         self.main_splitter.setStretchFactor(0, 4)
@@ -746,6 +761,10 @@ class PointEditor3DWidget(QWidget):
         self.apply_toolbar_position(initial=True)
 
         self.update_undo_redo_buttons()
+        
+        # Инициализировать рендерер после создания glview
+        if self.glview:
+            self._tower_renderer = Tower3DRenderer(self.glview)
     
     def _create_toolbar_button(self, text: str, *, callback=None, tooltip: Optional[str] = None,
                                 checkable: bool = False, checked: bool = False,
@@ -1098,6 +1117,16 @@ class PointEditor3DWidget(QWidget):
             checked=True
         )
         toolbar.add_button(self.toggle_belt_lines_btn)
+
+        self.toggle_tower_visualization_btn = self._create_toolbar_button(
+            '🏗️\nБашня\n3D',
+            callback=self.toggle_tower_visualization,
+            tooltip='Показать/скрыть визуализацию башни из конструктора',
+            checkable=True,
+            checked=True,
+            enabled=False  # Включится, когда будет загружен чертеж
+        )
+        toolbar.add_button(self.toggle_tower_visualization_btn)
 
         self.tower_builder_toggle_btn = self._create_toolbar_button(
             '🏗️\nКонструктор',
@@ -1614,6 +1643,12 @@ class PointEditor3DWidget(QWidget):
             for item in self.structural_items:
                 self.glview.removeItem(item)
             self.structural_items.clear()
+        
+        # Если загружаются новые данные без blueprint, сбросить флаг применения
+        # (blueprint может быть применен только к конкретным данным)
+        self._blueprint_applied = False
+        # Очистить предпросмотр при загрузке новых данных
+        self._clear_tower_preview()
 
         # Защита от зацикливания: проверяем, не выполняется ли уже обновление
         if not hasattr(self, '_updating_3d_view'):
@@ -5335,19 +5370,35 @@ class PointEditor3DWidget(QWidget):
             self.tower_builder_toggle_btn.blockSignals(True)
             self.tower_builder_toggle_btn.setChecked(visible)
             self.tower_builder_toggle_btn.blockSignals(False)
+        
+        # Проверить режим конструктора
+        is_unified_mode = False
+        if hasattr(self, 'tower_builder_panel') and hasattr(self.tower_builder_panel, '_mode'):
+            is_unified_mode = self.tower_builder_panel._mode == 'unified'
+        
         if visible:
-            self.side_tabs.show()
-            if hasattr(self, 'main_splitter') and self.main_splitter is not None:
-                self.main_splitter.setCollapsible(1, False)
-                sizes = self.main_splitter.sizes()
-                total = sum(sizes) or 1
-                builder_size = max(getattr(self, '_builder_last_size', 360), 320)
-                main_size = max(total - builder_size, builder_size * 2)
-                self.main_splitter.setSizes([int(main_size), int(builder_size)])
-            index = self.side_tabs.indexOf(self.tower_builder_panel)
-            if index >= 0:
-                self.side_tabs.setCurrentIndex(index)
+            if is_unified_mode:
+                # Режим unified - интегрировать компоненты в основное окно
+                self._setup_unified_mode()
+            else:
+                # Режим tabs - показать side_tabs
+                if self._unified_mode_active:
+                    self._teardown_unified_mode()
+                self.side_tabs.show()
+                if hasattr(self, 'main_splitter') and self.main_splitter is not None:
+                    self.main_splitter.setCollapsible(1, False)
+                    sizes = self.main_splitter.sizes()
+                    total = sum(sizes) or 1
+                    builder_size = max(getattr(self, '_builder_last_size', 360), 320)
+                    main_size = max(total - builder_size, builder_size * 2)
+                    self.main_splitter.setSizes([int(main_size), int(builder_size)])
+                index = self.side_tabs.indexOf(self.tower_builder_panel)
+                if index >= 0:
+                    self.side_tabs.setCurrentIndex(index)
         else:
+            # Скрыть конструктор
+            if self._unified_mode_active:
+                self._teardown_unified_mode()
             if hasattr(self, 'main_splitter') and self.main_splitter is not None:
                 sizes = self.main_splitter.sizes()
                 if len(sizes) >= 2:
@@ -5359,6 +5410,25 @@ class PointEditor3DWidget(QWidget):
     def _on_tower_blueprint_requested(self, blueprint: TowerBlueprint):
         self._tower_blueprint = blueprint
         self.tower_blueprint_requested.emit(blueprint)
+        
+        # При применении blueprint очищаем предпросмотр
+        # Визуализация будет через set_structural_lines() после применения
+        self._clear_tower_preview()
+        self._blueprint_applied = True
+        
+        # Обновить визуализацию башни в 3D окне (но она не будет отображаться, т.к. blueprint применен)
+        self.render_tower_from_blueprint(blueprint)
+    
+    def _on_tower_visualization_requested(self, blueprint: Optional[TowerBlueprintV2]) -> None:
+        """
+        Обработка запроса визуализации башни из конструктора.
+        
+        Args:
+            blueprint: Чертеж башни для визуализации (TowerBlueprintV2 или None)
+        """
+        # Обновить визуализацию башни в 3D окне
+        # Метод render_tower_from_blueprint принимает TowerBlueprint или TowerBlueprintV2
+        self.render_tower_from_blueprint(blueprint)  # type: ignore
 
     def _set_status_message(self, message: str):
         if hasattr(self, 'info_label') and message:
@@ -5376,6 +5446,298 @@ class PointEditor3DWidget(QWidget):
         self._tower_blueprint = blueprint
         if hasattr(self, 'tower_builder_panel'):
             self.tower_builder_panel.set_blueprint(blueprint)
+        
+        # Обновить визуализацию башни в 3D окне
+        self.render_tower_from_blueprint(blueprint)
+    
+    def render_tower_from_blueprint(self, blueprint: Optional[TowerBlueprint]) -> None:
+        """
+        Отрисовать башню из чертежа в 3D окне.
+        
+        Логика работы:
+        - Если blueprint применен к точкам - НЕ использовать Tower3DRenderer (предпросмотр),
+          визуализация уже есть через set_structural_lines()
+        - Если blueprint не применен - использовать Tower3DRenderer для предпросмотра
+        
+        Args:
+            blueprint: Чертеж башни для отрисовки (может быть TowerBlueprint или TowerBlueprintV2)
+        """
+        # Если blueprint применен, не используем предпросмотр
+        # Визуализация уже есть через set_structural_lines()
+        if self._is_blueprint_applied():
+            # Очистить предпросмотр, если он был
+            if self._tower_renderer:
+                self._tower_renderer.clear()
+            return
+        
+        # Режим предпросмотра (blueprint не применен)
+        if not self._tower_renderer:
+            return
+        
+        # Преобразовать TowerBlueprint в TowerBlueprintV2, если необходимо
+        if blueprint is None:
+            self._tower_renderer.render_blueprint(None)
+            # Отключить кнопку, если нет чертежа
+            if hasattr(self, 'toggle_tower_visualization_btn'):
+                self.toggle_tower_visualization_btn.setEnabled(False)
+                self.toggle_tower_visualization_btn.setChecked(False)
+            return
+        
+        # Если это уже TowerBlueprintV2, используем напрямую
+        if isinstance(blueprint, TowerBlueprintV2):
+            self._tower_renderer.render_blueprint(blueprint)
+            # Включить кнопку, если есть чертеж
+            if hasattr(self, 'toggle_tower_visualization_btn'):
+                self.toggle_tower_visualization_btn.setEnabled(True)
+                # Восстановить сохраненное состояние видимости
+                if self.is_tower_visualization_visible():
+                    self.toggle_tower_visualization_btn.setChecked(True)
+        else:
+            # Для старого формата TowerBlueprint не отрисовываем
+            # (можно добавить конвертацию при необходимости)
+            self._tower_renderer.render_blueprint(None)
+            if hasattr(self, 'toggle_tower_visualization_btn'):
+                self.toggle_tower_visualization_btn.setEnabled(False)
+                self.toggle_tower_visualization_btn.setChecked(False)
+    
+    def set_tower_visualization_visible(self, visible: bool) -> None:
+        """
+        Установить видимость визуализации башни.
+        
+        В зависимости от состояния blueprint управляет разными источниками визуализации:
+        - Если blueprint применен - управляет structural_items (примененная визуализация)
+        - Если blueprint не применен - управляет Tower3DRenderer (предпросмотр)
+        
+        Args:
+            visible: True для показа, False для скрытия
+        """
+        if self._is_blueprint_applied():
+            # Управление видимостью примененной визуализации
+            if hasattr(self, 'structural_items'):
+                for item in self.structural_items:
+                    item.setVisible(visible)
+        else:
+            # Управление видимостью предпросмотра
+            if self._tower_renderer:
+                self._tower_renderer.set_visible(visible)
+    
+    def is_tower_visualization_visible(self) -> bool:
+        """
+        Проверить видимость визуализации башни.
+        
+        Returns:
+            True если визуализация видима, False если скрыта
+        """
+        if self._is_blueprint_applied():
+            # Проверка видимости примененной визуализации
+            if hasattr(self, 'structural_items') and self.structural_items:
+                # Проверяем видимость первого элемента (все должны иметь одинаковую видимость)
+                return self.structural_items[0].isVisible() if self.structural_items else False
+            return False
+        else:
+            # Проверка видимости предпросмотра
+            if self._tower_renderer:
+                return self._tower_renderer.is_visible()
+            return False
+    
+    def toggle_tower_visualization(self, checked: bool) -> None:
+        """
+        Переключить видимость визуализации башни.
+        
+        Args:
+            checked: True для показа, False для скрытия
+        """
+        self.set_tower_visualization_visible(checked)
+    
+    def _is_blueprint_applied(self) -> bool:
+        """
+        Проверить, применен ли blueprint к точкам.
+        
+        Returns:
+            True если blueprint применен, False если нет
+        """
+        return self._blueprint_applied
+    
+    def _clear_tower_preview(self) -> None:
+        """Очистить визуализацию предпросмотра башни из конструктора."""
+        if self._tower_renderer:
+            self._tower_renderer.clear()
+    
+    def _setup_unified_mode(self) -> None:
+        """
+        Настроить layout для режима unified.
+        Создает трехпанельный splitter: дерево слева, glview в центре, панель свойств справа.
+        """
+        if self._unified_mode_active:
+            return  # Уже настроено
+        
+        # Сохранить исходную структуру для восстановления
+        if self.main_splitter:
+            sizes = self.main_splitter.sizes()
+            self._original_splitter_structure = (sizes, self.main_splitter.orientation())
+        
+        # Получить компоненты из UnifiedTowerBuilderPanel
+        if not hasattr(self, 'tower_builder_panel') or not hasattr(self.tower_builder_panel, '_unified_panel'):
+            return
+        
+        unified_panel = self.tower_builder_panel._unified_panel
+        if not unified_panel:
+            return
+        
+        # Получить компоненты
+        structure_tree = unified_panel.get_structure_tree()
+        properties_panel = unified_panel.get_properties_panel()
+        toolbar_layout = unified_panel.get_toolbar()
+        
+        # Извлечь компоненты из их текущих родителей
+        # Дерево и панель свойств находятся внутри splitter в unified_panel
+        if structure_tree.parent() and hasattr(structure_tree.parent(), 'layout'):
+            parent_layout = structure_tree.parent().layout()
+            if parent_layout:
+                parent_layout.removeWidget(structure_tree)
+        
+        if properties_panel.parent() and hasattr(properties_panel.parent(), 'layout'):
+            parent_layout = properties_panel.parent().layout()
+            if parent_layout:
+                parent_layout.removeWidget(properties_panel)
+        
+        # Создать виджет для тулбара
+        toolbar_widget = QWidget()
+        # Копировать элементы из toolbar_layout
+        toolbar_widget_layout = QHBoxLayout(toolbar_widget)
+        toolbar_widget_layout.setContentsMargins(4, 4, 4, 4)
+        toolbar_widget_layout.setSpacing(4)
+        
+        # Перенести виджеты из toolbar_layout
+        items_to_move = []
+        for i in range(toolbar_layout.count()):
+            item = toolbar_layout.itemAt(i)
+            if item:
+                items_to_move.append(item)
+        
+        for item in items_to_move:
+            if item.widget():
+                toolbar_layout.removeWidget(item.widget())
+                toolbar_widget_layout.addWidget(item.widget())
+            elif item.spacerItem():
+                toolbar_layout.removeItem(item)
+                toolbar_widget_layout.addItem(item.spacerItem())
+        
+        toolbar_widget.setMaximumHeight(50)
+        
+        # Создать правую панель с тулбаром и панелью свойств
+        right_panel = QWidget()
+        right_layout = QVBoxLayout(right_panel)
+        right_layout.setContentsMargins(6, 6, 6, 6)
+        right_layout.setSpacing(4)
+        right_layout.addWidget(toolbar_widget)
+        right_layout.addWidget(properties_panel, stretch=1)
+        
+        # Удалить side_tabs из splitter
+        if self.side_tabs in [self.main_splitter.widget(i) for i in range(self.main_splitter.count())]:
+            self.main_splitter.removeWidget(self.side_tabs)
+        self.side_tabs.hide()
+        
+        # Скрыть unified_panel (компоненты извлечены)
+        unified_panel.hide()
+        
+        # Добавить новые виджеты в splitter
+        # Найти позицию glview
+        glview_index = -1
+        for i in range(self.main_splitter.count()):
+            if self.main_splitter.widget(i) == self.glview:
+                glview_index = i
+                break
+        
+        if glview_index >= 0:
+            # Вставить дерево перед glview
+            self.main_splitter.insertWidget(glview_index, structure_tree)
+            # Вставить правую панель после glview
+            self.main_splitter.insertWidget(glview_index + 2, right_panel)
+        else:
+            # Если glview не найден, добавить в конец
+            self.main_splitter.addWidget(structure_tree)
+            self.main_splitter.addWidget(right_panel)
+        
+        # Установить пропорции: дерево 20%, glview 60%, панель 20%
+        # Найти индексы после вставки
+        structure_index = -1
+        glview_index = -1
+        panel_index = -1
+        for i in range(self.main_splitter.count()):
+            widget = self.main_splitter.widget(i)
+            if widget == structure_tree:
+                structure_index = i
+            elif widget == self.glview:
+                glview_index = i
+            elif widget == right_panel:
+                panel_index = i
+        
+        if structure_index >= 0:
+            self.main_splitter.setStretchFactor(structure_index, 2)  # Дерево
+        if glview_index >= 0:
+            self.main_splitter.setStretchFactor(glview_index, 6)  # glview
+        if panel_index >= 0:
+            self.main_splitter.setStretchFactor(panel_index, 2)  # Панель
+        
+        # Сохранить ссылки
+        self._unified_structure_tree = structure_tree
+        self._unified_properties_panel = properties_panel
+        self._unified_toolbar_widget = toolbar_widget
+        self._unified_mode_active = True
+        
+        # Показать компоненты
+        structure_tree.show()
+        right_panel.show()
+    
+    def _teardown_unified_mode(self) -> None:
+        """
+        Восстановить исходный layout после режима unified.
+        """
+        if not self._unified_mode_active:
+            return
+        
+        # Удалить компоненты unified режима из splitter
+        widgets_to_remove = []
+        for i in range(self.main_splitter.count()):
+            widget = self.main_splitter.widget(i)
+            if widget == self._unified_structure_tree:
+                widgets_to_remove.append((i, widget))
+            elif self._unified_toolbar_widget and widget and hasattr(widget, 'layout'):
+                # Проверить, содержит ли виджет тулбар
+                layout = widget.layout()
+                if layout and self._unified_toolbar_widget in [layout.itemAt(j).widget() for j in range(layout.count()) if layout.itemAt(j) and layout.itemAt(j).widget()]:
+                    widgets_to_remove.append((i, widget))
+        
+        # Удалить в обратном порядке, чтобы индексы не сбились
+        for i, widget in sorted(widgets_to_remove, reverse=True):
+            self.main_splitter.removeWidget(widget)
+            widget.hide()
+        
+        # Вернуть компоненты обратно в unified_panel
+        if hasattr(self, 'tower_builder_panel') and hasattr(self.tower_builder_panel, '_unified_panel'):
+            unified_panel = self.tower_builder_panel._unified_panel
+            if unified_panel and self._unified_structure_tree:
+                # Вернуть дерево и панель свойств в unified_panel
+                # (они будут восстановлены при следующем показе unified_panel)
+                pass
+        
+        # Восстановить side_tabs
+        if self.side_tabs not in [self.main_splitter.widget(i) for i in range(self.main_splitter.count())]:
+            self.main_splitter.addWidget(self.side_tabs)
+            self.side_tabs.show()
+        
+        # Восстановить исходные пропорции
+        if self._original_splitter_structure:
+            sizes, orientation = self._original_splitter_structure
+            if len(sizes) >= 2:
+                self.main_splitter.setSizes(sizes)
+        
+        # Сбросить флаги
+        self._unified_structure_tree = None
+        self._unified_properties_panel = None
+        self._unified_toolbar_widget = None
+        self._unified_mode_active = False
 
     def align_all_sections_dialog(self):
         """Диалог выбора пояса для выравнивания всех секций."""

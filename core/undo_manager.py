@@ -761,6 +761,14 @@ class TowerBlueprintApplyCommand(Command):
                 # Pass to editor_3d
                 if hasattr(self.main_window.editor_3d, 'set_structural_lines'):
                     self.main_window.editor_3d.set_structural_lines(members_data)
+                
+                # Очистить предпросмотр из конструктора, т.к. blueprint применен
+                if hasattr(self.main_window.editor_3d, '_clear_tower_preview'):
+                    self.main_window.editor_3d._clear_tower_preview()
+                
+                # Установить флаг применения blueprint
+                if hasattr(self.main_window.editor_3d, '_blueprint_applied'):
+                    self.main_window.editor_3d._blueprint_applied = True
                     
             except Exception as e:
                 logger.error(f"Ошибка построения структурной модели для визуализации: {e}")

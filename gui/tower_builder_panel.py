@@ -57,6 +57,7 @@ class TowerBuilderPanel(QWidget):
 
     blueprintRequested = pyqtSignal(TowerBlueprintV2)
     statusMessage = pyqtSignal(str)
+    towerVisualizationRequested = pyqtSignal(TowerBlueprintV2)  # Сигнал для запроса визуализации в основном окне
 
     def __init__(self, parent: Optional[QWidget] = None):
         super().__init__(parent)
@@ -1277,17 +1278,27 @@ class TowerBuilderPanel(QWidget):
             self._unified_panel = UnifiedTowerBuilderPanel()
             self._unified_panel.blueprintRequested.connect(self.blueprintRequested.emit)
             self._unified_panel.statusMessage.connect(self.statusMessage.emit)
+            # Подключить сигнал визуализации для отображения в основном окне
+            self._unified_panel.towerVisualizationRequested.connect(self.towerVisualizationRequested.emit)
             layout.addWidget(self._unified_panel)
             self.generate_btn.setVisible(False)
             
             if current_blueprint:
                 self._unified_panel.set_blueprint(current_blueprint)
+            
+            # Уведомить родительский виджет о переключении режима для обновления layout
+            if hasattr(self.parent(), '_update_builder_panel_visibility'):
+                self.parent()._update_builder_panel_visibility()
         else:
             layout.addWidget(self.tabs)
             self.generate_btn.setVisible(True)
             
             if current_blueprint:
                 self.set_blueprint(current_blueprint)
+            
+            # Уведомить родительский виджет о переключении режима для обновления layout
+            if hasattr(self.parent(), '_update_builder_panel_visibility'):
+                self.parent()._update_builder_panel_visibility()
     
     def _update_summary(self) -> None:
         segments = self._collect_segments()

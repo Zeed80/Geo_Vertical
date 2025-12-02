@@ -1,8 +1,8 @@
 """
-Единая панель конструктора башни с тремя областями:
+Единая панель конструктора башни с двумя областями:
 - Дерево структуры (слева)
-- 3D визуализация (центр)
 - Панель свойств (справа)
+3D визуализация отображается в основном окне PointEditor3DWidget
 """
 
 from __future__ import annotations
@@ -17,23 +17,26 @@ from PyQt6.QtWidgets import (
     QPushButton,
     QLabel,
     QMessageBox,
+    QTextEdit,
+    QGroupBox,
 )
 
 from core.tower_generator import TowerBlueprintV2
 from core.db.profile_manager import ProfileManager
-from gui.enhanced_tower_preview import EnhancedTowerPreview3D
 from gui.tower_structure_tree import TowerStructureTreeWidget
 from gui.tower_properties_panel import TowerPropertiesPanel
 
 
 class UnifiedTowerBuilderPanel(QWidget):
     """
-    Единая панель конструктора башни с тремя областями.
-    Объединяет дерево структуры, 3D визуализацию и панель свойств.
+    Единая панель конструктора башни с двумя областями.
+    Объединяет дерево структуры и панель свойств.
+    3D визуализация отображается в основном окне через сигнал towerVisualizationRequested.
     """
     
     blueprintRequested = pyqtSignal(TowerBlueprintV2)
     statusMessage = pyqtSignal(str)
+    towerVisualizationRequested = pyqtSignal(TowerBlueprintV2)  # Сигнал для запроса визуализации в основном окне
     
     def __init__(self, parent: Optional[QWidget] = None):
         super().__init__(parent)
@@ -76,7 +79,7 @@ class UnifiedTowerBuilderPanel(QWidget):
         
         main_layout.addLayout(self.toolbar)
         
-        # Основной splitter с тремя областями
+        # Основной splitter с двумя областями
         main_splitter = QSplitter(Qt.Orientation.Horizontal)
         main_splitter.setChildrenCollapsible(False)
         main_splitter.setHandleWidth(6)
@@ -87,20 +90,15 @@ class UnifiedTowerBuilderPanel(QWidget):
         self.structure_tree.setMaximumWidth(420)
         main_splitter.addWidget(self.structure_tree)
         
-        # Центральная область: 3D визуализация
-        self.preview_3d = EnhancedTowerPreview3D()
-        main_splitter.addWidget(self.preview_3d)
-        
         # Правая область: Панель свойств
         self.properties_panel = TowerPropertiesPanel(self.profile_manager)
         self.properties_panel.setMinimumWidth(350)
         self.properties_panel.setMaximumWidth(500)
         main_splitter.addWidget(self.properties_panel)
         
-        # Пропорции: дерево 20%, 3D 50%, свойства 30%
+        # Пропорции: дерево 40%, свойства 60%
         main_splitter.setStretchFactor(0, 2)
-        main_splitter.setStretchFactor(1, 5)
-        main_splitter.setStretchFactor(2, 3)
+        main_splitter.setStretchFactor(1, 3)
         
         main_layout.addWidget(main_splitter, stretch=1)
         
@@ -122,14 +120,16 @@ class UnifiedTowerBuilderPanel(QWidget):
         if blueprint:
             # Обновить все компоненты
             self.structure_tree.set_blueprint(blueprint)
-            self.preview_3d.set_blueprint(blueprint)
             self.properties_panel.set_blueprint(blueprint)
+            # Запросить визуализацию в основном окне
+            self.towerVisualizationRequested.emit(blueprint)
             self.statusMessage.emit("Чертёж загружен")
         else:
             self.structure_tree.set_blueprint(None)
-            self.preview_3d.reset()
             self.properties_panel.set_element(None, {})
             self.properties_panel.set_blueprint(None)
+            # Очистить визуализацию в основном окне
+            self.towerVisualizationRequested.emit(None)
             self.statusMessage.emit("Чертёж очищен")
     
     def get_blueprint(self) -> Optional[TowerBlueprintV2]:
@@ -171,8 +171,9 @@ class UnifiedTowerBuilderPanel(QWidget):
         if self._current_blueprint:
             # Обновить все компоненты
             self.structure_tree.set_blueprint(self._current_blueprint)
-            self.preview_3d.set_blueprint(self._current_blueprint)
             self.properties_panel.set_blueprint(self._current_blueprint)
+            # Обновить визуализацию в основном окне
+            self.towerVisualizationRequested.emit(self._current_blueprint)
     
     def _on_profile_assigned(self, element_type: str, profile_name: str) -> None:
         """Обработка назначения профиля."""
@@ -210,3 +211,15 @@ class UnifiedTowerBuilderPanel(QWidget):
             self.statusMessage.emit("Чертёж башни обновлён")
         else:
             self.statusMessage.emit("Нет чертежа для построения")
+    
+    def get_structure_tree(self) -> TowerStructureTreeWidget:
+        """Получить дерево структуры башни."""
+        return self.structure_tree
+    
+    def get_properties_panel(self) -> TowerPropertiesPanel:
+        """Получить панель свойств."""
+        return self.properties_panel
+    
+    def get_toolbar(self) -> QHBoxLayout:
+        """Получить тулбар с кнопками управления."""
+        return self.toolbar
