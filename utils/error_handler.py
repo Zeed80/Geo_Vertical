@@ -4,8 +4,9 @@
 
 import logging
 import traceback
-from typing import Optional, Callable, Any
+from collections.abc import Callable
 from functools import wraps
+from typing import Any
 
 from core.exceptions import GeoVerticalError
 
@@ -16,11 +17,11 @@ def handle_errors(
     default_return: Any = None,
     log_error: bool = True,
     reraise: bool = True,
-    error_message: Optional[str] = None
+    error_message: str | None = None
 ):
     """
     Декоратор для обработки ошибок в функциях
-    
+
     Args:
         default_return: Значение, возвращаемое при ошибке (если reraise=False)
         log_error: Логировать ли ошибку
@@ -44,14 +45,14 @@ def handle_errors(
                 error_msg = error_message or f"Неожиданная ошибка в {func.__name__}"
                 if log_error:
                     logger.critical(
-                        f"{error_msg}: {type(e).__name__}: {str(e)}\n"
+                        f"{error_msg}: {type(e).__name__}: {e!s}\n"
                         f"Traceback:\n{traceback.format_exc()}",
                         exc_info=True
                     )
                 if reraise:
                     # Преобразуем в известное исключение приложения
                     from core.exceptions import CalculationError
-                    raise CalculationError(f"{error_msg}: {str(e)}") from e
+                    raise CalculationError(f"{error_msg}: {e!s}") from e
                 return default_return
         return wrapper
     return decorator
@@ -62,12 +63,12 @@ def safe_execute(
     *args,
     default_return: Any = None,
     log_error: bool = True,
-    error_message: Optional[str] = None,
+    error_message: str | None = None,
     **kwargs
 ) -> Any:
     """
     Безопасное выполнение функции с обработкой ошибок
-    
+
     Args:
         func: Функция для выполнения
         *args: Позиционные аргументы
@@ -75,7 +76,7 @@ def safe_execute(
         log_error: Логировать ли ошибку
         error_message: Кастомное сообщение
         **kwargs: Именованные аргументы
-        
+
     Returns:
         Результат функции или default_return при ошибке
     """
@@ -89,51 +90,51 @@ def safe_execute(
         error_msg = error_message or f"Неожиданная ошибка при выполнении {func.__name__}"
         if log_error:
             logger.critical(
-                f"{error_msg}: {type(e).__name__}: {str(e)}\n"
+                f"{error_msg}: {type(e).__name__}: {e!s}\n"
                 f"Traceback:\n{traceback.format_exc()}",
                 exc_info=True
             )
         return default_return
 
 
-def format_error_message(error: Exception, context: Optional[str] = None) -> str:
+def format_error_message(error: Exception, context: str | None = None) -> str:
     """
     Форматирует сообщение об ошибке для пользователя
-    
+
     Args:
         error: Исключение
         context: Контекст ошибки
-        
+
     Returns:
         Отформатированное сообщение
     """
     error_type = type(error).__name__
     error_msg = str(error)
-    
+
     # Улучшаем сообщения для известных ошибок
     if isinstance(error, GeoVerticalError):
         if context:
             return f"{context}: {error_msg}"
         return error_msg
-    
+
     # Для неизвестных ошибок добавляем контекст
     if context:
         return f"{context}: {error_type}: {error_msg}"
-    
+
     return f"{error_type}: {error_msg}"
 
 
-def log_critical_error(error: Exception, context: Optional[str] = None):
+def log_critical_error(error: Exception, context: str | None = None):
     """
     Логирует критическую ошибку с полным traceback
-    
+
     Args:
         error: Исключение
         context: Контекст ошибки
     """
     context_msg = f" [{context}]" if context else ""
     logger.critical(
-        f"КРИТИЧЕСКАЯ ОШИБКА{context_msg}: {type(error).__name__}: {str(error)}\n"
+        f"КРИТИЧЕСКАЯ ОШИБКА{context_msg}: {type(error).__name__}: {error!s}\n"
         f"Traceback:\n{traceback.format_exc()}",
         exc_info=True
     )

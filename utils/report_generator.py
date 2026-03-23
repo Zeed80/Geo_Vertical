@@ -2,21 +2,20 @@
 Генератор отчетов в Excel и PDF
 """
 
-import math
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, Optional, List, Any
 
-import numpy as np
 import pandas as pd
+
+from core.normatives import get_straightness_tolerance, get_vertical_tolerance
 
 
 class ReportGenerator:
     """Генератор отчетов для анализа вертикальности мачт"""
-    
+
     def __init__(self):
         self.timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-        
+
     @staticmethod
     def _prepare_matplotlib_figure(figure, width: float, height: float, *, pad: float = 1.2,
                                    label_size: int = 9, title_size: int = 11):
@@ -41,15 +40,15 @@ class ReportGenerator:
         figure.tight_layout(pad=pad)
 
         return original_size
-    
-    def generate_excel_report(self, 
+
+    def generate_excel_report(self,
                               raw_data: pd.DataFrame,
-                              processed_data: Dict,
+                              processed_data: dict,
                               output_path: str,
-                              angular_measurements: Optional[Dict] = None):
+                              angular_measurements: dict | None = None):
         """
         Генерирует отчет в формате Excel
-        
+
         Args:
             raw_data: Исходные данные
             processed_data: Результаты расчетов
@@ -60,32 +59,31 @@ class ReportGenerator:
             from openpyxl import Workbook
             from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
             from openpyxl.utils import get_column_letter
-            from openpyxl.utils.dataframe import dataframe_to_rows
-            
+
             wb = Workbook()
-            
+
             # Лист 1: Результаты расчетов
             ws_results = wb.active
             ws_results.title = "Результаты"
-            
+
             centers = processed_data['centers']
-            
+
             ws_results['A1'] = 'Результаты расчетов'
             ws_results['A1'].font = Font(size=14, bold=True)
-            
+
             ws_results['A3'] = 'Центры поясов и отклонения'
             ws_results['A3'].font = Font(size=12, bold=True)
-            
+
             # Заголовки
             headers = ['№ пояса', 'Высота (м)', 'X центра (м)', 'Y центра (м)',
-                      'Отклонение от вертикали (мм)', 'Стрела прогиба (мм)', 
+                      'Отклонение от вертикали (мм)', 'Стрела прогиба (мм)',
                       'Точек в поясе']
-            
+
             header_alignment = Alignment(horizontal='center', vertical='center', wrap_text=True)
             data_alignment = Alignment(horizontal='center', vertical='center', wrap_text=True)
             thin = Side(style='thin', color='FFBFBFBF')
             border = Border(left=thin, right=thin, top=thin, bottom=thin)
-            
+
             for col_idx, header in enumerate(headers, start=1):
                 cell = ws_results.cell(row=4, column=col_idx)
                 cell.value = header
@@ -93,9 +91,9 @@ class ReportGenerator:
                 cell.fill = PatternFill(start_color='CCCCCC', end_color='CCCCCC', fill_type='solid')
                 cell.alignment = header_alignment
                 cell.border = border
-            
+
             ws_results.row_dimensions[4].height = 28
-            
+
             # Данные
             for i, (idx, row) in enumerate(centers.iterrows(), start=5):
                 ws_results.cell(row=i, column=1, value=i - 4)
@@ -103,53 +101,53 @@ class ReportGenerator:
                 ws_results.cell(row=i, column=3, value=round(row['x'], 6))
                 ws_results.cell(row=i, column=4, value=round(row['y'], 6))
                 ws_results.cell(row=i, column=5, value=round(row['deviation'] * 1000, 2))
-                
+
                 if 'straightness_deviation' in row:
                     ws_results.cell(row=i, column=6, value=round(row['straightness_deviation'] * 1000, 2))
-                
+
                 if 'points_count' in row:
                     ws_results.cell(row=i, column=7, value=int(row['points_count']))
-                
+
                 for col_idx in range(1, len(headers) + 1):
                     data_cell = ws_results.cell(row=i, column=col_idx)
                     data_cell.alignment = data_alignment
                     data_cell.border = border
                 ws_results.row_dimensions[i].height = 20
-            
+
             for col_idx, width in enumerate([10, 14, 16, 16, 20, 18, 14], start=1):
                 ws_results.column_dimensions[get_column_letter(col_idx)].width = width
-            
+
             ws_results.freeze_panes = 'A5'
-            
+
             # Лист 2: Нормативы и выводы
             ws3 = wb.create_sheet("Нормативы")
-            
+
             ws3['A1'] = 'Проверка соответствия нормативам'
             ws3['A1'].font = Font(size=14, bold=True)
-            
+
             ws3['A3'] = 'Нормативная база:'
             ws3['A4'] = 'СП 70.13330.2012: Отклонение от вертикали d ≤ 0.001 × h'
             ws3['A5'] = 'ГОСТ Р 71949-2025 Конструкции опорные антенных сооружений объектов связи: Стрела прогиба δ ≤ L / 750'
             for cell in ['A3', 'A4', 'A5']:
                 ws3[cell].alignment = Alignment(horizontal='left', vertical='center', wrap_text=True)
-            
+
             # Статистика
             from core.normatives import NormativeChecker
             checker = NormativeChecker()
-            
+
             vertical_check = checker.check_vertical_deviations(
                 centers['deviation'].tolist(),
                 centers['z'].tolist()
             )
-            
+
             ws3['A7'] = 'Результаты проверки вертикальности:'
             ws3['A8'] = f"Всего поясов: {vertical_check['total']}"
             ws3['A9'] = f"✓ В норме: {vertical_check['passed']}"
             ws3['A10'] = f"✗ Превышение: {vertical_check['failed']}"
-            
+
             ws3['A9'].font = Font(color='008000')
             ws3['A10'].font = Font(color='FF0000')
-            
+
             if vertical_check['non_compliant']:
                 ws3['A12'] = 'Пояса с превышением допуска:'
                 row_idx = 13
@@ -159,29 +157,29 @@ class ReportGenerator:
                     ws3[f'A{row_idx}'].font = Font(color='FF0000')
                     ws3[f'A{row_idx}'].alignment = Alignment(horizontal='left', vertical='center', wrap_text=True)
                     row_idx += 1
-            
+
             # Лист 3: Журнал угловых измерений
             if angular_measurements and (angular_measurements.get('x') or angular_measurements.get('y')):
                 ws_angular = wb.create_sheet("Журнал угловых измерений")
-                
+
                 headers_angular = ['№', 'Секция', 'H, м', 'Пояс', 'KL', 'KR', 'KL–KR (″)', 'βизм', 'Bизм', 'Δβ', 'Δb, мм']
                 # Оптимальные ширины столбцов (в единицах Excel, примерно соответствуют см)
                 angular_col_widths = [5, 9, 8, 12, 10, 10, 12, 10, 10, 10, 10]
-                
+
                 def append_angular_table_sheet(axis_label: str, rows: list, start_row: int):
                     """Добавляет таблицу угловых измерений для одной оси на лист."""
                     current_row = start_row
-                    
+
                     # Заголовок оси
                     ws_angular[f'A{current_row}'] = f'Ось {axis_label}'
                     ws_angular[f'A{current_row}'].font = Font(size=12, bold=True)
                     current_row += 2
-                    
+
                     if not rows:
                         ws_angular[f'A{current_row}'] = 'Данные отсутствуют'
                         ws_angular[f'A{current_row}'].font = Font(italic=True)
                         return current_row + 2
-                    
+
                     # Заголовки таблицы
                     for col_idx, header in enumerate(headers_angular, start=1):
                         cell = ws_angular.cell(row=current_row, column=col_idx)
@@ -194,22 +192,22 @@ class ReportGenerator:
                         cell.fill = PatternFill(start_color='CCCCCC', end_color='CCCCCC', fill_type='solid')
                         cell.alignment = Alignment(horizontal='center', vertical='center', wrap_text=True)
                         cell.border = border
-                    
+
                     ws_angular.row_dimensions[current_row].height = 40
-                    
+
                     # Ширина столбцов
                     for col_idx, width in enumerate(angular_col_widths, start=1):
                         ws_angular.column_dimensions[get_column_letter(col_idx)].width = width
-                    
+
                     current_row += 1
-                    
+
                     # Данные
                     for idx, row in enumerate(rows, start=1):
                         height = row.get('height')
                         height_str = f"{float(height):.3f}" if height is not None else '—'
                         belt_value = row.get('belt', '—')
                         belt_str = str(belt_value) if belt_value is not None else '—'
-                        
+
                         values = [
                             str(idx),
                             str(row.get('section_label', '—')),
@@ -223,7 +221,7 @@ class ReportGenerator:
                             row.get('delta_str', '—'),
                             row.get('delta_mm_str', '—'),
                         ]
-                        
+
                         for col_idx, value in enumerate(values, start=1):
                             cell = ws_angular.cell(row=current_row, column=col_idx)
                             cell.value = value
@@ -232,25 +230,25 @@ class ReportGenerator:
                             # Для столбца "Пояс" включаем перенос текста
                             if col_idx == 4:
                                 cell.alignment = Alignment(horizontal='center', vertical='center', wrap_text=True)
-                        
+
                         ws_angular.row_dimensions[current_row].height = 20
                         current_row += 1
-                    
+
                     return current_row + 2
-                
+
                 # Добавляем таблицы для осей X и Y
                 rows_x = angular_measurements.get('x', [])
                 rows_y = angular_measurements.get('y', [])
-                
+
                 start_row = 1
                 if rows_x:
                     start_row = append_angular_table_sheet('X', rows_x, start_row)
                 if rows_y:
                     start_row = append_angular_table_sheet('Y', rows_y, start_row)
-                
+
                 # Замораживаем первую строку с заголовками
                 ws_angular.freeze_panes = 'A1'
-            
+
             # Автоширина колонок (кроме листа с угловыми измерениями, там ширина задана явно)
             sheets_for_auto_width = [ws_results, ws3]
             for ws in sheets_for_auto_width:
@@ -261,26 +259,26 @@ class ReportGenerator:
                         try:
                             if len(str(cell.value)) > max_length:
                                 max_length = len(str(cell.value))
-                        except:
+                        except (TypeError, ValueError):
                             pass
                     adjusted_width = min(max_length + 2, 50)
                     ws.column_dimensions[column_letter].width = adjusted_width
-            
+
             # Сохраняем
             wb.save(output_path)
-            
+
         except Exception as e:
-            raise ValueError(f"Ошибка генерации Excel отчета: {str(e)}")
-    
+            raise ValueError(f"Ошибка генерации Excel отчета: {e!s}")
+
     def generate_pdf_report(self,
                            raw_data: pd.DataFrame,
-                           processed_data: Dict,
+                           processed_data: dict,
                            output_path: str,
                            vertical_plot_widget=None,
                            straightness_plot_widget=None):
         """
         Генерирует отчет в формате PDF
-        
+
         Args:
             raw_data: Исходные данные
             processed_data: Результаты расчетов
@@ -289,20 +287,19 @@ class ReportGenerator:
             straightness_plot_widget: Виджет графика прямолинейности
         """
         try:
-            from reportlab.lib import colors
-            from reportlab.lib.pagesizes import A4, landscape
-            from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer, PageBreak, Image
-            from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
-            from reportlab.lib.units import cm
-            from reportlab.pdfbase import pdfmetrics
-            from reportlab.pdfbase.ttfonts import TTFont
             import tempfile
-            
+
+            from reportlab.lib import colors
+            from reportlab.lib.pagesizes import A4
+            from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
+            from reportlab.lib.units import cm
+            from reportlab.platypus import Image, PageBreak, Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
+
             # Создаем PDF
             doc = SimpleDocTemplate(output_path, pagesize=A4)
             story = []
             styles = getSampleStyleSheet()
-            
+
             # Титульный лист
             title_style = ParagraphStyle(
                 'CustomTitle',
@@ -313,7 +310,7 @@ class ReportGenerator:
                 spaceBefore=60,
                 alignment=1  # CENTER
             )
-            
+
             subtitle_style = ParagraphStyle(
                 'Subtitle',
                 parent=styles['Normal'],
@@ -322,14 +319,14 @@ class ReportGenerator:
                 spaceAfter=30,
                 alignment=1
             )
-            
+
             story.append(Paragraph('<b>ОТЧЕТ</b>', title_style))
             story.append(Paragraph('ПО ГЕОДЕЗИЧЕСКОМУ КОНТРОЛЮ', title_style))
             story.append(Paragraph('АНТЕННО-МАЧТОВОГО СООРУЖЕНИЯ', title_style))
             story.append(Spacer(1, 40))
             story.append(Paragraph(f'Дата обследования: {self.timestamp}', subtitle_style))
             story.append(Spacer(1, 20))
-            
+
             # Секция: Нормативная база
             section_style = ParagraphStyle(
                 'SectionHeader',
@@ -340,7 +337,7 @@ class ReportGenerator:
                 spaceAfter=10,
                 leftIndent=0
             )
-            
+
             story.append(PageBreak())
             story.append(Paragraph('<b>1. НОРМАТИВНАЯ БАЗА</b>', section_style))
             story.append(Paragraph('<b>СП 70.13330.2012</b> "Несущие и ограждающие конструкции":', styles['Normal']))
@@ -349,26 +346,26 @@ class ReportGenerator:
             story.append(Paragraph('<b>ГОСТ Р 71949-2025 Конструкции опорные антенных сооружений объектов связи:</b>', styles['Normal']))
             story.append(Paragraph('&nbsp;&nbsp;&nbsp;• Стрела прогиба: <b>δ ≤ L / 750</b>', styles['Normal']))
             story.append(Spacer(1, 20))
-            
+
             story.append(PageBreak())
-            
+
             # Секция: Результаты расчетов
             story.append(Paragraph('2. Результаты расчетов', styles['Heading2']))
-            
+
             centers = processed_data['centers']
             story.append(Paragraph(f'Количество обнаруженных поясов: {len(centers)}', styles['Normal']))
             story.append(Spacer(1, 10))
-            
+
             # Таблица результатов (улучшенный стиль)
             data = [['№\nпояса', 'Высота,\nм', 'Отклонение\nот вертикали,\nмм', 'Допуск,\nмм', 'Соответствие\nнормативу']]
-            
-            from core.normatives import get_vertical_tolerance, get_straightness_tolerance
-            
+
+            from core.normatives import get_vertical_tolerance
+
             for i, (idx, row) in enumerate(centers.iterrows(), start=1):
                 dev_mm = row['deviation'] * 1000
                 tolerance_mm = get_vertical_tolerance(row['z']) * 1000
                 status = '✓ Соответствует' if abs(dev_mm) <= tolerance_mm else '✗ Превышение'
-                
+
                 data.append([
                     str(i),
                     f"{row['z']:.2f}",
@@ -376,7 +373,7 @@ class ReportGenerator:
                     f"{tolerance_mm:.2f}",
                     status
                 ])
-            
+
             table = Table(data, colWidths=[1.5*cm, 2*cm, 3*cm, 2.5*cm, 4*cm])
             table.setStyle(TableStyle([
                 ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#2C3E50')),
@@ -392,13 +389,13 @@ class ReportGenerator:
                 ('GRID', (0, 0), (-1, -1), 0.5, colors.HexColor('#95A5A6')),
                 ('ROWBACKGROUNDS', (0, 1), (-1, -1), [colors.white, colors.HexColor('#F8F9FA')])
             ]))
-            
+
             story.append(table)
             story.append(PageBreak())
-            
+
             # Секция: Графики
             story.append(Paragraph('3. Графический анализ', styles['Heading2']))
-            
+
             # Сохраняем графики во временные файлы
             if vertical_plot_widget and hasattr(vertical_plot_widget, 'figure'):
                 fig = vertical_plot_widget.figure
@@ -410,14 +407,14 @@ class ReportGenerator:
                     Path(tmp.name).unlink()
                 if original_size is not None:
                     fig.set_size_inches(original_size)
-            
+
             story.append(Spacer(1, 10))
-            
+
             grouped_straightness_figures = []
             if straightness_plot_widget and hasattr(straightness_plot_widget, 'get_grouped_figures_for_pdf'):
                 try:
                     grouped_straightness_figures = straightness_plot_widget.get_grouped_figures_for_pdf()
-                except Exception as exc:  # noqa: BLE001
+                except Exception as exc:
                     print(f"Не удалось получить сгруппированные графики прямолинейности: {exc}")
 
             if grouped_straightness_figures:
@@ -451,39 +448,39 @@ class ReportGenerator:
                     Path(tmp.name).unlink()
                 if original_size is not None:
                     fig.set_size_inches(original_size)
-            
+
             story.append(PageBreak())
-            
+
             # Секция: Выводы
             story.append(Paragraph('4. Выводы', styles['Heading2']))
-            
+
             from core.normatives import NormativeChecker
             checker = NormativeChecker()
-            
+
             vertical_check = checker.check_vertical_deviations(
                 centers['deviation'].tolist(),
                 centers['z'].tolist()
             )
-            
+
             story.append(Paragraph(f"Проверено поясов: {vertical_check['total']}", styles['Normal']))
             story.append(Paragraph(f"✓ Соответствуют нормативам: {vertical_check['passed']}", styles['Normal']))
             story.append(Paragraph(f"✗ Превышение допуска: {vertical_check['failed']}", styles['Normal']))
-            
+
             if vertical_check['failed'] == 0:
                 story.append(Spacer(1, 10))
-                story.append(Paragraph('<b>Заключение: Мачта соответствует нормативным требованиям по вертикальности.</b>', 
+                story.append(Paragraph('<b>Заключение: Мачта соответствует нормативным требованиям по вертикальности.</b>',
                                       styles['Normal']))
             else:
                 story.append(Spacer(1, 10))
                 story.append(Paragraph('<b>Заключение: Обнаружены превышения допустимых отклонений. Требуется корректировка.</b>',
                                       styles['Normal']))
-            
+
             # Генерируем PDF
             doc.build(story)
-            
+
         except Exception as e:
-            raise ValueError(f"Ошибка генерации PDF отчета: {str(e)}")
-    
+            raise ValueError(f"Ошибка генерации PDF отчета: {e!s}")
+
     def generate_docx_report(self,
                             raw_data: pd.DataFrame,
                             processed_data: dict,
@@ -493,7 +490,7 @@ class ReportGenerator:
                             straightness_widget=None):
         """
         Генерирует отчет в формате DOCX (MS Word), идентичный PDF
-        
+
         Args:
             raw_data: Исходные данные
             processed_data: Результаты расчетов
@@ -503,27 +500,28 @@ class ReportGenerator:
             straightness_widget: Виджет графика прямолинейности
         """
         try:
-            from docx import Document
-            from docx.shared import Cm, Inches, Pt, RGBColor
-            from docx.enum.table import WD_ALIGN_VERTICAL, WD_ROW_HEIGHT_RULE, WD_TABLE_ALIGNMENT
-            from docx.enum.text import WD_ALIGN_PARAGRAPH
             import tempfile
             from pathlib import Path
-            
+
+            from docx import Document
+            from docx.enum.table import WD_ALIGN_VERTICAL, WD_ROW_HEIGHT_RULE, WD_TABLE_ALIGNMENT
+            from docx.enum.text import WD_ALIGN_PARAGRAPH
+            from docx.shared import Cm, Inches, Pt, RGBColor
+
             # Создаем директорию для временных файлов
             output_dir = Path(output_path).parent
             temp_dir = output_dir / 'temp_charts'
             temp_dir.mkdir(exist_ok=True)
             temp_files = []
-            
+
             # Создаем документ
             doc = Document()
-            
+
             # Настройка полей страницы: левое 2,0 см, правое 0,75 см
             section = doc.sections[0]
             section.left_margin = Cm(2.0)
             section.right_margin = Cm(0.75)
-            
+
             def format_table(table, *, header_rows: int = 1, font_size: int = 9, column_widths=None):
                 """Унифицированное форматирование таблиц DOCX для предотвращения наложений."""
                 if table is None:
@@ -561,36 +559,36 @@ class ReportGenerator:
             font = style.font
             font.name = 'Arial'  # Используем Arial вместо Times New Roman
             font.size = Pt(10)
-            
+
             # === ТИТУЛЬНАЯ СТРАНИЦА (Приложение Л) ===
             # Приложение Л (курсивом)
             title = doc.add_paragraph('Приложение Л', style='Title')
             title.runs[0].italic = True
             title.runs[0].font.size = Pt(12)
-            
+
             # Подзаголовок
             subtitle = doc.add_paragraph('Протокол геодезических измерений сооружения', style='Body Text')
             subtitle.runs[0].font.size = Pt(12)
-            
+
             doc.add_paragraph()  # Отступ
-            
+
             centers = processed_data['centers']
             max_height = float(centers['z'].max()) if len(centers) > 0 else 0.0
-            
+
             # === ТАБЛИЦА ОТКЛОНЕНИЙ СТВОЛА ОТ ВЕРТИКАЛИ ===
             heading = doc.add_paragraph()
             heading.alignment = WD_ALIGN_PARAGRAPH.CENTER
             run = heading.add_run('ТАБЛИЦА ОТКЛОНЕНИЙ СТВОЛА ОТ ВЕРТИКАЛИ')
             run.italic = True
             run.font.size = Pt(12)
-            
+
             doc.add_paragraph()
-            
+
             # Таблица с информацией об объекте
             info_table = doc.add_table(rows=2, cols=6)
             info_table.style = 'Table Grid'
             info_table.alignment = WD_TABLE_ALIGNMENT.CENTER
-            
+
             # Первая строка
             row1 = info_table.rows[0]
             row1.cells[0].text = 'Тип опоры'
@@ -599,7 +597,7 @@ class ReportGenerator:
             row1.cells[3].text = f'{max_height:.1f} м'
             row1.cells[4].text = 'Инструмент'
             row1.cells[5].text = 'Тахеометр'
-            
+
             # Вторая строка
             row2 = info_table.rows[1]
             row2.cells[0].text = 'Проект'
@@ -608,7 +606,7 @@ class ReportGenerator:
             row2.cells[3].text = object_info.get('location', '') if object_info else ''
             row2.cells[4].text = 'Дата'
             row2.cells[5].text = self.timestamp.split()[0] if ' ' in self.timestamp else self.timestamp
-            
+
             # Форматирование таблицы
             for row in info_table.rows:
                 for cell in row.cells:
@@ -616,49 +614,49 @@ class ReportGenerator:
                         paragraph.alignment = WD_ALIGN_PARAGRAPH.CENTER
                         for run in paragraph.runs:
                             run.font.size = Pt(10)
-            
+
             format_table(
                 info_table,
                 header_rows=0,
                 font_size=10,
                 column_widths=[3.0, 4.0, 3.0, 3.2, 3.0, 4.0]
             )
-            
+
             doc.add_paragraph()
-            
+
             # Таблица с результатами отклонений (горизонтальная)
             results_table = doc.add_table(rows=2, cols=min(len(centers) + 1, 11))
             results_table.style = 'Table Grid'
             results_table.alignment = WD_TABLE_ALIGNMENT.CENTER
-            
+
             # Заголовки (первые 10 поясов)
             header_row = results_table.rows[0]
             header_row.cells[0].text = '№ пояса'
             for i, (idx, row) in enumerate(centers.head(10).iterrows(), start=1):
                 header_row.cells[i].text = str(i)
-            
+
             # Отметки высот
             height_row = results_table.rows[1]
             height_row.cells[0].text = 'Отметка, м'
             for i, (idx, row) in enumerate(centers.head(10).iterrows(), start=1):
                 height_row.cells[i].text = f"{row['z']:.3f}"
-            
+
             # Отклонения от вертикали
             deviation_row = results_table.add_row()
             deviation_row.cells[0].text = 'Смещение центра сечения пояса от 0,001H вертикали, мм'
-            
+
             for i, (idx, row) in enumerate(centers.head(10).iterrows(), start=1):
                 dev_mm = row['deviation'] * 1000
                 tolerance_mm = get_vertical_tolerance(row['z']) * 1000
                 deviation_row.cells[i].text = f"{dev_mm:.1f}"
-                
+
                 # Красный цвет для превышений
                 if abs(dev_mm) > tolerance_mm:
                     for paragraph in deviation_row.cells[i].paragraphs:
                         for run in paragraph.runs:
                             run.font.color.rgb = RGBColor(255, 0, 0)
                             run.font.bold = True
-            
+
             results_columns = len(results_table.columns)
             format_table(
                 results_table,
@@ -666,30 +664,30 @@ class ReportGenerator:
                 font_size=9,
                 column_widths=[2.2] + [2.0] * (max(results_columns - 1, 0))
             )
-            
+
             doc.add_paragraph()
-            
+
             # Подпись составителя
             signature = doc.add_paragraph('Таблицу составил        ', style='Body Text')
             signature.add_run(object_info.get('executor', '____________') if object_info else '____________')
             signature.alignment = WD_ALIGN_PARAGRAPH.CENTER
-            
+
             doc.add_page_break()
-            
+
             # === ПРОТОКОЛ ИЗМЕРЕНИЙ ВЕРТИКАЛЬНОСТИ СТВОЛА ОПОРЫ ===
             heading2 = doc.add_paragraph()
             heading2.alignment = WD_ALIGN_PARAGRAPH.CENTER
             run2 = heading2.add_run('ПРОТОКОЛ ИЗМЕРЕНИЙ ВЕРТИКАЛЬНОСТИ СТВОЛА ОПОРЫ')
             run2.italic = True
             run2.font.size = Pt(12)
-            
+
             doc.add_paragraph()
-            
+
             # Таблица с параметрами измерений
             params_table = doc.add_table(rows=3, cols=6)
             params_table.style = 'Table Grid'
             params_table.alignment = WD_TABLE_ALIGNMENT.CENTER
-            
+
             row1 = params_table.rows[0]
             row1.cells[0].text = 'Тип опоры'
             row1.cells[1].text = object_info.get('project_name', 'Башня') if object_info else 'Башня'
@@ -697,7 +695,7 @@ class ReportGenerator:
             row1.cells[3].text = f'{max_height:.1f} м'
             row1.cells[4].text = 'Инструмент'
             row1.cells[5].text = 'Тахеометр'
-            
+
             row2 = params_table.rows[1]
             row2.cells[0].text = 'Облачность'
             row2.cells[1].text = ''
@@ -705,7 +703,7 @@ class ReportGenerator:
             row2.cells[3].text = ''
             row2.cells[4].text = 'Изображения'
             row2.cells[5].text = 'Без искажений'
-            
+
             row3 = params_table.rows[2]
             row3.cells[0].text = 'Наблюдатель'
             row3.cells[1].text = object_info.get('executor', '') if object_info else ''
@@ -713,66 +711,66 @@ class ReportGenerator:
             row3.cells[3].text = self.timestamp.split()[0] if ' ' in self.timestamp else self.timestamp
             row3.cells[4].text = ''
             row3.cells[5].text = ''
-            
+
             format_table(
                 params_table,
                 header_rows=0,
                 font_size=10,
                 column_widths=[3.0, 3.8, 3.0, 3.2, 3.0, 3.0]
             )
-            
+
             doc.add_paragraph()
-            
+
             # Таблица с отклонениями по высотам (первые 10 поясов)
             heights_table = doc.add_table(rows=4, cols=min(len(centers) + 1, 11))
             heights_table.style = 'Table Grid'
             heights_table.alignment = WD_TABLE_ALIGNMENT.CENTER
-            
+
             # Строка 1: Высота сечения
             row1 = heights_table.rows[0]
             row1.cells[0].text = 'Высота сечения, м'
             for i, (idx, row) in enumerate(centers.head(10).iterrows(), start=1):
                 row1.cells[i].text = f"{row['z']:.3f}"
-            
+
             # Строка 2: Отклонение по оси X
             row2 = heights_table.rows[1]
             row2.cells[0].text = 'Отклонение от вертикали по оси Х, мм'
             for i, (idx, row) in enumerate(centers.head(10).iterrows(), start=1):
                 x_dev = (row['x'] - centers.iloc[0]['x']) * 1000 if 'x' in row else row['deviation'] * 1000
                 row2.cells[i].text = f"{x_dev:.1f}"
-            
+
             # Строка 3: Отклонение по оси Y
             row3 = heights_table.rows[2]
             row3.cells[0].text = 'Отклонение от вертикали по оси Y, мм'
             for i, (idx, row) in enumerate(centers.head(10).iterrows(), start=1):
                 y_dev = (row['y'] - centers.iloc[0]['y']) * 1000 if 'y' in row else 0.0
                 row3.cells[i].text = f"{y_dev:.1f}"
-            
+
             # Строка 4: Результирующее отклонение
             row4 = heights_table.rows[3]
             row4.cells[0].text = 'Результирующее отклонение, мм'
             for i, (idx, row) in enumerate(centers.head(10).iterrows(), start=1):
                 dev_mm = row['deviation'] * 1000
                 row4.cells[i].text = f"{dev_mm:.1f}"
-            
+
             format_table(
                 heights_table,
                 header_rows=1,
                 font_size=9,
                 column_widths=[3.0] + [2.2] * (max(len(heights_table.columns) - 1, 0))
             )
-            
+
             doc.add_paragraph()
-            
+
             # === ЗАКЛЮЧЕНИЕ ===
             conclusion_heading = doc.add_paragraph('Заключение:', style='Body Text')
             conclusion_heading.runs[0].font.bold = True
-            
+
             # Подсчет статистики
-            compliant_count = sum(1 for _, row in centers.iterrows() 
+            compliant_count = sum(1 for _, row in centers.iterrows()
                                 if abs(row['deviation'] * 1000) <= get_vertical_tolerance(row['z']) * 1000)
             non_compliant_count = len(centers) - compliant_count
-            
+
             # Вывод 1: Соответствие нормативам
             conclusion1 = doc.add_paragraph(style='List Paragraph')
             if non_compliant_count == 0:
@@ -788,7 +786,7 @@ class ReportGenerator:
                 run.font.bold = True
                 run.font.color.rgb = RGBColor(255, 0, 0)
                 conclusion1.add_run(f' допусков СП 70.13330.2012 «Несущие и ограждающие конструкции» на {non_compliant_count} поясах.').font.size = Pt(12)
-            
+
             # Вывод 2: Эксплуатация
             conclusion2 = doc.add_paragraph(style='List Paragraph')
             if non_compliant_count == 0:
@@ -804,31 +802,31 @@ class ReportGenerator:
                 run.font.bold = True
                 run.font.color.rgb = RGBColor(255, 0, 0)
                 conclusion2.add_run(' нормальной эксплуатации опоры.').font.size = Pt(12)
-            
+
             doc.add_paragraph()
-            
+
             # Подписи
             signature_para = doc.add_paragraph('Измерения выполнил              ', style='Body Text')
             signature_para.add_run(object_info.get('executor', '____________') if object_info else '____________')
             signature_para.add_run('        Вычисления проверил        ____________')
-            
+
             # === РАСЧЕТ СТРЕЛЫ ПРОГИБА (если есть данные) ===
             if 'straightness' in processed_data and len(processed_data['straightness']) > 0:
                 doc.add_page_break()
-                
+
                 heading3 = doc.add_paragraph()
                 heading3.alignment = WD_ALIGN_PARAGRAPH.CENTER
                 run3 = heading3.add_run('РАСЧЕТ СТРЕЛЫ ПРОГИБА ПОЯСА СТВОЛА (ПРЯМОЛИНЕЙНОСТЬ СТВОЛА)')
                 run3.italic = True
                 run3.font.size = Pt(12)
-                
+
                 doc.add_paragraph()
-                
+
                 # Таблица с параметрами
                 straight_params = doc.add_table(rows=3, cols=6)
                 straight_params.style = 'Table Grid'
                 straight_params.alignment = WD_TABLE_ALIGNMENT.CENTER
-                
+
                 row1 = straight_params.rows[0]
                 row1.cells[0].text = 'Тип опоры'
                 row1.cells[1].text = object_info.get('project_name', 'Башня') if object_info else 'Башня'
@@ -836,7 +834,7 @@ class ReportGenerator:
                 row1.cells[3].text = f'{max_height:.1f} м'
                 row1.cells[4].text = 'Инструмент'
                 row1.cells[5].text = 'Тахеометр'
-                
+
                 row2 = straight_params.rows[1]
                 row2.cells[0].text = 'Облачность'
                 row2.cells[1].text = ''
@@ -844,7 +842,7 @@ class ReportGenerator:
                 row2.cells[3].text = ''
                 row2.cells[4].text = 'Изображения'
                 row2.cells[5].text = 'Без искажений'
-                
+
                 row3 = straight_params.rows[2]
                 row3.cells[0].text = 'Наблюдатель'
                 row3.cells[1].text = object_info.get('executor', '') if object_info else ''
@@ -852,31 +850,31 @@ class ReportGenerator:
                 row3.cells[3].text = self.timestamp.split()[0] if ' ' in self.timestamp else self.timestamp
                 row3.cells[4].text = ''
                 row3.cells[5].text = ''
-                
+
                 format_table(
                     straight_params,
                     header_rows=0,
                     font_size=10,
                     column_widths=[3.0, 3.8, 3.0, 3.2, 3.0, 3.0]
                 )
-                
+
                 doc.add_paragraph()
-                
+
                 # Заключение по прямолинейности
                 straightness_data = processed_data['straightness']
                 max_deviation = abs(straightness_data['deviation_mm'].max())
-                
+
                 straight_conclusion_heading = doc.add_paragraph('Заключение:', style='Body Text')
                 straight_conclusion_heading.runs[0].font.bold = True
-                
+
                 straight_conclusion = doc.add_paragraph(style='Body Text')
                 straight_conclusion.alignment = WD_ALIGN_PARAGRAPH.JUSTIFY
-                
+
                 # Получаем минимальную и максимальную высоту из данных прямолинейности
                 if len(straightness_data) > 0:
                     segment_length = straightness_data['height_2'].max() - straightness_data['height_1'].min()
                     tolerance = get_straightness_tolerance(segment_length) * 1000
-                    
+
                     if max_deviation <= tolerance:
                         straight_conclusion.add_run(f'Стрела прогиба поясов башни не превышает допустимые значения. '
                                                    f'Максимальное значение составляет {max_deviation:.1f} мм при допуске {tolerance:.1f} мм.')
@@ -885,20 +883,20 @@ class ReportGenerator:
                                                          f'Максимальное значение составляет {max_deviation:.1f} мм при допуске {tolerance:.1f} мм.')
                         run.font.color.rgb = RGBColor(255, 0, 0)
                         run.font.bold = True
-                
+
                 doc.add_paragraph()
-                
+
                 # Подписи
                 straight_signature = doc.add_paragraph('Измерения выполнил              ', style='Body Text')
                 straight_signature.add_run(object_info.get('executor', '____________') if object_info else '____________')
                 straight_signature.add_run('        Вычисления проверил        ____________')
-            
+
             # Сохраняем документ
             doc.save(output_path)
-            
+
         except ImportError:
             raise ValueError("Для генерации DOCX отчетов требуется установить python-docx: pip install python-docx")
         except Exception as e:
-            raise ValueError(f"Ошибка генерации DOCX отчета: {str(e)}")
+            raise ValueError(f"Ошибка генерации DOCX отчета: {e!s}")
 
 

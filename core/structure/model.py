@@ -1,7 +1,9 @@
 from dataclasses import dataclass, field
-from typing import List, Dict, Optional, Any, Tuple
 from enum import Enum
+from typing import Any
+
 import numpy as np
+
 
 class MemberType(Enum):
     LEG = "leg"           # Пояс
@@ -17,7 +19,7 @@ class StructuralNode:
     y: float
     z: float
     is_fixed: bool = False # Закреплен ли узел (опора)
-    
+
     @property
     def coords(self) -> np.ndarray:
         return np.array([self.x, self.y, self.z])
@@ -28,10 +30,10 @@ class StructuralMember:
     start_node_id: int
     end_node_id: int
     member_type: MemberType
-    profile_data: Optional[Dict[str, Any]] = None # Данные профиля из БД
-    
+    profile_data: dict[str, Any] | None = None # Данные профиля из БД
+
     # Computed properties can be added here (length, vector, etc.)
-    
+
 @dataclass
 class TowerEquipment:
     id: int
@@ -48,19 +50,19 @@ class TowerEquipment:
 
 @dataclass
 class TowerModel:
-    nodes: Dict[int, StructuralNode] = field(default_factory=dict)
-    members: List[StructuralMember] = field(default_factory=list)
-    equipment: List[TowerEquipment] = field(default_factory=list)
-    
+    nodes: dict[int, StructuralNode] = field(default_factory=dict)
+    members: list[StructuralMember] = field(default_factory=list)
+    equipment: list[TowerEquipment] = field(default_factory=list)
+
     def add_node(self, x: float, y: float, z: float, is_fixed: bool = False) -> int:
         node_id = len(self.nodes) + 1
         self.nodes[node_id] = StructuralNode(node_id, x, y, z, is_fixed)
         return node_id
-        
-    def add_member(self, start_id: int, end_id: int, m_type: MemberType, profile: Optional[Dict] = None) -> int:
+
+    def add_member(self, start_id: int, end_id: int, m_type: MemberType, profile: dict | None = None) -> int:
         member_id = len(self.members) + 1
         self.members.append(StructuralMember(member_id, start_id, end_id, m_type, profile))
         return member_id
 
-    def get_node(self, node_id: int) -> Optional[StructuralNode]:
+    def get_node(self, node_id: int) -> StructuralNode | None:
         return self.nodes.get(node_id)

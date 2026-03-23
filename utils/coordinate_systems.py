@@ -2,11 +2,10 @@
 Модуль работы с координатными системами
 """
 
-import pandas as pd
-from typing import Optional, List, Tuple
-import pyproj
-from pyproj import CRS, Transformer
 import logging
+
+import pandas as pd
+from pyproj import CRS, Transformer
 
 logger = logging.getLogger(__name__)
 
@@ -34,71 +33,71 @@ COMMON_EPSG_CODES = {
 }
 
 
-def get_common_epsg_list() -> List[Tuple[int, str]]:
+def get_common_epsg_list() -> list[tuple[int, str]]:
     """
     Возвращает список популярных систем координат
-    
+
     Returns:
         Список кортежей (код EPSG, описание)
     """
     return [(code, desc) for code, desc in COMMON_EPSG_CODES.items()]
 
 
-def detect_epsg(file_path: str) -> Optional[int]:
+def detect_epsg(file_path: str) -> int | None:
     """
     Пытается определить EPSG код из файла
-    
+
     Args:
         file_path: Путь к файлу
-        
+
     Returns:
         Код EPSG или None
     """
     try:
         from osgeo import ogr, osr
-        
+
         ds = ogr.Open(file_path)
         if ds is None:
             return None
-        
+
         layer = ds.GetLayer()
         srs = layer.GetSpatialRef()
-        
+
         if srs:
             srs.AutoIdentifyEPSG()
             epsg_code = srs.GetAuthorityCode(None)
             if epsg_code:
                 return int(epsg_code)
-    except:
+    except (ImportError, RuntimeError, AttributeError):
         pass
-    
+
     return None
 
 
 def validate_epsg(epsg_code: int) -> bool:
     """
     Проверяет валидность EPSG кода
-    
+
     Args:
         epsg_code: Код EPSG
-        
+
     Returns:
         True если код валиден
     """
     try:
         crs = CRS.from_epsg(epsg_code)
         return crs is not None
-    except:
+    except (ValueError, RuntimeError, Exception):
         return False
 
 
 def get_crs_info(epsg_code: int) -> dict:
     """
     Получает информацию о системе координат
-    
+
     Args:
         epsg_code: Код EPSG
-        
+
     Returns:
         Словарь с информацией о СК
     """
@@ -122,23 +121,23 @@ def get_crs_info(epsg_code: int) -> dict:
         }
 
 
-def transform_coordinates(points: pd.DataFrame, 
-                         from_epsg: int, 
+def transform_coordinates(points: pd.DataFrame,
+                         from_epsg: int,
                          to_epsg: int) -> pd.DataFrame:
     """
     Трансформирует координаты из одной системы в другую
-    
+
     Args:
         points: DataFrame с колонками x, y, z
         from_epsg: Исходная система координат
         to_epsg: Целевая система координат
-        
+
     Returns:
         DataFrame с трансформированными координатами
     """
     if from_epsg == to_epsg:
         return points.copy()
-    
+
     try:
         # Создаем трансформер
         transformer = Transformer.from_crs(
@@ -146,52 +145,52 @@ def transform_coordinates(points: pd.DataFrame,
             f"EPSG:{to_epsg}",
             always_xy=True
         )
-        
+
         # Трансформируем координаты
         result = points.copy()
         x_new, y_new = transformer.transform(points['x'].values, points['y'].values)
-        
+
         result['x'] = x_new
         result['y'] = y_new
         # Z координата обычно остается без изменений для плоских преобразований
-        
+
         return result
-        
+
     except Exception as e:
-        raise ValueError(f"Ошибка трансформации координат: {str(e)}")
+        raise ValueError(f"Ошибка трансформации координат: {e!s}")
 
 
 def is_projected_crs(epsg_code: int) -> bool:
     """
     Определяет, является ли СК проекционной (метрической)
-    
+
     Args:
         epsg_code: Код EPSG
-        
+
     Returns:
         True если СК проекционная (метры)
     """
     try:
         crs = CRS.from_epsg(epsg_code)
         return crs.is_projected
-    except:
+    except (ValueError, RuntimeError, Exception):
         return False
 
 
 def suggest_projected_crs(lon: float, lat: float) -> int:
     """
     Предлагает подходящую проекционную систему координат для данной точки
-    
+
     Args:
         lon: Долгота (WGS84)
         lat: Широта (WGS84)
-        
+
     Returns:
         Рекомендуемый код EPSG (UTM зона)
     """
     # Определяем UTM зону
     utm_zone = int((lon + 180) / 6) + 1
-    
+
     # Северное или южное полушарие
     if lat >= 0:
         # Северное полушарие
@@ -199,18 +198,18 @@ def suggest_projected_crs(lon: float, lat: float) -> int:
     else:
         # Южное полушарие
         epsg = 32700 + utm_zone
-    
+
     return epsg
 
 
-def convert_to_meters(points: pd.DataFrame, epsg_code: Optional[int]) -> pd.DataFrame:
+def convert_to_meters(points: pd.DataFrame, epsg_code: int | None) -> pd.DataFrame:
     """
     Конвертирует координаты в метры, если они в градусах
-    
+
     Args:
         points: DataFrame с координатами
         epsg_code: Код EPSG или None
-    
+
     Returns:
         DataFrame с координатами в метрах
     """
@@ -218,18 +217,26 @@ def convert_to_meters(points: pd.DataFrame, epsg_code: Optional[int]) -> pd.Data
     if 'x' not in points.columns or 'y' not in points.columns:
         logger.error(f"В DataFrame отсутствуют колонки x или y. Доступные колонки: {points.columns.tolist()}")
         return points.copy()
-    
+
     if epsg_code is None:
+        if len(points) > 0 and (points['x'].abs().max() <= 180 and points['y'].abs().max() <= 90):
+            x_span = float(points['x'].max() - points['x'].min())
+            y_span = float(points['y'].max() - points['y'].min())
+            xy_span = max(x_span, y_span)
+            z_span = float(points['z'].max() - points['z'].min()) if 'z' in points.columns else 0.0
+            looks_like_geographic = xy_span < 0.5 and (xy_span <= 0.0 or z_span / max(xy_span, 1e-9) > 500.0)
+            if not looks_like_geographic:
+                return points.copy()
         # Пробуем определить автоматически
         # Если координаты в диапазоне [-180, 180] и [-90, 90], вероятно градусы
         if len(points) > 0 and (points['x'].abs().max() <= 180 and points['y'].abs().max() <= 90):
             # Центр данных
             center_lon = points['x'].mean()
             center_lat = points['y'].mean()
-            
+
             # Определяем подходящую UTM зону
             target_epsg = suggest_projected_crs(center_lon, center_lat)
-            
+
             # Трансформируем из WGS84
             return transform_coordinates(points, 4326, target_epsg)
         else:
@@ -245,7 +252,7 @@ def convert_to_meters(points: pd.DataFrame, epsg_code: Optional[int]) -> pd.Data
             center_lon = points['x'].mean()
             center_lat = points['y'].mean()
             target_epsg = suggest_projected_crs(center_lon, center_lat)
-            
+
             return transform_coordinates(points, epsg_code, target_epsg)
 
 
@@ -253,12 +260,12 @@ class CoordinateSystemManager:
     """
     Менеджер для управления системами координат
     """
-    
+
     def __init__(self):
         self.current_epsg = None
         self.original_epsg = None
         self.working_epsg = None
-        
+
     def set_original_crs(self, epsg_code: int):
         """Устанавливает исходную систему координат"""
         if validate_epsg(epsg_code):
@@ -266,27 +273,27 @@ class CoordinateSystemManager:
             self.current_epsg = epsg_code
         else:
             raise ValueError(f"Невалидный EPSG код: {epsg_code}")
-    
+
     def set_working_crs(self, epsg_code: int):
         """Устанавливает рабочую систему координат (для расчетов)"""
         if validate_epsg(epsg_code):
             self.working_epsg = epsg_code
         else:
             raise ValueError(f"Невалидный EPSG код: {epsg_code}")
-    
+
     def prepare_for_calculations(self, points: pd.DataFrame) -> pd.DataFrame:
         """
         Подготавливает данные для расчетов (переводит в метры)
-        
+
         Args:
             points: Исходные данные
-            
+
         Returns:
             Данные в метрической системе
         """
         if self.original_epsg is None:
             return convert_to_meters(points, None)
-        
+
         # Если рабочая СК не задана, определяем автоматически
         if self.working_epsg is None:
             if is_projected_crs(self.original_epsg):
@@ -296,10 +303,10 @@ class CoordinateSystemManager:
                 center_lon = points['x'].mean()
                 center_lat = points['y'].mean()
                 self.working_epsg = suggest_projected_crs(center_lon, center_lat)
-        
+
         # Трансформируем
         return transform_coordinates(points, self.original_epsg, self.working_epsg)
-    
+
     def get_info(self) -> dict:
         """Возвращает информацию о текущих системах координат"""
         return {

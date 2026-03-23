@@ -2,6 +2,7 @@
 Мастер импорта данных с другой точки стояния
 """
 
+import json
 import numpy as np
 import pandas as pd
 from PyQt6.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, QPushButton, QLabel,
@@ -14,7 +15,8 @@ from PyQt6.QtGui import QColor
 from typing import Optional, List, Tuple, Dict, Any
 import logging
 
-from core.data_loader import load_data_from_file
+from core.planar_orientation import domain_rotation_deg_to_math_rad, normalize_signed_angle_deg
+from core.data_loader import load_survey_data
 from core.survey_registration import (
     compute_helmert_parameters,
     apply_helmert_transform,
@@ -26,6 +28,11 @@ from core.survey_registration import (
     rotate_points_around_z
 )
 from core.point_mapping import PointMapping
+from core.second_station_matching import (
+    build_method1_preview,
+    build_method2_preview,
+    find_best_method2_preview,
+)
 from gui.data_import_wizard import DataImportWizard
 from gui.ui_helpers import apply_compact_button_style
 
@@ -39,6 +46,7 @@ class SecondStationImportWizard(QDialog):
         super().__init__(parent)
         self.existing_data = existing_data
         self.result_data = None
+        self.transformation_audit = None
         self.import_method = None  # 1 или 2
         self.transform_quality = None  # Информация о качестве преобразования
         self.station_point_idx = None  # Индекс точки standing для второй съемки
@@ -46,6 +54,14 @@ class SecondStationImportWizard(QDialog):
         
         # Система управления индексами точек для корректного соответствия между таблицей UI и данными
         self.point_mapping = PointMapping()
+        self.second_station_import_context: Dict[str, Any] = {}
+        self.second_station_import_diagnostics: Dict[str, Any] = {}
+        self.second_station_import_audit: Dict[str, Any] = {}
+        self.method1_preview: Optional[Dict[str, Any]] = None
+        self.second_station_belt_mapping: Dict[int, int] = {}
+        self.method2_preview: Optional[Dict[str, Any]] = None
+        self._preview_restore_data: Optional[pd.DataFrame] = None
+        self._preview_restore_visualization_data: Optional[Dict[str, Any]] = None
         
         # ВАЖНО: Количество поясов из первого импорта передается из MainWindow
         # Это значение, которое пользователь указал при первом импорте
@@ -236,6 +252,14 @@ class SecondStationImportWizard(QDialog):
         load_layout.addStretch()
         
         main_layout.addLayout(load_layout)
+
+        self.quality_summary_label = QLabel('')
+        self.quality_summary_label.setWordWrap(True)
+        self.quality_summary_label.setStyleSheet(
+            'background: #f6f8fa; border: 1px solid #d0d7de; padding: 6px; color: #333;'
+        )
+        self.quality_summary_label.hide()
+        main_layout.addWidget(self.quality_summary_label)
         
         # Разделитель для данных
         splitter = QSplitter(Qt.Orientation.Horizontal)
@@ -320,6 +344,12 @@ class SecondStationImportWizard(QDialog):
         button_layout.addWidget(cancel_btn)
         
         dialog_layout.addLayout(button_layout)
+
+        self.method1_radio.toggled.connect(self._handle_method_selection_changed)
+        self.method2_radio.toggled.connect(self._handle_method_selection_changed)
+        self.rotation_direction_cw.toggled.connect(lambda _checked: self._update_method2_preview_from_selection())
+        self.rotation_direction_ccw.toggled.connect(lambda _checked: self._update_method2_preview_from_selection())
+        self.rotation_angle_spin.valueChanged.connect(lambda _value: self._update_method2_preview_from_selection())
         
         # Заполняем существующие точки
         self._populate_existing_table()
@@ -376,6 +406,19 @@ class SecondStationImportWizard(QDialog):
             self.tower_faces_from_first = 4
             self.tower_faces_spin.setValue(4)
             return
+
+        if 'faces' in self.existing_data.columns:
+            faces_from_first = self.existing_data['faces'].dropna()
+            if len(faces_from_first) > 0:
+                self.tower_faces_from_first = int(faces_from_first.max())
+                self.tower_faces_spin.setValue(self.tower_faces_from_first)
+                logger.info(f"Количество граней определено по колонке faces: {self.tower_faces_from_first}")
+                try:
+                    default_angle = 360.0 / float(self.tower_faces_from_first)
+                    self.rotation_angle_spin.setValue(default_angle)
+                except Exception:
+                    pass
+                return
         
         # Определяем как максимальный номер пояса
         belts_from_first = self.existing_data['belt'].dropna()
@@ -441,6 +484,8 @@ class SecondStationImportWizard(QDialog):
 
             # Единичный выбор пары в методе 2: выбор в одной строке сбрасывает остальные
             combo.currentIndexChanged.connect(lambda _v, r=i: self._handle_match_change_single_selection(r))
+            combo.currentIndexChanged.connect(lambda _v, r=i: self._update_method2_preview_from_selection(r))
+            combo.currentIndexChanged.connect(lambda _v: self._refresh_quality_summary())
             
             # Колонка для остатков (пока пустая)
             self.new_table.setItem(i, 5, QTableWidgetItem(''))
@@ -471,6 +516,179 @@ class SecondStationImportWizard(QDialog):
             if combo is not None and combo.currentData() != -1:
                 combo.setCurrentIndex(0)
     
+    def _get_method2_target_angle_deg(self) -> float:
+        tower_faces = self.tower_faces_from_first if self.tower_faces_from_first is not None else 4
+        user_angle = float(self.rotation_angle_spin.value()) if hasattr(self, 'rotation_angle_spin') else 0.0
+        auto_calculated_angle = 360.0 / tower_faces if tower_faces > 0 else 90.0
+        use_auto_angle = getattr(self, 'auto_angle_was_used', False) or abs(user_angle - auto_calculated_angle) < 0.5
+        return float(auto_calculated_angle if use_auto_angle else abs(user_angle))
+
+    def _get_method2_prefer_clockwise(self) -> Optional[bool]:
+        if not hasattr(self, 'rotation_direction_cw') or not hasattr(self, 'rotation_angle_spin'):
+            return None
+        rotation_direction = 1 if self.rotation_direction_cw.isChecked() else -1
+        if float(self.rotation_angle_spin.value()) < 0:
+            rotation_direction = -rotation_direction
+        return rotation_direction > 0
+
+    def _find_table_row_by_second_index(self, second_index: Any) -> Optional[int]:
+        for row in range(self.new_table.rowCount()):
+            if self.point_mapping.get_data_index(row) == second_index:
+                return row
+        return None
+
+    def _build_method2_preview_for_pair(
+        self,
+        second_index: Any,
+        existing_index: Any,
+    ) -> Optional[Dict[str, Any]]:
+        if not hasattr(self, 'second_station_data'):
+            return None
+        if second_index not in self.second_station_data.index or existing_index not in self.existing_data.index:
+            return None
+
+        tower_faces = self.tower_faces_from_first if self.tower_faces_from_first is not None else 4
+        return build_method2_preview(
+            self.existing_data,
+            self.second_station_data,
+            existing_index=existing_index,
+            second_index=second_index,
+            tower_faces=tower_faces,
+            target_angle_deg=self._get_method2_target_angle_deg(),
+            merge_tolerance=float(self.merge_tolerance_spin.value()),
+            prefer_clockwise=self._get_method2_prefer_clockwise(),
+        )
+
+    def _get_or_build_method2_preview(
+        self,
+        second_index: Any,
+        existing_index: Any,
+    ) -> Optional[Dict[str, Any]]:
+        if (
+            self.method2_preview is not None
+            and self.method2_preview.get('second_index') == second_index
+            and self.method2_preview.get('existing_index') == existing_index
+        ):
+            return self.method2_preview
+        return self._build_method2_preview_for_pair(second_index, existing_index)
+
+    def _capture_preview_restore_state(self) -> None:
+        parent = self.parent()
+        editor = getattr(parent, 'editor_3d', None) if parent is not None else None
+        if editor is None:
+            return
+
+        if self._preview_restore_data is None and hasattr(editor, 'get_data'):
+            try:
+                self._preview_restore_data = editor.get_data()
+            except Exception:
+                self._preview_restore_data = self.existing_data.copy()
+
+        if self._preview_restore_visualization_data is None:
+            self._preview_restore_visualization_data = getattr(editor, '_last_visualization_data', None)
+
+    def _apply_method2_preview_visualization(self, preview: Dict[str, Any]) -> None:
+        parent = self.parent()
+        editor = getattr(parent, 'editor_3d', None) if parent is not None else None
+        if editor is None:
+            return
+
+        self._capture_preview_restore_state()
+        preview_data = pd.concat(
+            [self.existing_data.copy(), preview['transformed_second'].copy()],
+            ignore_index=True,
+        )
+        try:
+            editor.set_data(preview_data)
+            editor.set_belt_connection_lines(preview.get('visualization_data', {}))
+        except Exception:
+            logger.warning("РќРµ СѓРґР°Р»РѕСЃСЊ РѕР±РЅРѕРІРёС‚СЊ 3D preview РґР»СЏ РјРµС‚РѕРґР° 2", exc_info=True)
+
+    def _apply_method1_preview_visualization(self, preview: Dict[str, Any]) -> None:
+        parent = self.parent()
+        editor = getattr(parent, 'editor_3d', None) if parent is not None else None
+        if editor is None:
+            return
+
+        self._capture_preview_restore_state()
+        preview_data = pd.concat(
+            [self.existing_data.copy(), preview['transformed_second'].copy()],
+            ignore_index=True,
+        )
+        try:
+            editor.set_data(preview_data)
+            editor.set_belt_connection_lines({})
+        except Exception:
+            logger.warning("Не удалось обновить 3D preview для метода 1", exc_info=True)
+
+    def _clear_method2_preview_visualization(self) -> None:
+        parent = self.parent()
+        editor = getattr(parent, 'editor_3d', None) if parent is not None else None
+        if editor is None:
+            return
+
+        restore_data = self._preview_restore_data if self._preview_restore_data is not None else self.existing_data
+        try:
+            if isinstance(restore_data, pd.DataFrame):
+                editor.set_data(restore_data.copy())
+            else:
+                editor.set_data(self.existing_data.copy())
+            editor.set_belt_connection_lines(self._preview_restore_visualization_data or {})
+        except Exception:
+            logger.warning("РќРµ СѓРґР°Р»РѕСЃСЊ РѕС‡РёСЃС‚РёС‚СЊ 3D preview РјРµС‚РѕРґР° 2", exc_info=True)
+
+    def _handle_method_selection_changed(self, _checked: bool) -> None:
+        if self.method2_radio.isChecked():
+            self._update_method2_preview_from_selection()
+        else:
+            self.method2_preview = None
+            if self.method1_preview is not None:
+                self._apply_method1_preview_visualization(self.method1_preview)
+            else:
+                self._clear_method2_preview_visualization()
+            self._refresh_quality_summary()
+
+    def _update_method2_preview_from_selection(self, preferred_row: Optional[int] = None) -> None:
+        if not hasattr(self, 'second_station_data') or not self.method2_radio.isChecked():
+            self.method2_preview = None
+            self._clear_method2_preview_visualization()
+            self._refresh_quality_summary()
+            return
+
+        selected_pair: Optional[Tuple[Any, Any]] = None
+        candidate_rows: List[int] = []
+        if preferred_row is not None:
+            candidate_rows.append(preferred_row)
+        candidate_rows.extend(row for row in range(self.new_table.rowCount()) if row != preferred_row)
+
+        for row in candidate_rows:
+            combo = self.new_table.cellWidget(row, 4)
+            if combo is None:
+                continue
+            existing_index = combo.currentData()
+            if existing_index is None or existing_index == -1:
+                continue
+            second_index = self.point_mapping.get_data_index(row)
+            if second_index is None:
+                continue
+            selected_pair = (second_index, existing_index)
+            break
+
+        if selected_pair is None:
+            self.method2_preview = None
+            self._clear_method2_preview_visualization()
+            self._refresh_quality_summary()
+            return
+
+        second_index, existing_index = selected_pair
+        preview = self._build_method2_preview_for_pair(second_index, existing_index)
+        self.method2_preview = preview
+        if preview is not None:
+            self._apply_method2_preview_visualization(preview)
+        else:
+            self._clear_method2_preview_visualization()
+        self._refresh_quality_summary()
+
     def _update_residuals_column(self, residuals: np.ndarray, matched_indices: List[int]):
         """Обновить колонку остаточных невязок в таблице"""
         for i, residual in zip(matched_indices, residuals):
@@ -485,6 +703,279 @@ class SecondStationImportWizard(QDialog):
                     item.setForeground(QColor(40, 167, 69))  # Зеленый
                 self.new_table.setItem(i, 5, item)
     
+    def _safe_memberships(self, value: Any) -> List[int]:
+        if value is None or (isinstance(value, float) and np.isnan(value)):
+            return []
+        if isinstance(value, str):
+            try:
+                decoded = json.loads(value)
+            except Exception:
+                return []
+        elif isinstance(value, (list, tuple, set)):
+            decoded = list(value)
+        else:
+            return []
+        result: List[int] = []
+        for item in decoded:
+            try:
+                result.append(int(item))
+            except (TypeError, ValueError):
+                continue
+        return result
+
+    def _collect_matching_summary(self) -> Dict[str, Any]:
+        matched_rows: List[Dict[str, Any]] = []
+        unmatched_rows: List[Dict[str, Any]] = []
+
+        for row in range(self.new_table.rowCount()):
+            combo = self.new_table.cellWidget(row, 4)
+            point_name_item = self.new_table.item(row, 0)
+            point_name = point_name_item.text() if point_name_item else f'Row {row}'
+            selected_idx = combo.currentData() if combo is not None else -1
+            residual_item = self.new_table.item(row, 5)
+            residual_value = None
+            if residual_item and residual_item.text().strip():
+                try:
+                    residual_value = float(residual_item.text())
+                except ValueError:
+                    residual_value = None
+
+            if selected_idx is not None and selected_idx != -1:
+                matched_rows.append({
+                    'row': row,
+                    'point_name': point_name,
+                    'existing_index': int(selected_idx),
+                    'residual': residual_value,
+                })
+            else:
+                unmatched_rows.append({
+                    'row': row,
+                    'point_name': point_name,
+                })
+
+        residuals = [row['residual'] for row in matched_rows if row['residual'] is not None]
+        return {
+            'matched_count': len(matched_rows),
+            'unmatched_count': len(unmatched_rows),
+            'matched_rows': matched_rows,
+            'unmatched_rows': unmatched_rows,
+            'max_residual': max(residuals) if residuals else None,
+            'mean_residual': float(np.mean(residuals)) if residuals else None,
+        }
+
+    def _build_structure_validation(self, data: pd.DataFrame) -> Dict[str, Any]:
+        warnings: List[str] = []
+        belt_numbers: List[int] = []
+        missing_belts: List[int] = []
+        part_conflicts: List[str] = []
+
+        if 'belt' in data.columns:
+            for value in data['belt'].dropna():
+                try:
+                    belt_numbers.append(int(value))
+                except (TypeError, ValueError):
+                    warnings.append(f"Некорректное значение пояса: {value}")
+            belt_numbers = sorted(set(belt_numbers))
+            if belt_numbers:
+                expected = list(range(belt_numbers[0], belt_numbers[-1] + 1))
+                missing_belts = [belt for belt in expected if belt not in belt_numbers]
+                if missing_belts:
+                    warnings.append(f"Нарушена непрерывность нумерации поясов: отсутствуют {missing_belts}")
+
+        if 'is_station' in data.columns:
+            station_mask = data['is_station'].eq(True)
+            station_count = int(station_mask.sum())
+            zero_station_count = int(
+                (station_mask & data['x'].round(6).eq(0.0) & data['y'].round(6).eq(0.0)).sum()
+            )
+            if station_count != 1:
+                warnings.append(f"Ожидалась одна station-точка, фактически найдено {station_count}")
+            if zero_station_count > 1:
+                warnings.append(f"Найдено несколько station-точек с координатами (0, 0): {zero_station_count}")
+        else:
+            station_count = 0
+            zero_station_count = 0
+
+        if 'tower_part' in data.columns:
+            part_numbers: List[int] = []
+            for idx, row in data.iterrows():
+                part_value = row.get('tower_part')
+                if pd.isna(part_value):
+                    continue
+                try:
+                    part_num = int(part_value)
+                    part_numbers.append(part_num)
+                except (TypeError, ValueError):
+                    part_conflicts.append(f'Строка {idx}: некорректное значение tower_part={part_value}')
+                    continue
+
+                memberships = self._safe_memberships(row.get('tower_part_memberships'))
+                if memberships and part_num not in memberships:
+                    part_conflicts.append(
+                        f'Строка {idx}: основная часть {part_num} отсутствует в memberships {memberships}'
+                    )
+                if bool(row.get('is_part_boundary', False)) and len(memberships) < 2:
+                    part_conflicts.append(
+                        f'Строка {idx}: граничная точка должна принадлежать минимум двум частям'
+                    )
+            if part_numbers:
+                unique_parts = sorted(set(part_numbers))
+                expected_parts = list(range(unique_parts[0], unique_parts[-1] + 1))
+                missing_parts = [part for part in expected_parts if part not in unique_parts]
+                if missing_parts:
+                    warnings.append(f"Нарушена непрерывность частей башни: отсутствуют {missing_parts}")
+        else:
+            unique_parts = []
+
+        if part_conflicts:
+            warnings.extend(part_conflicts)
+
+        return {
+            'belt_numbers': belt_numbers,
+            'missing_belts': missing_belts,
+            'station_count': station_count,
+            'zero_station_count': zero_station_count,
+            'tower_parts': unique_parts,
+            'warnings': warnings,
+        }
+
+    def _compose_quality_summary(self) -> str:
+        lines: List[str] = []
+        if self.second_station_import_context:
+            lines.append(
+                f"Формат второй съемки: {self.second_station_import_context.get('source_format', 'unknown')} "
+                f"({self.second_station_import_context.get('parser_strategy', 'n/a')})"
+            )
+            confidence = self.second_station_import_context.get('confidence')
+            if confidence is not None:
+                lines.append(f"Уверенность импорта: {float(confidence):.2f}")
+
+        if self.new_table.rowCount() > 0:
+            matching = self._collect_matching_summary()
+            lines.append(
+                f"Сопоставление: matched={matching['matched_count']}, unmatched={matching['unmatched_count']}"
+            )
+            if matching['max_residual'] is not None:
+                lines.append(
+                    f"Невязки: mean={matching['mean_residual']:.6f} м, max={matching['max_residual']:.6f} м"
+                )
+
+        if self.transform_quality:
+            lines.append(f"Преобразование: метод {self.transform_quality.get('method', '?')}")
+            if self.transform_quality.get('rmse') is not None:
+                lines.append(
+                    f"RMSE={self.transform_quality['rmse']:.6f} м, "
+                    f"max={self.transform_quality.get('max_error', 0.0):.6f} м"
+                )
+            if self.transform_quality.get('quality_warning'):
+                lines.append("Есть предупреждение по качеству преобразования")
+
+        if self.method1_radio.isChecked() and self.method1_preview:
+            preview = self.method1_preview
+            lines.append(f"Method 1 preview: matched={preview.get('matched_pair_count', 0)}")
+            local_order = preview.get('second_visible_order_left_to_right', [])
+            mapped_order = preview.get('visible_mapping_sequence', [])
+            if local_order:
+                lines.append(
+                    f"2nd station left-to-right: {'-'.join(str(v) for v in local_order)}"
+                )
+            if mapped_order:
+                lines.append(
+                    f"Clockwise global belts: {'-'.join(str(v) for v in mapped_order)}"
+                )
+            station_delta = preview.get('station_angle_delta_deg')
+            if station_delta is not None and np.isfinite(station_delta):
+                side = preview.get('station_side') or ('right' if station_delta > 0 else 'left')
+                lines.append(f"Station side: {side}, delta={station_delta:.2f} deg")
+            trimmed_mean = preview.get('shared_trimmed_mean')
+            if trimmed_mean is not None and np.isfinite(trimmed_mean):
+                lines.append(
+                    f"Preview overlap: close={preview.get('shared_close_count', 0)}, trimmed={trimmed_mean:.3f} m"
+                )
+
+        if self.method2_radio.isChecked() and self.method2_preview:
+            preview = self.method2_preview
+            lines.append(
+                f"Preview РјРµС‚РѕРґР° 2: {preview.get('second_name', '?')} -> {preview.get('existing_name', '?')}"
+            )
+            local_order = preview.get('second_visible_order_left_to_right', [])
+            mapped_order = preview.get('visible_mapping_sequence', [])
+            expected_order = preview.get('expected_visible_mapping_sequence', [])
+            if local_order:
+                lines.append(
+                    f"2-СЏ СЃС‚Р°РЅС†РёСЏ СЃР»РµРІР° РЅР°РїСЂР°РІРѕ: {'-'.join(str(v) for v in local_order)}"
+                )
+            if mapped_order:
+                lines.append(
+                    f"Preview РІРЅСѓС‚СЂРµРЅРЅРµРіРѕ РјР°РїРїРёРЅРіР°: {'-'.join(str(v) for v in mapped_order)}"
+                )
+            if expected_order and expected_order != mapped_order:
+                lines.append(
+                    f"РћР¶РёРґР°РµРјС‹Р№ РІРёРґ РїРѕ СЃС‚РѕСЏРЅРёСЏРј: {'-'.join(str(v) for v in expected_order)}"
+                )
+            station_delta = preview.get('station_angle_delta_deg')
+            if station_delta is not None and np.isfinite(station_delta):
+                lines.append(
+                    f"Preview СЃС‚Р°РЅС†РёР№: О”={station_delta:.2f}В°, РїРѕРІРѕСЂРѕС‚={preview.get('angle_deg', 0.0):.2f}В°"
+                )
+            trimmed_mean = preview.get('shared_trimmed_mean')
+            if trimmed_mean is not None and np.isfinite(trimmed_mean):
+                lines.append(
+                    f"Preview overlap: close={preview.get('shared_close_count', 0)}, trimmed={trimmed_mean:.3f} Рј"
+                )
+
+        warnings = list((self.second_station_import_diagnostics or {}).get('warnings', []))
+        if warnings:
+            lines.append(f"Предупреждения импорта: {len(warnings)}")
+
+        return '\n'.join(lines).strip()
+
+    def _refresh_quality_summary(self) -> None:
+        text = self._compose_quality_summary()
+        if text:
+            self.quality_summary_label.setText(text)
+            self.quality_summary_label.show()
+        else:
+            self.quality_summary_label.hide()
+
+    def _finalize_transformation_audit(self, method: int, merged_data: pd.DataFrame) -> None:
+        matching = self._collect_matching_summary()
+        structure_validation = self._build_structure_validation(merged_data)
+        generated_mask = (
+            merged_data['is_generated'].fillna(False).astype(bool)
+            if 'is_generated' in merged_data.columns else pd.Series(False, index=merged_data.index)
+        )
+        generated_belts = []
+        if generated_mask.any() and 'belt' in merged_data.columns:
+            generated_belts = sorted(
+                {int(value) for value in merged_data.loc[generated_mask, 'belt'].dropna().tolist()}
+            )
+        audit = {
+            'method': method,
+            'import_context': dict(self.second_station_import_context or {}),
+            'import_diagnostics': dict(self.second_station_import_diagnostics or {}),
+            'import_wizard_audit': dict(self.second_station_import_audit or {}),
+            'matching': matching,
+            'transformation_quality': dict(self.transform_quality or {}),
+            'post_merge_validation': structure_validation,
+            'autocomplete_audit': {
+                'enabled': bool(getattr(self, 'autocomplete_belt_checkbox', None) and self.autocomplete_belt_checkbox.isChecked()),
+                'generated_points': int(generated_mask.sum()),
+                'generated_belts': generated_belts,
+            },
+        }
+        self.transformation_audit = audit
+
+        if self.second_station_import_diagnostics:
+            diag = dict(self.second_station_import_diagnostics)
+            details = dict(diag.get('details') or {})
+            details['second_station_audit'] = audit
+            diag['details'] = details
+            diag['transformation_quality'] = dict(self.transform_quality or {})
+            self.second_station_import_diagnostics = diag
+
+        self._refresh_quality_summary()
+
     def load_second_station_file(self):
         """Загрузка файла с другой точки standing"""
         # Получаем последнюю папку из настроек или из parent (MainWindow)
@@ -530,7 +1021,10 @@ class SecondStationImportWizard(QDialog):
         
         try:
             # Загружаем данные
-            raw_data, epsg_code = load_data_from_file(file_path)
+            loaded = load_survey_data(file_path)
+            raw_data = loaded.data
+            self.second_station_import_context = loaded.to_context_dict()
+            self.second_station_import_diagnostics = loaded.diagnostics.to_dict()
             
             if raw_data is None or raw_data.empty:
                 QMessageBox.warning(self, 'Ошибка', 'Не удалось загрузить данные из файла')
@@ -561,7 +1055,12 @@ class SecondStationImportWizard(QDialog):
             
             # Открываем мастер импорта для выбора точек и сортировки
             # Передаем количество поясов из первого импорта
-            import_wizard = DataImportWizard(raw_data, saved_settings=second_import_settings, parent=self)
+            import_wizard = DataImportWizard(
+                raw_data,
+                saved_settings=second_import_settings,
+                import_payload=loaded.to_context_dict(),
+                parent=self,
+            )
             
             if import_wizard.exec() != QDialog.DialogCode.Accepted:
                 logger.info("Пользователь отменил мастер импорта данных")
@@ -569,6 +1068,7 @@ class SecondStationImportWizard(QDialog):
             
             # Получаем обработанные данные из мастера
             processed_data = import_wizard.get_result()
+            self.second_station_import_audit = import_wizard.get_import_audit()
             
             if processed_data is None or processed_data.empty:
                 QMessageBox.warning(self, 'Ошибка', 'Не были выбраны точки для импорта')
@@ -591,6 +1091,10 @@ class SecondStationImportWizard(QDialog):
                     logger.debug("Колонка is_station отсутствует в обработанных данных")
             
             # Сохраняем обработанные данные
+            self.method1_preview = None
+            self.second_station_belt_mapping = {}
+            self.method2_preview = None
+            self._clear_method2_preview_visualization()
             self.second_station_data = processed_data
             
             # Заполняем таблицу
@@ -599,6 +1103,7 @@ class SecondStationImportWizard(QDialog):
             self.load_btn.setText(f'✓ Загружено: {len(processed_data)} точек')
             
             logger.info(f"Обработано {len(processed_data)} точек после мастера импорта")
+            self._refresh_quality_summary()
             
         except Exception as e:
             logger.error(f"Ошибка загрузки файла: {e}", exc_info=True)
@@ -608,7 +1113,143 @@ class SecondStationImportWizard(QDialog):
         """Автоматическое сопоставление точек"""
         if not hasattr(self, 'second_station_data'):
             return
-        
+
+        if self.method2_radio.isChecked():
+            self.method1_preview = None
+            self.second_station_belt_mapping = {}
+            tower_faces = self.tower_faces_from_first if self.tower_faces_from_first is not None else 4
+            preview = find_best_method2_preview(
+                self.existing_data,
+                self.second_station_data,
+                tower_faces=tower_faces,
+                target_angle_deg=self._get_method2_target_angle_deg(),
+                merge_tolerance=float(self.merge_tolerance_spin.value()),
+                prefer_clockwise=self._get_method2_prefer_clockwise(),
+            )
+            if preview is None:
+                self.method2_preview = None
+                self._clear_method2_preview_visualization()
+                self._refresh_quality_summary()
+                QMessageBox.warning(
+                    self,
+                    'РђРІС‚Рѕ СЃРѕРїРѕСЃС‚Р°РІР»РµРЅРёРµ',
+                    'РќРµ СѓРґР°Р»РѕСЃСЊ РЅР°Р№С‚Рё СѓСЃС‚РѕР№С‡РёРІСѓСЋ Р±Р°Р·РѕРІСѓСЋ РїР°СЂСѓ РґР»СЏ РјРµС‚РѕРґР° 2.'
+                )
+                return
+
+            target_row = self._find_table_row_by_second_index(preview['second_index'])
+            if target_row is None:
+                QMessageBox.warning(
+                    self,
+                    'РђРІС‚Рѕ СЃРѕРїРѕСЃС‚Р°РІР»РµРЅРёРµ',
+                    'РќРµ СѓРґР°Р»РѕСЃСЊ РѕС‚РѕР±СЂР°Р·РёС‚СЊ РЅР°Р№РґРµРЅРЅСѓСЋ РїР°СЂСѓ РІ С‚Р°Р±Р»РёС†Рµ.'
+                )
+                return
+
+            for row in range(self.new_table.rowCount()):
+                combo = self.new_table.cellWidget(row, 4)
+                if combo is None:
+                    continue
+                combo.blockSignals(True)
+                combo.setCurrentIndex(0)
+                combo.blockSignals(False)
+
+            combo = self.new_table.cellWidget(target_row, 4)
+            if combo is None:
+                return
+
+            for item_idx in range(combo.count()):
+                if combo.itemData(item_idx) == preview['existing_index']:
+                    combo.blockSignals(True)
+                    combo.setCurrentIndex(item_idx)
+                    combo.blockSignals(False)
+                    break
+
+            self.method2_preview = preview
+            self._update_method2_preview_from_selection(target_row)
+
+            local_order = '-'.join(str(v) for v in preview.get('second_visible_order_left_to_right', []))
+            mapped_order = '-'.join(str(v) for v in preview.get('visible_mapping_sequence', []))
+            QMessageBox.information(
+                self,
+                'РЎРѕРїРѕСЃС‚Р°РІР»РµРЅРёРµ Р·Р°РІРµСЂС€РµРЅРѕ',
+                'Р”Р»СЏ РјРµС‚РѕРґР° 2 Р°РІС‚РѕРјР°С‚РёС‡РµСЃРєРё РІС‹Р±СЂР°РЅР° РѕРґРЅР° Р±Р°Р·РѕРІР°СЏ РїР°СЂР°.\n'
+                f"РўРѕС‡РєРё: {preview.get('second_name', '?')} -> {preview.get('existing_name', '?')}\n"
+                f"2-СЏ СЃС‚Р°РЅС†РёСЏ СЃР»РµРІР° РЅР°РїСЂР°РІРѕ: {local_order or 'n/a'}\n"
+                f"Preview РјР°РїРїРёРЅРіР°: {mapped_order or 'n/a'}"
+            )
+            self._refresh_quality_summary()
+            return
+
+        if self.method1_radio.isChecked():
+            tower_faces = self.tower_faces_from_first if self.tower_faces_from_first is not None else 4
+            preview = build_method1_preview(
+                self.existing_data,
+                self.second_station_data,
+                tower_faces=tower_faces,
+                target_angle_deg=self._get_method2_target_angle_deg(),
+                merge_tolerance=float(self.merge_tolerance_spin.value()),
+                prefer_clockwise=self._get_method2_prefer_clockwise(),
+            )
+            if preview is None:
+                self.method1_preview = None
+                self.second_station_belt_mapping = {}
+                self._clear_method2_preview_visualization()
+                self._refresh_quality_summary()
+                QMessageBox.warning(
+                    self,
+                    'Авто сопоставление',
+                    'Не удалось автоматически подобрать устойчивое соответствие точек для метода 1.'
+                )
+                return
+
+            self.method2_preview = None
+            for row in range(self.new_table.rowCount()):
+                combo = self.new_table.cellWidget(row, 4)
+                if combo is None:
+                    continue
+                combo.blockSignals(True)
+                combo.setCurrentIndex(0)
+                combo.blockSignals(False)
+
+            applied_pairs = 0
+            for pair in preview.get('matched_pairs', []):
+                target_row = self._find_table_row_by_second_index(pair['second_index'])
+                if target_row is None:
+                    continue
+                combo = self.new_table.cellWidget(target_row, 4)
+                if combo is None:
+                    continue
+                for item_idx in range(combo.count()):
+                    if combo.itemData(item_idx) == pair['existing_index']:
+                        combo.blockSignals(True)
+                        combo.setCurrentIndex(item_idx)
+                        combo.blockSignals(False)
+                        applied_pairs += 1
+                        break
+
+            self.method1_preview = preview
+            self.second_station_belt_mapping = dict(preview.get('belt_mapping', {}))
+            self._apply_method1_preview_visualization(preview)
+            self._refresh_quality_summary()
+
+            local_order = '-'.join(str(v) for v in preview.get('second_visible_order_left_to_right', []))
+            mapped_order = '-'.join(str(v) for v in preview.get('visible_mapping_sequence', []))
+            station_delta = preview.get('station_angle_delta_deg')
+            station_text = 'n/a'
+            if station_delta is not None and np.isfinite(station_delta):
+                station_text = f"{preview.get('station_side', 'unknown')} ({station_delta:.2f}°)"
+            QMessageBox.information(
+                self,
+                'Сопоставление завершено',
+                'Для метода 1 автоматически выбраны совпадающие точки.\n'
+                f"Совпадений: {applied_pairs}\n"
+                f"2-я станция слева направо: {local_order or 'n/a'}\n"
+                f"Глобальные пояса по часовой: {mapped_order or 'n/a'}\n"
+                f"Положение станции: {station_text}"
+            )
+            return
+
         tolerance = self.merge_tolerance_spin.value()
         matched_count = 0
         
@@ -658,7 +1299,22 @@ class SecondStationImportWizard(QDialog):
             'Сопоставление завершено',
             f'Автоматически сопоставлено {matched_count} из {self.new_table.rowCount()} точек.'
         )
-    
+        self._refresh_quality_summary()
+
+    def reject(self):
+        self.method1_preview = None
+        self.second_station_belt_mapping = {}
+        self.method2_preview = None
+        self._clear_method2_preview_visualization()
+        super().reject()
+
+    def closeEvent(self, event):
+        self.method1_preview = None
+        self.second_station_belt_mapping = {}
+        self.method2_preview = None
+        self._clear_method2_preview_visualization()
+        super().closeEvent(event)
+
     def do_import(self):
         """Выполнить импорт"""
         if not hasattr(self, 'second_station_data'):
@@ -679,6 +1335,15 @@ class SecondStationImportWizard(QDialog):
     def _merge_method1(self):
         """Вариант 1: Объединение с использованием преобразования Гельмерта (3+ общих точек)"""
         logger.info("Объединение по методу 1 (преобразование Гельмерта)")
+
+        second_station_data_for_merge = self.second_station_data.copy()
+        if self.second_station_belt_mapping and 'belt' in second_station_data_for_merge.columns:
+            second_station_data_for_merge['belt'] = second_station_data_for_merge['belt'].map(
+                lambda value: (
+                    self.second_station_belt_mapping.get(int(value), int(value))
+                    if pd.notna(value) else value
+                )
+            )
         
         # Получаем все сопоставленные пары точек
         matched_pairs = []
@@ -694,11 +1359,11 @@ class SecondStationImportWizard(QDialog):
                         continue
                     
                     # Получаем точку из данных по сохраненному индексу
-                    if data_index not in self.second_station_data.index:
+                    if data_index not in second_station_data_for_merge.index:
                         logger.warning(f"Индекс {data_index} не найден в second_station_data, пропускаем точку")
                         continue
                     
-                    new_point = self.second_station_data.loc[data_index]
+                    new_point = second_station_data_for_merge.loc[data_index]
                     existing_point = self.existing_data.loc[selected_idx]
                     matched_pairs.append((i, data_index, new_point, existing_point))
         
@@ -715,7 +1380,7 @@ class SecondStationImportWizard(QDialog):
         logger.info(f"Найдено {len(matched_pairs)} сопоставленных точек для преобразования Гельмерта")
         
         # Исключаем standing точки из вычисления параметров преобразования
-        regular_second, standing_second = self._filter_standing_points(self.second_station_data)
+        regular_second, standing_second = self._filter_standing_points(second_station_data_for_merge)
         regular_existing, _ = self._filter_standing_points(self.existing_data)
         
         # Подготавливаем массивы точек для преобразования (только обычные точки)
@@ -780,7 +1445,7 @@ class SecondStationImportWizard(QDialog):
                     return
             
             # Применяем преобразование ко всем точкам второй съемки
-            transformed_data = apply_helmert_transform(self.second_station_data, transform_result)
+            transformed_data = apply_helmert_transform(second_station_data_for_merge, transform_result)
             
             # Показываем результаты
             rmse = transform_result['rmse']
@@ -819,12 +1484,22 @@ class SecondStationImportWizard(QDialog):
             )
             
             # Сохраняем информацию о преобразовании для отображения в UI
+            scale = float(transform_result['params'][6])
             self.transform_quality = {
+                'method': 1,
                 'rmse': rmse,
                 'max_error': max_error,
                 'mean_error': quality_info['mean_error'],
                 'residuals': residuals,
-                'transform_params': transform_result['params']
+                'transform_params': transform_result['params'],
+                'matched_points': len(points_source),
+                'unmatched_points': max(self.new_table.rowCount() - len(matched_pairs), 0),
+                'scale': scale,
+                'scale_delta_ppm': float((scale - 1.0) * 1_000_000.0),
+                'scale_suspected': abs(scale - 1.0) > 0.01,
+                'mirror_suspected': scale < 0,
+                'quality_warning': warning_message if not is_valid else '',
+                'recommendations': recommendations,
             }
             
             # Объединяем данные
@@ -833,6 +1508,7 @@ class SecondStationImportWizard(QDialog):
             
             if merged_data is not None:
                 self.result_data = merged_data
+                self._finalize_transformation_audit(method=1, merged_data=merged_data)
                 
                 # Обновляем данные в главном окне
                 self.parent().editor_3d.set_data(merged_data)
@@ -950,8 +1626,8 @@ class SecondStationImportWizard(QDialog):
                 "Рекомендуется использовать новый алгоритм на основе точек на разных поясах."
             )
             target_abs_deg = abs(target_angle_deg)
-            target_signed_deg = -target_abs_deg if rotation_direction_cw else target_abs_deg
-            angle_rad = np.radians(target_signed_deg)
+            target_signed_deg = target_abs_deg if rotation_direction_cw else -target_abs_deg
+            angle_rad = domain_rotation_deg_to_math_rad(target_signed_deg)
             return angle_rad, "Используется fallback алгоритм (только целевой угол без учета текущего положения)"
         
         # Вычисляем векторы от базовой точки к дополнительным точкам (в плоскости XY)
@@ -978,18 +1654,14 @@ class SecondStationImportWizard(QDialog):
         
         # Целевой подписанный угол: CW отрицательный, CCW положительный (вид сверху)
         target_abs_deg = abs(target_angle_deg)
-        target_signed_deg = -target_abs_deg if rotation_direction_cw else target_abs_deg
+        target_signed_deg = target_abs_deg if rotation_direction_cw else -target_abs_deg
         
         # Дельта поворота: target_signed - current_signed
         delta_deg = target_signed_deg - current_signed_deg
         
         # Нормализуем в диапазон (-180, 180]
-        while delta_deg > 180.0:
-            delta_deg -= 360.0
-        while delta_deg <= -180.0:
-            delta_deg += 360.0
-        
-        angle_rad = np.radians(delta_deg)
+        delta_deg = normalize_signed_angle_deg(delta_deg)
+        angle_rad = domain_rotation_deg_to_math_rad(delta_deg)
         
         logger.info(
             f"Вычислен угол поворота: текущий={current_signed_deg:.2f}°, "
@@ -1464,6 +2136,7 @@ class SecondStationImportWizard(QDialog):
         
         # Находим базовую точку из сопоставленных пар
         base_table_row, base_idx_new, base_idx_existing, new_base, existing_base = self._find_base_point_pair(matched_pairs)
+        method2_preview = self._get_or_build_method2_preview(base_idx_new, base_idx_existing)
         
         # Определяем номер пояса из базовой точки существующих данных
         target_belt = None
@@ -1487,7 +2160,7 @@ class SecondStationImportWizard(QDialog):
             
             if 'belt' in self.second_station_data.columns:
                 belt2_points = self.second_station_data[
-                    self.second_station_data['belt'] == target_belt
+                    self.second_station_data['belt'] == int(new_base['belt'])
                 ].copy()
             else:
                 belt2_points = pd.DataFrame()
@@ -1519,7 +2192,7 @@ class SecondStationImportWizard(QDialog):
             self.existing_data, existing_base, target_belt, height_tolerance
         )
         point_belt2_second = self._find_point_on_other_belt_at_same_height(
-            self.second_station_data, new_base, target_belt, height_tolerance
+            self.second_station_data, new_base, int(new_base['belt']), height_tolerance
         )
         
         # Инициализируем переменные для угла
@@ -1587,16 +2260,12 @@ class SecondStationImportWizard(QDialog):
         if not use_fallback:
             # Используем измеренный угол и целевой угол для вычисления дельты
             # Дельта = целевой - измеренный (с учетом направления)
-            target_signed_deg = -target_angle_deg if rotation_direction > 0 else target_angle_deg
+            target_signed_deg = target_angle_deg if rotation_direction > 0 else -target_angle_deg
             delta_deg = target_signed_deg - angle_deg_measured
             
             # Нормализуем в диапазон (-180, 180]
-            while delta_deg > 180.0:
-                delta_deg -= 360.0
-            while delta_deg <= -180.0:
-                delta_deg += 360.0
-            
-            angle_rad_to_apply = np.radians(delta_deg)
+            delta_deg = normalize_signed_angle_deg(delta_deg)
+            angle_rad_to_apply = domain_rotation_deg_to_math_rad(delta_deg)
             angle_deg_to_apply = delta_deg
             
             logger.info(
@@ -1706,6 +2375,12 @@ class SecondStationImportWizard(QDialog):
             # Применяем поворот к translated (угол уже вычислен выше)
             from core.survey_registration import rotate_points_around_z
             rotated = rotate_points_around_z(translated, angle_rad_to_apply, base_rot)
+            if method2_preview is not None:
+                rotated = method2_preview['transformed_second'].copy()
+                angle_deg_to_apply = float(method2_preview.get('angle_deg', angle_deg_to_apply))
+                angle_rad_to_apply = float(np.radians(angle_deg_to_apply))
+                angle_deg_measured = method2_preview.get('measured_angle_deg', angle_deg_measured)
+                use_fallback = False
             logger.info(f"[Импорт/метод2] Применяемый дельта-поворот: {angle_deg_to_apply:.2f}°")
 
             # (удалено) Радиальная нормализация — возврат к исходному поведению
@@ -1713,7 +2388,11 @@ class SecondStationImportWizard(QDialog):
             # 4) Удаление совпавших точек пояса второй съемки (после трансформации они должны совпасть)
             # Определяем пояс у базовой точки второй съемки в исходных данных
             belt_to_remove = None
-            if 'belt' in self.second_station_data.columns and pd.notna(new_base.get('belt', None)):
+            if method2_preview is not None and pd.notna(new_base.get('belt', None)):
+                belt_to_remove = int(
+                    method2_preview.get('belt_mapping', {}).get(int(new_base['belt']), int(target_belt or new_base['belt']))
+                )
+            elif 'belt' in self.second_station_data.columns and pd.notna(new_base.get('belt', None)):
                 belt_to_remove = int(new_base['belt'])
             elif target_belt is not None:
                 belt_to_remove = int(target_belt)
@@ -1757,17 +2436,26 @@ class SecondStationImportWizard(QDialog):
             self.transform_quality = {
                 'method': 2,
                 'angle_deg': float(angle_deg_to_apply),
-                'direction': -1 if self.rotation_direction_cw.isChecked() else 1,
-                'delta_z': float(delta_z)
+                'direction': 1 if self.rotation_direction_cw.isChecked() else -1,
+                'delta_z': float(delta_z),
+                'matched_points': len(matched_pairs),
+                'unmatched_points': max(self.new_table.rowCount() - len(matched_pairs), 0),
+                'target_angle_deg': float(target_angle_deg),
+                'measured_initial_deg': float(angle_deg_measured) if angle_deg_measured is not None else None,
+                'used_fallback': bool(use_fallback),
+                'ambiguity_warning': (
+                    'Угол определен по fallback-сценарию и требует проверки'
+                    if use_fallback else ''
+                ),
             }
 
             # Подготовка данных для визуализации линий
             # Используем найденные точки на поясе 2 для обеих съемок
             try:
-                line_data = None
+                line_data = method2_preview.get('visualization_data') if method2_preview is not None else None
                 
                 # Используем точки на поясе 2, найденные для вычисления угла
-                if point_belt2_first is not None and point_belt2_second is not None:
+                if line_data is None and point_belt2_first is not None and point_belt2_second is not None:
                     # Получаем координаты точек на поясе 2 после поворота
                     # Для первой съемки точка остается без изменений
                     p1_belt2 = np.array([point_belt2_first['x'], point_belt2_first['y'], point_belt2_first['z']])
@@ -1810,7 +2498,7 @@ class SecondStationImportWizard(QDialog):
                                 f"(целевой {target_angle_deg:.2f}°, применено {angle_deg_to_apply:.2f}°)"
                             )
                         
-                        target_signed_deg = -target_angle_deg if rotation_direction > 0 else target_angle_deg
+                        target_signed_deg = target_angle_deg if rotation_direction > 0 else -target_angle_deg
                         
                         line_data = {
                             'line1': {
@@ -1911,10 +2599,12 @@ class SecondStationImportWizard(QDialog):
                         try:
                             bdf = self.result_data[self.result_data['belt'] == target_belt_to_fill]
                             if bdf is not None and not bdf.empty:
-                                cx, cy = bdf['x'].mean(), bdf['y'].mean()
-                                angles = np.arctan2(bdf['y'] - cy, bdf['x'] - cx)
-                                order = np.argsort(angles.values)
-                                ordered = bdf.iloc[order][['x','y','z']].values
+                                from core.planar_orientation import extract_reference_station_xy, sort_points_clockwise
+
+                                ordered = sort_points_clockwise(
+                                    bdf,
+                                    station_xy=extract_reference_station_xy(self.result_data),
+                                )[['x', 'y', 'z']].to_numpy(dtype=float)
                                 self.parent().editor_3d.set_belt_polyline(int(target_belt_to_fill), ordered)
                                 logger.info(f"[parallel_lines] Визуализация поли-линии пояса {target_belt_to_fill} выполнена")
                         except Exception as viz_e:
@@ -1928,6 +2618,7 @@ class SecondStationImportWizard(QDialog):
             except Exception as e:
                 logger.warning(f"Автодостройка пояса пропущена: {e}", exc_info=True)
 
+            self._finalize_transformation_audit(method=2, merged_data=self.result_data)
             self.accept()
         except Exception as e:
             logger.error(f"Ошибка метода 2 (новая логика): {e}", exc_info=True)
@@ -2347,11 +3038,26 @@ class SecondStationImportWizard(QDialog):
         """Получить результат импорта"""
         return self.result_data
     
+    def get_transformation_audit(self) -> Optional[Dict[str, Any]]:
+        """РџРѕР»СѓС‡РёС‚СЊ Р°СѓРґРёС‚ РёРјРїРѕСЂС‚Р° РІС‚РѕСЂРѕР№ СЃС‚Р°РЅС†РёРё."""
+        return self.transformation_audit
+
+    def get_second_station_import_context(self) -> Dict[str, Any]:
+        """РџРѕР»СѓС‡РёС‚СЊ РєРѕРЅС‚РµРєСЃС‚ РёРјРїРѕСЂС‚Р° РІС‚РѕСЂРѕР№ СЃС‚Р°РЅС†РёРё."""
+        return dict(self.second_station_import_context or {})
+
+    def get_second_station_import_diagnostics(self) -> Dict[str, Any]:
+        """РџРѕР»СѓС‡РёС‚СЊ РґРёР°РіРЅРѕСЃС‚РёРєСѓ РёРјРїРѕСЂС‚Р° РІС‚РѕСЂРѕР№ СЃС‚Р°РЅС†РёРё."""
+        return dict(self.second_station_import_diagnostics or {})
+
     def get_visualization_data(self) -> Optional[Dict]:
         """Получить данные для визуализации линий соединения"""
         # Сначала проверяем новые данные о линиях соединения (после объединения поясов)
         if hasattr(self, 'belt_connection_visualization_data'):
             return self.belt_connection_visualization_data
+
+        if self.method2_preview and 'visualization_data' in self.method2_preview:
+            return self.method2_preview['visualization_data']
         
         # Если новых данных нет, возвращаем старые данные (после трансформации)
         if self.transform_quality and 'visualization_data' in self.transform_quality:
@@ -2456,4 +3162,3 @@ class SecondStationImportWizard(QDialog):
         }
         
         return visualization_data
-

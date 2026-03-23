@@ -10,14 +10,17 @@
 
 from __future__ import annotations
 
+import logging
+import math
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any, Dict, Iterable, List, Optional, Tuple
-import math
-import logging
+from typing import Any
 
 import numpy as np
 import pandas as pd
+
+from core.planar_orientation import extract_reference_station_xy, sort_points_clockwise
 
 logger = logging.getLogger(__name__)
 
@@ -35,13 +38,13 @@ class SchemaPoint:
     x: float
     y: float
     z: float
-    index: Optional[int] = None
-    belt: Optional[int] = None
+    index: int | None = None
+    belt: int | None = None
     is_station: bool = False
-    attributes: Dict[str, Any] = field(default_factory=dict)
+    attributes: dict[str, Any] = field(default_factory=dict)
 
     @property
-    def coords(self) -> Tuple[float, float, float]:
+    def coords(self) -> tuple[float, float, float]:
         return float(self.x), float(self.y), float(self.z)
 
 
@@ -50,14 +53,14 @@ class SectionLine:
     """Горизонтальная секция башни."""
 
     height: float
-    points: List[Tuple[float, float, float]]
-    belt_numbers: List[int] = field(default_factory=list)
+    points: list[tuple[float, float, float]]
+    belt_numbers: list[int] = field(default_factory=list)
 
     @property
     def is_valid(self) -> bool:
         return len(self.points) >= 2
 
-    def centroid(self) -> Tuple[float, float, float]:
+    def centroid(self) -> tuple[float, float, float]:
         if not self.points:
             return 0.0, 0.0, float(self.height)
         xs, ys, zs = zip(*self.points)
@@ -69,14 +72,14 @@ class BeltPolyline:
     """Полилиния пояса."""
 
     belt_number: int
-    points: List[Tuple[float, float, float]]
+    points: list[tuple[float, float, float]]
     closed: bool = True
 
     @property
     def is_valid(self) -> bool:
         return len(self.points) >= 2
 
-    def centroid(self) -> Tuple[float, float, float]:
+    def centroid(self) -> tuple[float, float, float]:
         if not self.points:
             return 0.0, 0.0, 0.0
         xs, ys, zs = zip(*self.points)
@@ -87,16 +90,16 @@ class BeltPolyline:
 class AxisData:
     """Описание центральной оси башни."""
 
-    start: Tuple[float, float, float]
-    end: Tuple[float, float, float]
-    description: Optional[str] = None
+    start: tuple[float, float, float]
+    end: tuple[float, float, float]
+    description: str | None = None
 
     def length(self) -> float:
         x1, y1, z1 = self.start
         x2, y2, z2 = self.end
         return float(math.dist((x1, y1, z1), (x2, y2, z2)))
 
-    def midpoint(self) -> Tuple[float, float, float]:
+    def midpoint(self) -> tuple[float, float, float]:
         x1, y1, z1 = self.start
         x2, y2, z2 = self.end
         return (float((x1 + x2) / 2.0), float((y1 + y2) / 2.0), float((z1 + z2) / 2.0))
@@ -106,13 +109,13 @@ class AxisData:
 class SchemaData:
     """Комплексное описание всей схемы для экспорта."""
 
-    points: List[SchemaPoint]
-    belts: List[BeltPolyline] = field(default_factory=list)
-    sections: List[SectionLine] = field(default_factory=list)
-    axis: Optional[AxisData] = None
-    metadata: Dict[str, Any] = field(default_factory=dict)
+    points: list[SchemaPoint]
+    belts: list[BeltPolyline] = field(default_factory=list)
+    sections: list[SectionLine] = field(default_factory=list)
+    axis: AxisData | None = None
+    metadata: dict[str, Any] = field(default_factory=dict)
 
-    def all_coordinates(self) -> Iterable[Tuple[float, float, float]]:
+    def all_coordinates(self) -> Iterable[tuple[float, float, float]]:
         for point in self.points:
             yield point.coords
         for belt in self.belts:
@@ -125,7 +128,7 @@ class SchemaData:
             yield self.axis.start
             yield self.axis.end
 
-    def bounds(self) -> Tuple[float, float, float, float, float, float]:
+    def bounds(self) -> tuple[float, float, float, float, float, float]:
         coords = list(self.all_coordinates())
         if not coords:
             raise ValueError("Невозможно вычислить границы: отсутствуют геометрические данные.")
@@ -180,22 +183,23 @@ class DxfExportOptions:
 # -----------------------------------------------------------------------------
 
 
-def _sort_points_radially(points: pd.DataFrame) -> List[Tuple[float, float, float]]:
+def _sort_points_radially(
+    points: pd.DataFrame,
+    *,
+    station_xy: tuple[float, float] | np.ndarray | None = None,
+) -> list[tuple[float, float, float]]:
     """Сортирует точки по углу вокруг центра для корректной полилинии."""
     if points.empty:
         return []
 
-    center_x = float(points["x"].mean())
-    center_y = float(points["y"].mean())
-    deltas_x = points["x"].to_numpy(dtype=float) - center_x
-    deltas_y = points["y"].to_numpy(dtype=float) - center_y
-    angles = np.arctan2(deltas_y, deltas_x)
-    order = np.argsort(angles)
-    sorted_points = points.iloc[order][["x", "y", "z"]].to_numpy(dtype=float)
+    sorted_points = sort_points_clockwise(
+        points,
+        station_xy=station_xy,
+    )[["x", "y", "z"]].to_numpy(dtype=float)
     return [tuple(pt) for pt in sorted_points]
 
 
-def _extract_station_point(points: pd.DataFrame) -> Optional[SchemaPoint]:
+def _extract_station_point(points: pd.DataFrame) -> SchemaPoint | None:
     if "is_station" not in points.columns:
         return None
     station_mask = points["is_station"].fillna(False).astype(bool)
@@ -215,9 +219,9 @@ def _extract_station_point(points: pd.DataFrame) -> Optional[SchemaPoint]:
 
 def build_schema_data(
     points: pd.DataFrame,
-    section_data: Optional[List[Dict[str, Any]]] = None,
-    processed_data: Optional[Dict[str, Any]] = None,
-    metadata: Optional[Dict[str, Any]] = None,
+    section_data: list[dict[str, Any]] | None = None,
+    processed_data: dict[str, Any] | None = None,
+    metadata: dict[str, Any] | None = None,
 ) -> SchemaData:
     """
     Собирает SchemaData из pandas DataFrame и служебных структур приложения.
@@ -259,7 +263,8 @@ def build_schema_data(
             )
         )
 
-    belts: List[BeltPolyline] = []
+    belts: list[BeltPolyline] = []
+    station_xy = extract_reference_station_xy(points)
     if "belt" in points.columns:
         unique_belts = sorted(
             {int(b) for b in points["belt"].dropna().unique() if pd.notna(b)},
@@ -272,10 +277,10 @@ def build_schema_data(
             ]
             if len(belt_points) < 2:
                 continue
-            ordered = _sort_points_radially(belt_points)
+            ordered = _sort_points_radially(belt_points, station_xy=station_xy)
             belts.append(BeltPolyline(belt_number=belt_num, points=ordered, closed=True))
 
-    sections: List[SectionLine] = []
+    sections: list[SectionLine] = []
     if section_data:
         for section_info in section_data:
             raw_points = section_info.get("points", [])
@@ -291,7 +296,7 @@ def build_schema_data(
                 )
             )
 
-    axis_data: Optional[AxisData] = None
+    axis_data: AxisData | None = None
     if processed_data:
         axis_info = processed_data.get("axis") or {}
         if axis_info.get("valid"):
@@ -303,7 +308,7 @@ def build_schema_data(
             x0 = float(axis_info.get("x0", 0.0))
             y0 = float(axis_info.get("y0", 0.0))
 
-            def point_at_z(target_z: float) -> Tuple[float, float, float]:
+            def point_at_z(target_z: float) -> tuple[float, float, float]:
                 delta = target_z - z0
                 return (
                     x0 + dx * delta,
@@ -338,7 +343,7 @@ def build_schema_data(
                 description="Ось башни (по центрам секций)",
             )
 
-    schema_metadata: Dict[str, Any] = {}
+    schema_metadata: dict[str, Any] = {}
     if metadata:
         schema_metadata.update(metadata)
 
@@ -403,7 +408,7 @@ def _ensure_layers(doc, options: DxfExportOptions) -> None:
         layers.new(layer_name, dxfattribs=attrs)
 
 
-def _set_text_position(text, position: Tuple[float, float, float], align: Optional[str] = None) -> None:
+def _set_text_position(text, position: tuple[float, float, float], align: str | None = None) -> None:
     """Универсально устанавливает позицию текста, учитывая разные версии ezdxf."""
     x, y = position[0], position[1]
     z = position[2] if len(position) > 2 else 0.0
@@ -442,7 +447,7 @@ def _set_text_position(text, position: Tuple[float, float, float], align: Option
         text.dxf.valign = valign
 
 
-def export_schema_to_dxf(schema: SchemaData, file_path: str, options: Optional[DxfExportOptions] = None) -> None:
+def export_schema_to_dxf(schema: SchemaData, file_path: str, options: DxfExportOptions | None = None) -> None:
     """Экспортирует SchemaData в DXF файл."""
     if not file_path:
         raise ValueError("Не указан путь для сохранения DXF файла.")
@@ -578,15 +583,15 @@ def export_schema_to_pdf(schema: SchemaData, file_path: str) -> None:
     try:
         from reportlab.lib import colors
         from reportlab.lib.pagesizes import A4
-        from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+        from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
         from reportlab.lib.units import mm
         from reportlab.platypus import (
-            SimpleDocTemplate,
+            PageBreak,
             Paragraph,
+            SimpleDocTemplate,
             Spacer,
             Table,
             TableStyle,
-            PageBreak,
         )
     except ImportError as exc:  # pragma: no cover
         raise RuntimeError("Для экспорта в PDF требуется установленный пакет reportlab.") from exc

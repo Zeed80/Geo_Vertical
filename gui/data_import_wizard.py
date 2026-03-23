@@ -7,15 +7,23 @@ from PyQt6.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, QLabel,
                              QGroupBox, QMessageBox, QInputDialog, QSplitter,
                              QTableWidget, QTableWidgetItem, QHeaderView, QWidget,
                              QFormLayout, QComboBox, QAbstractItemView, QRadioButton,
-                             QButtonGroup, QDoubleSpinBox, QScrollArea)
+                             QButtonGroup, QDoubleSpinBox, QScrollArea, QCheckBox)
 from PyQt6.QtCore import Qt, pyqtSignal, QTimer
 from PyQt6.QtGui import QDrag, QColor
 import pandas as pd
 import numpy as np
 import logging
 import json
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
+from core.import_grouping import estimate_composite_split_height, group_points_by_global_angle
+from core.multi_station_import import auto_merge_multi_station_tower
+from core.planar_orientation import BELT_NUMBERING_VERSION, extract_reference_station_xy
+from core.point_utils import (
+    build_flag_mask,
+    build_working_tower_mask,
+    normalize_tower_point_flags,
+)
 from gui.ui_helpers import apply_compact_button_style, is_dark_theme_enabled
 
 logger = logging.getLogger(__name__)
@@ -40,9 +48,11 @@ class DataImportWizard(QDialog):
     2. Распределение по поясам (drag & drop + кнопки)
     """
     
-    def __init__(self, data: pd.DataFrame, saved_settings: dict = None, parent=None):
+    def __init__(self, data: pd.DataFrame, saved_settings: dict = None, parent=None,
+                 import_payload: Optional[Dict[str, Any]] = None):
         super().__init__(parent)
         self.raw_data = data.copy()
+        self.raw_data = normalize_tower_point_flags(self.raw_data)
         self.filtered_data = None
         self.current_step = 1
         self.belt_count = 4
@@ -52,6 +62,20 @@ class DataImportWizard(QDialog):
         self.station_point_idx = None  # Индекс точки стояния тахеометра
         self.dark_theme_enabled = is_dark_theme_enabled()
         self.point_part_memberships = {}  # Карта принадлежности точек частям башни
+        self.import_payload = import_payload or {}
+        self.import_diagnostics = self.import_payload.get('diagnostics', {})
+        self.point_assignment_status: Dict[int, Dict[str, Any]] = {}
+        self.import_audit: Dict[str, Any] = {}
+        self.auto_detect_locked = False
+        self.multi_station_result: Optional[pd.DataFrame] = None
+        self.multi_station_audit: Dict[str, Any] = {}
+        details = self.import_diagnostics.get('details', {}) if isinstance(self.import_diagnostics, dict) else {}
+        station_orders = pd.to_numeric(self.raw_data.get('survey_station_order'), errors='coerce').dropna() if 'survey_station_order' in self.raw_data.columns else pd.Series(dtype=float)
+        self.multi_station_detected = bool(
+            details.get('multi_station_detected')
+            or ('survey_station_order' in self.raw_data.columns and station_orders.nunique() > 1)
+            or int(self.raw_data['is_station'].sum()) > 1
+        )
         
         # Параметры составной башни
         self.tower_type = "simple"  # "simple" или "composite"
@@ -126,6 +150,321 @@ class DataImportWizard(QDialog):
             'background-color: #E3F2FD; border: 1px solid #90CAF9; '
             'color: #0d1b2a;'
         )
+
+    def _on_lock_autodetect_toggled(self, checked: bool):
+        self.auto_detect_locked = bool(checked)
+        self._refresh_step1_diagnostics()
+
+    def _refresh_step1_diagnostics(self):
+        if not hasattr(self, 'import_diagnostics_label') or self.import_diagnostics_label is None:
+            return
+        diagnostics = self.import_diagnostics or {}
+        source_format = self.import_payload.get('source_format', diagnostics.get('source_format', 'unknown'))
+        parser_strategy = self.import_payload.get('parser_strategy', diagnostics.get('parser_strategy', ''))
+        confidence = self.import_payload.get('confidence', diagnostics.get('confidence'))
+        warnings = diagnostics.get('warnings', self.import_payload.get('warnings', [])) or []
+        standing_candidates = diagnostics.get('standing_point_candidates', []) or []
+        belt_summary = diagnostics.get('belt_summary', {}) or {}
+        tower_summary = diagnostics.get('tower_part_summary', {}) or {}
+        duplicate_stats = diagnostics.get('duplicate_stats', {}) or {}
+        details = diagnostics.get('details', {}) or {}
+        station_blocks = details.get('station_blocks', []) or []
+        auxiliary_points = details.get('auxiliary_points', []) or []
+
+        candidate_preview = 'нет'
+        if standing_candidates:
+            candidate_preview = ', '.join(
+                f"{item.get('name', '?')} ({item.get('reason', 'heuristic')})"
+                for item in standing_candidates[:3]
+            )
+
+        lines = [
+            f"Формат: {source_format}",
+            f"Стратегия: {parser_strategy or 'не указана'}",
+            f"Уверенность импорта: {confidence:.2f}" if isinstance(confidence, (int, float)) else "Уверенность импорта: н/д",
+            f"Кандидаты standing point: {candidate_preview}",
+            f"Пояса: {belt_summary.get('count', 0)}",
+            f"Части башни: {tower_summary.get('count', 0)}",
+            f"Дубликаты координат: {duplicate_stats.get('duplicate_points', 0)}",
+            f"Много стояний: {'да' if self.multi_station_detected else 'нет'}",
+            f"Автодетект {'зафиксирован' if self.auto_detect_locked else 'может уточняться'}",
+        ]
+        if station_blocks:
+            station_preview = ", ".join(
+                f"{block.get('station_name', '?')} ({block.get('point_count', 0)} т.)"
+                for block in station_blocks[:4]
+            )
+            lines.append(f"Блоки стояния: {station_preview}")
+        if auxiliary_points:
+            preview = ", ".join(str(name) for name in auxiliary_points[:4])
+            if len(auxiliary_points) > 4:
+                preview += "..."
+            lines.append(f"Вспомогательные точки: {preview}")
+        if warnings:
+            lines.append("Предупреждения:")
+            lines.extend(f"• {warning}" for warning in warnings[:4])
+        self.import_diagnostics_label.setText("\n".join(lines))
+
+    def _get_selected_indices(self) -> list[int]:
+        selected_indices: list[int] = []
+        try:
+            if hasattr(self, 'points_list') and self.points_list is not None:
+                for i in range(self.points_list.count()):
+                    item = self.points_list.item(i)
+                    if item and item.checkState() == Qt.CheckState.Checked:
+                        idx = item.data(Qt.ItemDataRole.UserRole)
+                        if idx is not None:
+                            selected_indices.append(int(idx))
+        except (RuntimeError, AttributeError, TypeError, ValueError):
+            pass
+        if not selected_indices and self.cached_selected_points is not None:
+            selected_indices = [int(idx) for idx in self.cached_selected_points.index.tolist()]
+        return selected_indices
+
+    def _get_step2_station_candidates(self, selected_indices: list[int]) -> list[int]:
+        if not selected_indices:
+            return []
+        selected_data = self.raw_data.loc[[idx for idx in selected_indices if idx in self.raw_data.index]].copy()
+        station_mask = build_flag_mask(selected_data, 'is_station')
+        station_indices = selected_data.index[station_mask].tolist()
+        if station_indices:
+            return [int(idx) for idx in station_indices]
+        return [int(idx) for idx in selected_indices]
+
+    def _get_assignable_points(self) -> pd.DataFrame:
+        selected = self.get_selected_points()
+        if selected.empty:
+            return selected
+        return selected[build_working_tower_mask(selected)].copy()
+
+    def _build_multi_station_summary_lines(self) -> list[str]:
+        if not self.multi_station_audit:
+            return []
+        lines: list[str] = []
+        base_station_name = self.multi_station_audit.get('base_station_name')
+        if base_station_name:
+            lines.append(f"Базовая стоянка: {base_station_name}")
+        station_blocks = self.multi_station_audit.get('station_blocks', []) or []
+        if station_blocks:
+            lines.append(
+                "Блоки: " + ", ".join(
+                    f"{block.get('station_name', '?')} -> {', '.join(str(track.get('global_belt')) for track in block.get('tracks', []) if track.get('assigned_points', 0) > 0)}"
+                    for block in station_blocks
+                )
+            )
+        control_count = len(self.multi_station_audit.get('control_duplicates', []) or [])
+        review_count = len(self.multi_station_audit.get('review_duplicates', []) or [])
+        if control_count or review_count:
+            lines.append(f"Контрольные дубли: {control_count}, спорные пары: {review_count}")
+        new_belts = self.multi_station_audit.get('new_belts', []) or []
+        if new_belts:
+            lines.append(f"Новые пояса из дополнительных стояний: {', '.join(str(v) for v in new_belts)}")
+        return lines
+
+    def _prepare_multi_station_reference(self):
+        if not self.multi_station_detected:
+            self.multi_station_result = None
+            self.multi_station_audit = {}
+            return
+        if not hasattr(self, 'station_combo') or self.station_combo.currentIndex() < 0:
+            return
+        base_station_idx = self.station_combo.currentData()
+        if base_station_idx is None:
+            return
+        selected_indices = self._get_selected_indices()
+        if selected_indices:
+            source_data = self.raw_data.loc[[idx for idx in selected_indices if idx in self.raw_data.index]].copy()
+        else:
+            source_data = self.raw_data.copy()
+        self.multi_station_result, self.multi_station_audit = auto_merge_multi_station_tower(
+            source_data,
+            int(self.belt_count or 4),
+            base_station_idx=base_station_idx,
+        )
+
+    def _populate_belts_from_dataframe(self, data: pd.DataFrame, *, status_prefix: str = 'автораспределено'):
+        for belt_list in self.belt_lists:
+            belt_list.clear()
+
+        if data is None or data.empty:
+            self._refresh_assignment_summary()
+            return
+
+        belt_values = pd.to_numeric(data['belt'], errors='coerce')
+        for belt_num in sorted(int(value) for value in belt_values.dropna().astype(int).unique()):
+            if belt_num <= 0 or belt_num > len(self.belt_lists):
+                continue
+            belt_points = data[belt_values.eq(belt_num)].sort_values('z')
+            for point_idx, row in belt_points.iterrows():
+                name = row.get('name', f'Точка {point_idx}')
+                z = float(row.get('z', 0.0))
+                station_name = row.get('survey_station_name')
+                suffix = f" [{station_name}]" if station_name else ""
+                item = QListWidgetItem(f"{name} (Z = {z:.3f} м){suffix}")
+                item.setData(Qt.ItemDataRole.UserRole, int(point_idx))
+                self._style_belt_item(item, belt_num)
+                self.belt_lists[belt_num - 1].addItem(item)
+                self._set_point_assignment_status(int(point_idx), status_prefix, f"Пояс {belt_num}")
+                self._decorate_assignment_item(item, int(point_idx))
+        self._refresh_assignment_summary()
+
+    def _set_point_assignment_status(self, point_idx: int, status: str, details: str = ""):
+        self.point_assignment_status[int(point_idx)] = {
+            'status': status,
+            'details': details,
+        }
+
+    def _decorate_assignment_item(self, item: QListWidgetItem, point_idx: int):
+        info = self.point_assignment_status.get(int(point_idx), {})
+        status = info.get('status', 'не назначено')
+        details = info.get('details', '')
+        tooltip = f"Статус: {status}"
+        if details:
+            tooltip += f"\n{details}"
+        item.setToolTip(tooltip)
+        item.setData(Qt.ItemDataRole.UserRole + 1, status)
+
+    def _refresh_assignment_summary(self):
+        if not hasattr(self, 'assignment_summary_label') or self.assignment_summary_label is None:
+            return
+        counts: Dict[str, int] = {}
+        for info in self.point_assignment_status.values():
+            status = info.get('status', 'не назначено')
+            counts[status] = counts.get(status, 0) + 1
+        parts = [
+            f"{name}: {count}"
+            for name, count in sorted(counts.items())
+        ]
+        station_name = 'не выбрана'
+        if hasattr(self, 'station_combo') and self.station_combo.currentIndex() >= 0:
+            station_name = self.station_combo.currentText()
+        base_text = f"Точка стояния: {station_name}"
+        if parts:
+            base_text += "\nРаспределение статусов: " + ", ".join(parts)
+        self.assignment_summary_label.setText(base_text)
+
+    def _get_point_display_text(self, original_idx: int) -> str:
+        if original_idx not in self.raw_data.index:
+            return f'Точка {original_idx}'
+        row = self.raw_data.loc[original_idx]
+        name = row.get('name', f'Точка {original_idx}')
+        try:
+            z = float(row.get('z', 0.0))
+        except (TypeError, ValueError):
+            z = 0.0
+        station_name = row.get('survey_station_name')
+        suffix = f" [{station_name}]" if pd.notna(station_name) and station_name else ""
+        return f"{name} (Z = {z:.3f} м){suffix}"
+
+    def _create_point_list_item(
+        self,
+        original_idx: int,
+        *,
+        belt_num: Optional[int] = None,
+        text: Optional[str] = None,
+    ) -> QListWidgetItem:
+        item = QListWidgetItem(text or self._get_point_display_text(int(original_idx)))
+        item.setData(Qt.ItemDataRole.UserRole, int(original_idx))
+        if belt_num is not None:
+            self._style_belt_item(item, int(belt_num))
+        self._decorate_assignment_item(item, int(original_idx))
+        return item
+
+    def _iter_assignment_lists(self, include_unassigned: bool = True) -> List[QListWidget]:
+        lists: List[QListWidget] = []
+        if include_unassigned and hasattr(self, 'unassigned_list') and self.unassigned_list is not None:
+            lists.append(self.unassigned_list)
+        if hasattr(self, 'belt_lists') and self.belt_lists:
+            lists.extend(self.belt_lists)
+        return lists
+
+    def _find_active_assignment_list(self, include_unassigned: bool = True):
+        candidate_lists = self._iter_assignment_lists(include_unassigned=include_unassigned)
+        for list_widget in candidate_lists:
+            if list_widget is not None and list_widget.selectedItems():
+                return list_widget
+        for list_widget in candidate_lists:
+            if list_widget is not None and list_widget.hasFocus():
+                return list_widget
+        return None
+
+    def _remove_point_from_list_widget(self, list_widget: QListWidget, original_idx: int) -> None:
+        if list_widget is None:
+            return
+        rows_to_remove: List[int] = []
+        for row_idx in range(list_widget.count()):
+            item = list_widget.item(row_idx)
+            if item is None:
+                continue
+            if item.data(Qt.ItemDataRole.UserRole) == int(original_idx):
+                rows_to_remove.append(row_idx)
+        for row_idx in reversed(rows_to_remove):
+            list_widget.takeItem(row_idx)
+
+    def _remove_point_from_all_belts(self, original_idx: int) -> None:
+        for belt_list in getattr(self, 'belt_lists', []) or []:
+            self._remove_point_from_list_widget(belt_list, int(original_idx))
+
+    def _remove_point_from_unassigned(self, original_idx: int) -> None:
+        if hasattr(self, 'unassigned_list') and self.unassigned_list is not None:
+            self._remove_point_from_list_widget(self.unassigned_list, int(original_idx))
+
+    def _add_point_to_unassigned(self, original_idx: int) -> None:
+        if not hasattr(self, 'unassigned_list') or self.unassigned_list is None:
+            return
+        for row_idx in range(self.unassigned_list.count()):
+            item = self.unassigned_list.item(row_idx)
+            if item is not None and item.data(Qt.ItemDataRole.UserRole) == int(original_idx):
+                return
+        self.unassigned_list.addItem(self._create_point_list_item(int(original_idx)))
+
+    def _get_indices_from_items(self, items: List[QListWidgetItem]) -> List[int]:
+        seen: set[int] = set()
+        result: List[int] = []
+        for item in items:
+            if item is None:
+                continue
+            original_idx = item.data(Qt.ItemDataRole.UserRole)
+            if original_idx is None:
+                continue
+            original_idx = int(original_idx)
+            if original_idx in seen:
+                continue
+            seen.add(original_idx)
+            result.append(original_idx)
+        return result
+
+    def _refresh_unassigned_points_list(self) -> None:
+        if not hasattr(self, 'unassigned_list') or self.unassigned_list is None:
+            return
+
+        selected_points = self._get_assignable_points()
+        assigned_indices: set[int] = set()
+        for belt_list in getattr(self, 'belt_lists', []) or []:
+            for row_idx in range(belt_list.count()):
+                item = belt_list.item(row_idx)
+                if item is None:
+                    continue
+                original_idx = item.data(Qt.ItemDataRole.UserRole)
+                if original_idx is not None:
+                    assigned_indices.add(int(original_idx))
+
+        self.unassigned_list.clear()
+        protected_statuses = {
+            'исключено вручную',
+            'контрольный дубль',
+            'вспомогательная точка',
+            'базовая стоянка',
+            'дополнительная стоянка',
+        }
+        for original_idx in selected_points.index.tolist():
+            original_idx = int(original_idx)
+            if original_idx in assigned_indices:
+                continue
+            current_status = self.point_assignment_status.get(original_idx, {}).get('status')
+            if current_status not in protected_statuses:
+                self._set_point_assignment_status(original_idx, 'не назначено')
+            self.unassigned_list.addItem(self._create_point_list_item(original_idx))
     
     def clear_steps_container(self):
         """Очистка контейнера шагов"""
@@ -173,6 +512,29 @@ class DataImportWizard(QDialog):
         belt_layout.addStretch()
         
         self.steps_layout.addLayout(belt_layout)
+
+        diagnostics_group = QGroupBox('Диагностика импорта и автодетекта')
+        diagnostics_group.setStyleSheet(
+            'QGroupBox { font-size: 9pt; margin-top: 4px; } '
+            'QGroupBox::title { subcontrol-origin: margin; left: 6px; padding: 0 4px; }'
+        )
+        diagnostics_layout = QVBoxLayout()
+        diagnostics_layout.setContentsMargins(6, 8, 6, 6)
+        diagnostics_layout.setSpacing(4)
+
+        self.lock_autodetect_checkbox = QCheckBox('Зафиксировать результаты автодетекта после подтверждения')
+        self.lock_autodetect_checkbox.setChecked(bool(self.saved_settings and self.saved_settings.get('lock_autodetect', False)))
+        self.lock_autodetect_checkbox.toggled.connect(self._on_lock_autodetect_toggled)
+        diagnostics_layout.addWidget(self.lock_autodetect_checkbox)
+
+        self.import_diagnostics_label = QLabel()
+        self.import_diagnostics_label.setWordWrap(True)
+        self.import_diagnostics_label.setStyleSheet(self._info_box_style())
+        diagnostics_layout.addWidget(self.import_diagnostics_label)
+
+        diagnostics_group.setLayout(diagnostics_layout)
+        self.steps_layout.addWidget(diagnostics_group)
+        self._refresh_step1_diagnostics()
         
         # Выбор типа башни
         tower_type_group = QGroupBox('Тип башни')
@@ -872,7 +1234,7 @@ class DataImportWizard(QDialog):
         # Поле для выбора точки стояния тахеометра
         station_layout = QHBoxLayout()
         station_layout.setSpacing(4)
-        station_label = QLabel('Точка стояния:')
+        station_label = QLabel('Базовая стоянка:' if self.multi_station_detected else 'Точка стояния:')
         station_label.setStyleSheet('font-size: 9pt;')
         self.station_combo = QComboBox()
         self.station_combo.setEditable(False)
@@ -892,20 +1254,26 @@ class DataImportWizard(QDialog):
             except (RuntimeError, AttributeError):
                 pass
         
+        station_candidate_indices = self._get_step2_station_candidates(selected_indices)
+
         # Добавляем точки в комбо-бокс
-        for idx in selected_indices:
+        for idx in station_candidate_indices:
             if idx in self.raw_data.index:
                 row = self.raw_data.loc[idx]
                 name = row.get('name', f'Точка {idx+1}')
                 z = row.get('z', 0)
                 item_text = f"{name} (Z = {z:.3f} м)"
                 self.station_combo.addItem(item_text, idx)
-        
+
         # Пытаемся автоматически определить точку стояния из выбранных точек
-        if selected_indices:
-            selected_points_for_detection = self.raw_data.loc[selected_indices]
-            auto_station_idx = self._find_station_point(selected_points_for_detection)
-            if auto_station_idx is not None:
+        if station_candidate_indices:
+            auto_station_idx = None
+            if self.multi_station_detected:
+                auto_station_idx = int(station_candidate_indices[0])
+            else:
+                selected_points_for_detection = self.raw_data.loc[selected_indices]
+                auto_station_idx = self._find_station_point(selected_points_for_detection)
+            if auto_station_idx is not None and (not self.auto_detect_locked or self.station_combo.currentIndex() < 0):
                 station_idx = self.station_combo.findData(auto_station_idx)
                 if station_idx >= 0:
                     self.station_combo.setCurrentIndex(station_idx)
@@ -947,21 +1315,34 @@ class DataImportWizard(QDialog):
                 self._station_combo_initialized = True
         
         self.station_combo.currentIndexChanged.connect(on_station_changed_safe)
+        self.station_combo.currentIndexChanged.connect(lambda _: self._refresh_assignment_summary())
         
         station_layout.addWidget(station_label)
         station_layout.addWidget(self.station_combo)
         station_layout.addStretch()
         self.steps_layout.addLayout(station_layout)
+        self._refresh_assignment_summary()
+
+        if self.multi_station_detected:
+            self.multi_station_summary_label = QLabel("\n".join(self._build_multi_station_summary_lines()) or "Обнаружено несколько блоков стояния. Автораскладка будет выполнена по каждому блоку отдельно.")
+            self.multi_station_summary_label.setWordWrap(True)
+            self.multi_station_summary_label.setStyleSheet(self._info_box_style())
+            self.steps_layout.addWidget(self.multi_station_summary_label)
         
         # Кнопки управления
         controls_layout = QHBoxLayout()
         controls_layout.setSpacing(4)
-        
+
         move_btn = QPushButton('➡ На пояс')
         move_btn.clicked.connect(self.move_to_belt)
         apply_compact_button_style(move_btn, width=80, min_height=28)
         controls_layout.addWidget(move_btn)
-        
+
+        remove_btn = QPushButton('⬅ В список')
+        remove_btn.clicked.connect(self.move_to_unassigned)
+        apply_compact_button_style(remove_btn, width=95, min_height=28)
+        controls_layout.addWidget(remove_btn)
+
         clear_btn = QPushButton('🗑 Очистить')
         clear_btn.clicked.connect(self.clear_belt)
         apply_compact_button_style(clear_btn, width=85, min_height=28)
@@ -975,6 +1356,39 @@ class DataImportWizard(QDialog):
         controls_layout.addWidget(auto_sort_btn)
         
         self.steps_layout.addLayout(controls_layout)
+
+        self.assignment_summary_label = QLabel()
+        self.assignment_summary_label.setWordWrap(True)
+        self.assignment_summary_label.setStyleSheet(self._info_box_style())
+        self.steps_layout.addWidget(self.assignment_summary_label)
+
+        unassigned_group = QGroupBox('Нераспределенные / исключенные точки')
+        unassigned_group.setStyleSheet(
+            'QGroupBox { font-size: 9pt; margin-top: 4px; } '
+            'QGroupBox::title { subcontrol-origin: margin; left: 6px; padding: 0 4px; }'
+        )
+        unassigned_layout = QVBoxLayout()
+        unassigned_layout.setContentsMargins(6, 8, 6, 6)
+        unassigned_layout.setSpacing(4)
+        unassigned_info = QLabel('Точки из этого списка не попадают в пояса и не участвуют в расчетах по поясам, пока вы их не вернете обратно.')
+        unassigned_info.setWordWrap(True)
+        unassigned_info.setStyleSheet('font-size: 9pt;')
+        unassigned_layout.addWidget(unassigned_info)
+        self.unassigned_list = DraggableListWidget()
+        self.unassigned_list.setStyleSheet('''
+            QListWidget::item {
+                padding: 2px;
+                font-size: 9pt;
+                min-height: 18px;
+            }
+            QListWidget::item:selected {
+                background-color: #8fb3d9;
+            }
+        ''')
+        self.unassigned_list.setMinimumHeight(110)
+        unassigned_layout.addWidget(self.unassigned_list)
+        unassigned_group.setLayout(unassigned_layout)
+        self.steps_layout.addWidget(unassigned_group)
         
         # Создаем UI для поясов с группировкой по частям
         if self.tower_type == 'composite' and len(self.tower_parts) > 1:
@@ -1246,73 +1660,113 @@ class DataImportWizard(QDialog):
         # Очищаем все списки
         for belt_list in self.belt_lists:
             belt_list.clear()
+        self.point_assignment_status = {}
+        self.multi_station_result = None
+        self.multi_station_audit = {}
         
         # Проверяем, есть ли сохраненные настройки сортировки
         if self.saved_settings and 'belt_assignments' in self.saved_settings:
-            # Загружаем сохраненную сортировку
-            logger.info("Загрузка сохраненной сортировки точек по поясам")
-            
-            # Получаем индекс точки standing для исключения
-            station_idx = None
-            if hasattr(self, 'station_combo') and self.station_combo.currentIndex() >= 0:
-                station_idx = self.station_combo.currentData()
-                logger.info(f"Исключаем точку standing из загруженной сортировки: индекс {station_idx}")
-            
-            belt_assignments = self.saved_settings['belt_assignments']
-            
-            # ВАЖНО: Берем только точки, которые были выбраны на шаге 1
-            selected_points_df = self.get_selected_points()
-            selected_names = set(selected_points_df['name'].tolist())
-            
-            logger.info(f"Выбрано точек на шаге 1: {len(selected_names)}")
-            
-            # Используем оригинальные индексы из raw_data, но только для выбранных точек
-            loaded_count = 0
-            skipped_count = 0
-            
-            for belt_num, point_names in belt_assignments.items():
-                belt_idx = int(belt_num) - 1
-                if belt_idx < 0 or belt_idx >= len(self.belt_lists):
-                    continue
-                
-                for point_name in point_names:
-                    # ПРОВЕРЯЕМ: была ли эта точка выбрана на шаге 1?
-                    if point_name not in selected_names:
-                        skipped_count += 1
-                        logger.debug(f"Пропускаем точку '{point_name}' - не выбрана на шаге 1")
-                        continue
-                    
-                    # Ищем точку по имени в ОРИГИНАЛЬНЫХ данных (raw_data)
+            saved_numbering_version = self.saved_settings.get('belt_numbering_version')
+            if saved_numbering_version != BELT_NUMBERING_VERSION:
+                logger.info(
+                    "Пропускаем сохраненную сортировку поясов: версия %r несовместима с текущей %r",
+                    saved_numbering_version,
+                    BELT_NUMBERING_VERSION,
+                )
+            else:
+                # Загружаем сохраненную сортировку
+                logger.info("Загрузка сохраненной сортировки точек по поясам")
+
+                # Получаем индекс точки standing для исключения
+                station_idx = None
+                if hasattr(self, 'station_combo') and self.station_combo.currentIndex() >= 0:
+                    station_idx = self.station_combo.currentData()
+                    logger.info(f"Исключаем точку standing из загруженной сортировки: индекс {station_idx}")
+
+                belt_assignments = self.saved_settings['belt_assignments']
+
+                # ВАЖНО: Берем только точки, которые были выбраны на шаге 1
+                selected_points_df = self.get_selected_points()
+                selected_names = set(selected_points_df['name'].tolist())
+
+                logger.info(f"Выбрано точек на шаге 1: {len(selected_names)}")
+                for point_name in selected_names:
                     point_row = self.raw_data[self.raw_data['name'] == point_name]
                     if not point_row.empty:
-                        # Берем ОРИГИНАЛЬНЫЙ индекс из raw_data
-                        original_idx = point_row.index[0]
-                        
-                        # Пропускаем точку standing
-                        if original_idx == station_idx:
-                            logger.debug(f"Пропускаем точку '{point_name}' - это точка standing")
+                        self._set_point_assignment_status(int(point_row.index[0]), 'загружено из сохраненной сортировки')
+
+                # Используем оригинальные индексы из raw_data, но только для выбранных точек
+                loaded_count = 0
+                skipped_count = 0
+
+                for belt_num, point_names in belt_assignments.items():
+                    belt_idx = int(belt_num) - 1
+                    if belt_idx < 0 or belt_idx >= len(self.belt_lists):
+                        continue
+
+                    for point_name in point_names:
+                        # ПРОВЕРЯЕМ: была ли эта точка выбрана на шаге 1?
+                        if point_name not in selected_names:
+                            skipped_count += 1
+                            logger.debug(f"Пропускаем точку '{point_name}' - не выбрана на шаге 1")
                             continue
-                        
-                        z = point_row['z'].iloc[0]
-                        
-                        item_text = f"{point_name} (Z = {z:.3f} м)"
-                        item = QListWidgetItem(item_text)
-                        item.setData(Qt.ItemDataRole.UserRole, original_idx)  # Сохраняем оригинальный индекс!
-                        self._style_belt_item(item, int(belt_num))
-                        
-                        self.belt_lists[belt_idx].addItem(item)
-                        loaded_count += 1
-            
-            logger.info(f"Сохраненная сортировка загружена: {loaded_count} точек, пропущено {skipped_count}")
-            if loaded_count > 0:
-                return
-            logger.warning("Не удалось применить сохраненную сортировку — выполняем автоматическое распределение")
-            # очистим списки перед автосортировкой
-            for belt_list in self.belt_lists:
-                belt_list.clear()
+
+                        # Ищем точку по имени в ОРИГИНАЛЬНЫХ данных (raw_data)
+                        point_row = self.raw_data[self.raw_data['name'] == point_name]
+                        if not point_row.empty:
+                            # Берем ОРИГИНАЛЬНЫЙ индекс из raw_data
+                            original_idx = point_row.index[0]
+
+                            # Пропускаем точку standing
+                            if original_idx == station_idx:
+                                logger.debug(f"Пропускаем точку '{point_name}' - это точка standing")
+                                continue
+
+                            z = point_row['z'].iloc[0]
+
+                            item_text = f"{point_name} (Z = {z:.3f} м)"
+                            item = QListWidgetItem(item_text)
+                            item.setData(Qt.ItemDataRole.UserRole, original_idx)  # Сохраняем оригинальный индекс!
+                            self._style_belt_item(item, int(belt_num))
+                            self._decorate_assignment_item(item, original_idx)
+
+                            self.belt_lists[belt_idx].addItem(item)
+                            loaded_count += 1
+
+                logger.info(f"Сохраненная сортировка загружена: {loaded_count} точек, пропущено {skipped_count}")
+                if loaded_count > 0:
+                    self._refresh_unassigned_points_list()
+                    self._refresh_assignment_summary()
+                    return
+                logger.warning("Не удалось применить сохраненную сортировку — выполняем автоматическое распределение")
+                # очистим списки перед автосортировкой
+                for belt_list in self.belt_lists:
+                    belt_list.clear()
         
         # Если нет сохраненных настроек - выполняем автоматическую сортировку
-        filtered = self.get_selected_points()
+        if self.multi_station_detected:
+            self._prepare_multi_station_reference()
+            if hasattr(self, 'multi_station_summary_label') and self.multi_station_summary_label is not None:
+                self.multi_station_summary_label.setText(
+                    "\n".join(self._build_multi_station_summary_lines())
+                    or "Обнаружено несколько блоков стояния. Автораскладка будет выполнена по каждому блоку отдельно."
+                )
+            if self.multi_station_result is not None and not self.multi_station_result.empty:
+                working_result = self.multi_station_result[build_working_tower_mask(self.multi_station_result)].copy()
+                self._populate_belts_from_dataframe(working_result)
+                for _, row in self.multi_station_result[build_flag_mask(self.multi_station_result, 'is_control')].iterrows():
+                    details = f"Контрольный дубль {row.get('survey_station_name') or ''}".strip()
+                    self._set_point_assignment_status(int(row.name), 'контрольный дубль', details)
+                for _, row in self.multi_station_result[build_flag_mask(self.multi_station_result, 'is_auxiliary')].iterrows():
+                    self._set_point_assignment_status(int(row.name), 'вспомогательная точка', 'Точка исключена из поясов')
+                for _, row in self.multi_station_result[build_flag_mask(self.multi_station_result, 'is_station')].iterrows():
+                    role = 'базовая стоянка' if row.get('station_role') == 'primary' else 'дополнительная стоянка'
+                    self._set_point_assignment_status(int(row.name), role, 'Стояние исключено из поясов')
+                self._refresh_unassigned_points_list()
+                self._refresh_assignment_summary()
+                return
+
+        filtered = self._get_assignable_points()
         
         if filtered.empty:
             QMessageBox.warning(self, 'Предупреждение', 'Нет выбранных точек для сортировки')
@@ -1332,10 +1786,13 @@ class DataImportWizard(QDialog):
         points_list['belt'] = 0
         points_list['tower_part'] = 1  # По умолчанию все точки в первой части
         points_list['part_belt'] = 0  # Номер пояса внутри части
+        points_list['faces'] = int(self.belt_count or 4) if self.tower_type != 'composite' else None
         
         # Список оригинальных индексов в порядке их следования (исключаем точку standing из сортировки)
         # Но точка standing должна быть доступна в комбо-боксе для выбора
         original_indices = [idx for idx in points_list.index.tolist() if idx != station_idx]
+        for original_idx in original_indices:
+            self._set_point_assignment_status(int(original_idx), 'не назначено')
         
         indices_preview = f"{original_indices[:10]}..." if len(original_indices) > 10 else f"{original_indices}"
         logger.info(f"Начинаем автосортировку: всего {len(original_indices)} выбранных точек, "
@@ -1343,6 +1800,11 @@ class DataImportWizard(QDialog):
         
         # Если башня составная - определяем принадлежность точек к частям с учетом разброса
         # ВАЖНО: Точки на границе частей дублируются и включаются в обе части
+        def resolve_faces_for_part(part_num: int) -> int:
+            if self.tower_type == 'composite' and len(self.tower_parts) >= part_num:
+                return int(self.tower_parts[part_num - 1].get('faces', self.belt_count or 4) or (self.belt_count or 4))
+            return int(self.belt_count or 4)
+
         point_part_memberships = {}
         if self.tower_type == 'composite' and len(self.tower_parts) > 1:
             logger.info(f"Составная башня: {len(self.tower_parts)} частей, разброс = {self.split_height_tolerance:.2f} м")
@@ -1358,6 +1820,7 @@ class DataImportWizard(QDialog):
                 parts_for_point = self._determine_point_parts(z, split_heights)
                 point_part_memberships[original_idx] = parts_for_point
                 points_list.loc[original_idx, 'tower_part'] = parts_for_point[0]
+                points_list.loc[original_idx, 'faces'] = resolve_faces_for_part(parts_for_point[0])
             
             for part_num in range(1, len(self.tower_parts) + 1):
                 count = sum(1 for memberships in point_part_memberships.values() if part_num in memberships)
@@ -1366,6 +1829,7 @@ class DataImportWizard(QDialog):
             for original_idx in original_indices:
                 point_part_memberships[original_idx] = [1]
                 points_list.loc[original_idx, 'tower_part'] = 1
+                points_list.loc[original_idx, 'faces'] = resolve_faces_for_part(1)
         
         self.point_part_memberships = point_part_memberships
         
@@ -1447,6 +1911,10 @@ class DataImportWizard(QDialog):
                             # Сохраняем оригинальный индекс (не виртуальный) для связи с raw_data
                             item.setData(Qt.ItemDataRole.UserRole, original_idx)
                             self._style_belt_item(item, global_belt_num)
+                            status = 'спорная точка' if is_duplicate or len(point_part_memberships.get(original_idx, [part_num])) > 1 else 'автораспределено'
+                            details = f"Часть {part_num}, пояс {part_belt_num}"
+                            self._set_point_assignment_status(original_idx, status, details)
+                            self._decorate_assignment_item(item, original_idx)
                             
                             # Добавляем в соответствующий список поясов (используем global_belt_num для индексации)
                             belt_list_idx = global_belt_num - 1
@@ -1486,6 +1954,8 @@ class DataImportWizard(QDialog):
                     item = QListWidgetItem(item_text)
                     item.setData(Qt.ItemDataRole.UserRole, original_idx)
                     self._style_belt_item(item, part_belt_num)
+                    self._set_point_assignment_status(original_idx, 'автораспределено', f"Пояс {part_belt_num}")
+                    self._decorate_assignment_item(item, original_idx)
                     
                     self.belt_lists[part_belt_num - 1].addItem(item)
                 
@@ -1500,8 +1970,12 @@ class DataImportWizard(QDialog):
             unassigned_names = points_list.loc[unassigned_indices, 'name'].tolist()
             logger.warning(f"Остались нераспределенные точки ({unassigned_count}): {unassigned_names}")
             logger.warning(f"Индексы нераспределенных точек: {unassigned_indices}")
+            for unassigned_idx in unassigned_indices:
+                self._set_point_assignment_status(int(unassigned_idx), 'не назначено', 'Точка не была автоматически распределена')
         
         logger.info(f"Автосортировка завершена: {assigned_count} точек распределены по поясам")
+        self._refresh_unassigned_points_list()
+        self._refresh_assignment_summary()
     
     def get_belt_color(self, belt_num: int) -> QColor:
         """Получить цвет пояса"""
@@ -1538,13 +2012,7 @@ class DataImportWizard(QDialog):
     
     def move_to_belt(self):
         """Переместить выбранные точки на другой пояс"""
-        # Находим активный список
-        current_list = None
-        for belt_list in self.belt_lists:
-            if belt_list.hasFocus() or len(belt_list.selectedItems()) > 0:
-                current_list = belt_list
-                break
-        
+        current_list = self._find_active_assignment_list(include_unassigned=True)
         if current_list is None or len(current_list.selectedItems()) == 0:
             QMessageBox.warning(self, 'Предупреждение', 
                               'Выберите точки для перемещения')
@@ -1559,23 +2027,51 @@ class DataImportWizard(QDialog):
         )
         
         if ok:
-            selected_items = current_list.selectedItems()
             target_list = self.belt_lists[belt_num - 1]
-            
-            for item in selected_items:
-                # Клонируем item
-                new_item = QListWidgetItem(item.text())
-                new_item.setData(Qt.ItemDataRole.UserRole, item.data(Qt.ItemDataRole.UserRole))
-                self._style_belt_item(new_item, belt_num)
-                
-                # Добавляем в целевой список
-                target_list.addItem(new_item)
-                
-                # Удаляем из текущего
-                row = current_list.row(item)
-                current_list.takeItem(row)
-            
-            logger.info(f"Перемещено {len(selected_items)} точек на пояс {belt_num}")
+            selected_indices = self._get_indices_from_items(current_list.selectedItems())
+
+            for original_idx in selected_indices:
+                self._remove_point_from_all_belts(original_idx)
+                self._remove_point_from_unassigned(original_idx)
+                self._set_point_assignment_status(int(original_idx), 'перенесено вручную', f"Пользователь назначил пояс {belt_num}")
+                target_list.addItem(self._create_point_list_item(int(original_idx), belt_num=belt_num))
+
+            logger.info(f"Перемещено {len(selected_indices)} точек на пояс {belt_num}")
+            self._refresh_unassigned_points_list()
+            self._refresh_assignment_summary()
+
+    def move_to_unassigned(self):
+        """Убрать выбранные точки из поясов в список исключенных."""
+        current_list = self._find_active_assignment_list(include_unassigned=False)
+        if current_list is None or len(current_list.selectedItems()) == 0:
+            QMessageBox.warning(
+                self,
+                'Предупреждение',
+                'Выберите точки в одном из поясов, чтобы убрать их из расчета',
+            )
+            return
+
+        selected_indices = self._get_indices_from_items(current_list.selectedItems())
+        if not selected_indices:
+            QMessageBox.warning(
+                self,
+                'Предупреждение',
+                'Не удалось определить выбранные точки для исключения',
+            )
+            return
+
+        for original_idx in selected_indices:
+            self._remove_point_from_all_belts(original_idx)
+            self._set_point_assignment_status(
+                int(original_idx),
+                'исключено вручную',
+                'Точка убрана из поясов и не участвует в расчете',
+            )
+            self._add_point_to_unassigned(int(original_idx))
+
+        logger.info(f"Исключено из поясов {len(selected_indices)} точек")
+        self._refresh_unassigned_points_list()
+        self._refresh_assignment_summary()
     
     def clear_belt(self):
         """Очистить пояс"""
@@ -1595,8 +2091,114 @@ class DataImportWizard(QDialog):
                 QMessageBox.StandardButton.No
             )
             if reply == QMessageBox.StandardButton.Yes:
+                belt_list = self.belt_lists[belt_num - 1]
+                original_indices = self._get_indices_from_items(
+                    [belt_list.item(i) for i in range(belt_list.count())]
+                )
+                for original_idx in original_indices:
+                    self._set_point_assignment_status(
+                        int(original_idx),
+                        'исключено вручную',
+                        f"Точка снята с пояса {belt_num} пользователем",
+                    )
+                    self._add_point_to_unassigned(int(original_idx))
                 self.belt_lists[belt_num - 1].clear()
                 logger.info(f"Очищен пояс {belt_num}")
+                self._refresh_unassigned_points_list()
+                self._refresh_assignment_summary()
+
+    def _validate_final_assignment_state(self) -> Dict[str, Any]:
+        warnings: List[str] = []
+        selected_points = self._get_assignable_points()
+        selected_count = len(selected_points)
+        assigned_indices: set[int] = set()
+        if hasattr(self, 'belt_lists'):
+            for belt_list in self.belt_lists:
+                for row_idx in range(belt_list.count()):
+                    item = belt_list.item(row_idx)
+                    if item is None:
+                        continue
+                    original_idx = item.data(Qt.ItemDataRole.UserRole)
+                    if original_idx is not None:
+                        assigned_indices.add(int(original_idx))
+
+        selected_indices = {int(idx) for idx in selected_points.index.tolist()}
+        unassigned = sorted(selected_indices - assigned_indices)
+        assigned_count = len(selected_indices & assigned_indices)
+
+        if selected_count and assigned_count == 0:
+            warnings.append("Ни одна точка не распределена по поясам.")
+        if unassigned:
+            warnings.append(f"Остались нераспределенные точки: {len(unassigned)}")
+        if hasattr(self, 'station_combo') and self.station_combo.currentIndex() < 0:
+            warnings.append("Точка стояния не подтверждена пользователем.")
+        if self.multi_station_detected and self.multi_station_audit.get('review_duplicates'):
+            warnings.append(
+                f"Есть спорные дубли между стояниями: {len(self.multi_station_audit.get('review_duplicates', []))}"
+            )
+
+        belt_counts: Dict[int, int] = {}
+        if hasattr(self, 'belt_lists'):
+            for idx, belt_list in enumerate(self.belt_lists, start=1):
+                belt_counts[idx] = belt_list.count()
+        if self.tower_type == 'composite' and len(self.tower_parts) > 1:
+            empty_parts = []
+            offset = 0
+            for part_index, part in enumerate(self.tower_parts, start=1):
+                faces = int(part.get('faces', 0) or 0)
+                part_total = sum(belt_counts.get(offset + i, 0) for i in range(1, faces + 1))
+                if part_total == 0:
+                    empty_parts.append(part_index)
+                offset += faces
+            if empty_parts:
+                warnings.append(f"Пустые части башни: {', '.join(str(v) for v in empty_parts)}")
+
+        return {
+            'valid': len(warnings) == 0,
+            'warnings': warnings,
+            'assigned_count': assigned_count,
+            'unassigned_count': len(unassigned),
+            'selected_count': selected_count,
+            'belt_counts': belt_counts,
+        }
+
+    def _build_import_audit(self, validation_summary: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        validation_summary = validation_summary or self._validate_final_assignment_state()
+        standing_candidates = (self.import_diagnostics or {}).get('standing_point_candidates', [])
+        belt_summary = {
+            'count': self.belt_count,
+            'distribution': {str(k): int(v) for k, v in validation_summary.get('belt_counts', {}).items()},
+            'continuous_numbering': True,
+            'missing_numbers': [
+                idx for idx, count in validation_summary.get('belt_counts', {}).items()
+                if count == 0
+            ],
+        }
+        tower_part_summary = {
+            'has_parts': self.tower_type == 'composite',
+            'count': len(self.tower_parts) if self.tower_type == 'composite' else 1,
+            'multi_membership_points': sum(
+                1 for memberships in (self.point_part_memberships or {}).values() if len(memberships) > 1
+            ),
+        }
+        audit = {
+            'lock_autodetect': bool(self.auto_detect_locked),
+            'standing_point_idx': self.station_point_idx,
+            'standing_candidates': standing_candidates,
+            'selected_count': validation_summary.get('selected_count', 0),
+            'assigned_count': validation_summary.get('assigned_count', 0),
+            'unassigned_count': validation_summary.get('unassigned_count', 0),
+            'warnings': validation_summary.get('warnings', []),
+            'belt_summary': belt_summary,
+            'tower_part_summary': tower_part_summary,
+            'multi_station': dict(self.multi_station_audit or {}),
+            'point_status_summary': {
+                status: sum(1 for info in self.point_assignment_status.values() if info.get('status') == status)
+                for status in sorted({info.get('status') for info in self.point_assignment_status.values()})
+            },
+        }
+        self.import_audit = audit
+        return audit
     
     def go_back(self):
         """Вернуться на предыдущий шаг"""
@@ -1656,13 +2258,153 @@ class DataImportWizard(QDialog):
         elif self.current_step == 2:
             # Сохраняем настройки сортировки ПЕРЕД закрытием диалога
             self.sorting_settings = self.get_sorting_settings()
+            validation_summary = self._validate_final_assignment_state()
+            audit = self._build_import_audit(validation_summary)
+            if audit['warnings']:
+                reply = QMessageBox.question(
+                    self,
+                    'Проверка импорта',
+                    "Перед завершением импорта обнаружены предупреждения:\n\n"
+                    + "\n".join(f"• {warning}" for warning in audit['warnings'])
+                    + "\n\nПродолжить импорт?",
+                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                    QMessageBox.StandardButton.No,
+                )
+                if reply != QMessageBox.StandardButton.Yes:
+                    return
             
             # Финализируем данные
             self.finalize_data()
             self.accept()
-    
+
+    def _finalize_multi_station_data(self):
+        if not hasattr(self, 'station_combo') or self.station_combo.currentIndex() < 0:
+            self.station_point_idx = None
+        else:
+            self.station_point_idx = self.station_combo.currentData()
+
+        if self.multi_station_result is None or (
+            self.station_point_idx is not None
+            and self.multi_station_audit.get('base_station_idx') != self.station_point_idx
+        ):
+            self._prepare_multi_station_reference()
+
+        reference_data = self.multi_station_result.copy() if self.multi_station_result is not None else self.raw_data.copy()
+        reference_data = normalize_tower_point_flags(reference_data)
+        if 'belt' not in reference_data.columns:
+            reference_data['belt'] = pd.NA
+        if 'part_belt' not in reference_data.columns:
+            reference_data['part_belt'] = pd.NA
+        if 'faces' not in reference_data.columns:
+            reference_data['faces'] = pd.NA
+        if 'station_role' not in reference_data.columns:
+            reference_data['station_role'] = None
+
+        membership_map = getattr(self, 'point_part_memberships', {}) or {}
+        assignment_map: Dict[int, Dict[str, Any]] = {}
+
+        def resolve_faces_for_part(part_num: Optional[int]) -> int:
+            if part_num is None:
+                return int(self.belt_count or 4)
+            if self.tower_type == 'composite' and len(self.tower_parts) >= int(part_num):
+                part = self.tower_parts[int(part_num) - 1]
+                return int(part.get('faces', self.belt_count or 4) or (self.belt_count or 4))
+            return int(self.belt_count or 4)
+
+        belt_offsets = [0]
+        if self.tower_type == 'composite' and len(self.tower_parts) > 1:
+            for part_idx in range(1, len(self.tower_parts)):
+                prev_faces = self.tower_parts[part_idx - 1].get('faces', 4)
+                belt_offsets.append(belt_offsets[-1] + prev_faces)
+
+        for belt_idx, belt_list in enumerate(self.belt_lists, start=1):
+            part_num = 1
+            part_belt_num = belt_idx
+            if self.tower_type == 'composite' and len(self.tower_parts) > 1:
+                for part_idx, part in enumerate(self.tower_parts):
+                    part_faces = part.get('faces', 4)
+                    part_offset = belt_offsets[part_idx]
+                    if part_offset < belt_idx <= part_offset + part_faces:
+                        part_num = part_idx + 1
+                        part_belt_num = belt_idx - part_offset
+                        break
+
+            for row_idx in range(belt_list.count()):
+                item = belt_list.item(row_idx)
+                original_idx = item.data(Qt.ItemDataRole.UserRole)
+                if original_idx is None:
+                    continue
+                assignment_map[int(original_idx)] = {
+                    'belt': int(part_belt_num),
+                    'part_belt': int(part_belt_num),
+                    'tower_part': int(part_num),
+                    'faces': int(resolve_faces_for_part(part_num)),
+                }
+
+        if self.cached_selected_points is not None and not self.cached_selected_points.empty:
+            source_order = [int(idx) for idx in self.cached_selected_points.index.tolist()]
+        else:
+            source_order = self._get_selected_indices() or [int(idx) for idx in self.raw_data.index.tolist()]
+
+        result_rows: list[dict[str, Any]] = []
+        for original_idx in source_order:
+            if original_idx not in reference_data.index:
+                continue
+            base = reference_data.loc[original_idx].to_dict()
+            base['is_station'] = bool(base.get('is_station', False))
+            base['is_auxiliary'] = bool(base.get('is_auxiliary', False))
+            base['is_control'] = bool(base.get('is_control', False))
+
+            if base['is_station']:
+                base['belt'] = None
+                base['part_belt'] = None
+                base['faces'] = None
+                base['tower_part'] = None
+                base['tower_part_memberships'] = json.dumps([], ensure_ascii=False)
+                base['part_belt_assignments'] = json.dumps({}, ensure_ascii=False)
+                base['station_role'] = 'primary' if original_idx == self.station_point_idx else (base.get('station_role') or 'secondary')
+                result_rows.append(base)
+                continue
+
+            if base['is_auxiliary'] or base['is_control']:
+                base['belt'] = None
+                base['part_belt'] = None
+                base['faces'] = None
+                base['part_belt_assignments'] = json.dumps({}, ensure_ascii=False)
+                if base['is_auxiliary']:
+                    base['tower_part'] = None
+                    base['tower_part_memberships'] = json.dumps([], ensure_ascii=False)
+                result_rows.append(base)
+                continue
+
+            assignment = assignment_map.get(int(original_idx))
+            memberships = membership_map.get(original_idx, [])
+            if assignment is not None:
+                base['belt'] = assignment['belt']
+                base['part_belt'] = assignment['part_belt']
+                base['tower_part'] = assignment['tower_part']
+                base['faces'] = assignment['faces']
+                if not memberships:
+                    memberships = [assignment['tower_part']]
+                base['tower_part_memberships'] = json.dumps(memberships, ensure_ascii=False)
+                base['part_belt_assignments'] = json.dumps({assignment['tower_part']: assignment['part_belt']}, ensure_ascii=False)
+            else:
+                logger.debug(
+                    "Пропускаем нераспределенную рабочую точку при multi-station финализации: %s",
+                    base.get('name', original_idx),
+                )
+                continue
+            result_rows.append(base)
+
+        self.filtered_data = pd.DataFrame(result_rows).reset_index(drop=True) if result_rows else pd.DataFrame()
+        self._build_import_audit()
+
     def finalize_data(self):
         """Формирование финальных данных с назначенными поясами"""
+        if self.multi_station_detected:
+            self._finalize_multi_station_data()
+            return
+
         result_data = []
         
         # Получаем индекс точки standing
@@ -1693,6 +2435,14 @@ class DataImportWizard(QDialog):
                     'part_belts': {}
                 }
             return result_points[idx]
+
+        def resolve_faces_for_part(part_num: Optional[int]) -> int:
+            if part_num is None:
+                return int(self.belt_count or 4)
+            if self.tower_type == 'composite' and len(self.tower_parts) >= int(part_num):
+                part = self.tower_parts[int(part_num) - 1]
+                return int(part.get('faces', self.belt_count or 4) or (self.belt_count or 4))
+            return int(self.belt_count or 4)
         
         belt_offsets = [0]
         if self.tower_type == 'composite' and len(self.tower_parts) > 1:
@@ -1728,17 +2478,6 @@ class DataImportWizard(QDialog):
                 point_count += 1
             
             logger.info(f"Пояс {global_belt_num}: {point_count} точек")
-        
-        # Гарантируем, что все выбранные точки присутствуют
-        if self.cached_selected_points is not None:
-            candidate_indices = self.cached_selected_points.index.tolist()
-        else:
-            candidate_indices = self.raw_data.index.tolist()
-        
-        for idx in candidate_indices:
-            if idx == self.station_point_idx:
-                continue
-            ensure_entry(idx)
         
         # КРИТИЧЕСКИ ВАЖНО: сохраняем исходный порядок точек из raw_data или cached_selected_points
         # Определяем исходный порядок точек
@@ -1777,6 +2516,7 @@ class DataImportWizard(QDialog):
             base['tower_part'] = primary_part
             base['part_belt'] = part_belt_value
             base['belt'] = part_belt_value if part_belt_value is not None else base.get('belt')
+            base['faces'] = resolve_faces_for_part(primary_part)
             base['tower_part_memberships'] = json.dumps(memberships, ensure_ascii=False)
             base['part_belt_assignments'] = json.dumps(entry['part_belts'], ensure_ascii=False)
             
@@ -1789,6 +2529,7 @@ class DataImportWizard(QDialog):
             station_data['is_station'] = True
             station_data['tower_part'] = None
             station_data['part_belt'] = None
+            station_data['faces'] = None
             station_data['tower_part_memberships'] = json.dumps([], ensure_ascii=False)
             station_data['part_belt_assignments'] = json.dumps({}, ensure_ascii=False)
             result_data.append(station_data)
@@ -1832,6 +2573,7 @@ class DataImportWizard(QDialog):
         if self.tower_type == 'composite' and 'tower_part' in self.filtered_data.columns:
             part_distribution = self.filtered_data['tower_part'].value_counts(dropna=True).sort_index()
             logger.info(f"Распределение по частям (первичное назначение): {part_distribution.to_dict()}")
+        self._build_import_audit()
     
     def get_sorting_settings(self) -> dict:
         """Получить настройки сортировки для сохранения"""
@@ -1839,9 +2581,11 @@ class DataImportWizard(QDialog):
             'belt_count': self.belt_count,
             'excluded_points': [],
             'belt_assignments': {},
+            'belt_numbering_version': BELT_NUMBERING_VERSION,
             'tower_type': self.tower_type,
             'tower_parts': self.tower_parts.copy() if self.tower_parts else [],
-            'split_height_tolerance': self.split_height_tolerance
+            'split_height_tolerance': self.split_height_tolerance,
+            'lock_autodetect': bool(self.auto_detect_locked),
         }
         
         try:
@@ -1882,12 +2626,59 @@ class DataImportWizard(QDialog):
         split_heights_str = ', '.join([str(p.get('split_height', 'None')) for p in settings['tower_parts'][1:]])
         logger.info(f"Сохранены настройки: тип башни={settings['tower_type']}, частей={len(settings['tower_parts'])}, высоты начала частей=[{split_heights_str}]")
         return settings
+
+    def _auto_detect_split_height(self) -> float:
+        """Robust auto-detection of a composite split height."""
+        try:
+            selected_points = self.get_selected_points()
+            if selected_points.empty or len(selected_points) < 6:
+                return None
+
+            if 'is_station' in selected_points.columns:
+                selected_points = selected_points[~selected_points['is_station'].fillna(False).astype(bool)]
+
+            if selected_points.empty:
+                return None
+
+            faces_hint = int(self.belt_count or 4)
+            if self.tower_parts:
+                faces_hint = max(
+                    faces_hint,
+                    max(int(part.get('faces', faces_hint) or faces_hint) for part in self.tower_parts),
+                )
+
+            split_height = estimate_composite_split_height(
+                selected_points,
+                num_belts=max(3, faces_hint),
+                station_idx=self.station_point_idx,
+            )
+            if split_height is not None:
+                logger.info(f"Автоопределена высота раздвоения: {split_height:.3f} м")
+                return float(split_height)
+        except Exception as e:
+            logger.warning(f"Ошибка при автоопределении высоты раздвоения: {e}")
+            return None
+        return None
+
+    def _group_points_by_belts(self, points_list: pd.DataFrame, indices: list, num_belts: int, station_idx: int = None) -> list:
+        """Robust auto-assignment of points to belts/faces."""
+        reference_station_xy = extract_reference_station_xy(self.raw_data, station_idx=station_idx)
+        return group_points_by_global_angle(
+            points_list,
+            indices,
+            num_belts,
+            station_idx=station_idx,
+            reference_station_xy=reference_station_xy,
+        )
     
     def get_cached_sorting_settings(self) -> dict:
         """Получить кэшированные настройки сортировки"""
         return self.sorting_settings if self.sorting_settings else {}
+
+    def get_import_audit(self) -> Dict[str, Any]:
+        """Получить сводку подтверждений и предупреждений импорта."""
+        return self.import_audit if self.import_audit else self._build_import_audit()
     
     def get_result(self) -> pd.DataFrame:
         """Получить результат работы мастера"""
         return self.filtered_data if self.filtered_data is not None else pd.DataFrame()
-

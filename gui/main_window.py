@@ -27,9 +27,12 @@ from gui.point_editor_3d import PointEditor3DWidget
 from gui.data_import_wizard import DataImportWizard
 from gui.second_station_import_wizard import SecondStationImportWizard
 from gui.full_report_tab import FullReportTab
-from core.data_loader import load_data_from_file, validate_data
+from core.data_loader import load_data_from_file, load_survey_data, validate_data
+from core.import_models import ImportDiagnostics, LoadedSurveyData
 from core.normatives import NormativeChecker
 from core.belt_operations import estimate_belt_count_from_heights, auto_assign_belts
+from core.planar_orientation import BELT_NUMBERING_VERSION
+from core.point_utils import build_working_tower_mask
 from core.section_operations import find_section_levels, add_missing_points_for_sections, get_section_lines
 from utils.coordinate_systems import CoordinateSystemManager, get_common_epsg_list
 from core.services import ProjectManager, CalculationService
@@ -76,6 +79,9 @@ class MainWindow(QMainWindow):
         self.raw_data = None
         self.processed_data = None
         self.epsg_code = None
+        self.import_context: Optional[Dict[str, Any]] = None
+        self.import_diagnostics: Optional[Dict[str, Any]] = None
+        self.transformation_audit: Optional[Dict[str, Any]] = None
         self.current_file_path = None  # Путь к текущему открытому файлу
         self.original_data_before_sections = None  # Данные до создания секций
         self._tower_blueprint: Optional[TowerBlueprint] = None  # Последний blueprint мастера
@@ -609,6 +615,8 @@ class MainWindow(QMainWindow):
         self.main_tabs.addTab(self.report_widget, '📄 Отчет')
 
         self.full_report_tab = FullReportTab()
+        self.report_widget.full_report_tab = self.full_report_tab
+        self.report_widget.report_info_changed.connect(self._on_report_info_changed)
         self.main_tabs.addTab(self.full_report_tab, '🧾 Полный отчет')
         
     def create_statusbar(self):
@@ -665,6 +673,9 @@ class MainWindow(QMainWindow):
         if wizard.exec() == QDialog.DialogCode.Accepted:
             merged_data = wizard.get_result_data()
             visualization_data = wizard.get_visualization_data()
+            second_station_context = wizard.get_second_station_import_context()
+            second_station_diagnostics = wizard.get_second_station_import_diagnostics()
+            transformation_audit = wizard.get_transformation_audit()
             
             if merged_data is not None and not merged_data.empty:
                 # Удаляем ошибочную станцию с координатами (0,0)
@@ -693,6 +704,24 @@ class MainWindow(QMainWindow):
                 
                 # Обновляем данные
                 self.raw_data = merged_data
+                if second_station_context:
+                    base_context = dict(self.import_context or {})
+                    base_context['second_station_import'] = second_station_context
+                    self.import_context = base_context
+                if second_station_diagnostics:
+                    base_diagnostics = dict(self.import_diagnostics or {})
+                    details = dict(base_diagnostics.get('details') or {})
+                    details['second_station_import'] = second_station_diagnostics
+                    if transformation_audit is not None:
+                        details['second_station_audit'] = transformation_audit
+                    base_diagnostics['details'] = details
+                    if transformation_audit is not None:
+                        base_diagnostics['transformation_quality'] = transformation_audit.get('transformation_quality', {})
+                    self.import_diagnostics = base_diagnostics
+                self.transformation_audit = transformation_audit
+                self.project_manager.import_context = self.import_context
+                self.project_manager.import_diagnostics = self.import_diagnostics
+                self.project_manager.transformation_audit = self.transformation_audit
                 
                 # Обновляем виджеты
                 self.editor_3d.set_data(self.raw_data)
@@ -792,7 +821,8 @@ class MainWindow(QMainWindow):
             settings = {
                 'belt_count': int(self.raw_data['belt'].max()),
                 'excluded_points': [],  # Пока не сохраняем исключенные
-                'belt_assignments': {}
+                'belt_assignments': {},
+                'belt_numbering_version': BELT_NUMBERING_VERSION,
             }
             
             # Группируем точки по поясам
@@ -1019,7 +1049,9 @@ class MainWindow(QMainWindow):
         # Подключаем сигналы
         self.load_thread.progress.connect(progress_dialog.setValue)
         self.load_thread.progress.connect(lambda p, m: progress_dialog.setLabelText(m))
-        self.load_thread.data_loaded.connect(lambda data, epsg: self._on_data_loaded_async(data, epsg, progress_dialog))
+        self.load_thread.data_loaded_detailed.connect(
+            lambda loaded: self._on_data_loaded_async(loaded, progress_dialog)
+        )
         self.load_thread.error.connect(lambda msg: self._on_load_error_async(msg, progress_dialog))
         self.load_thread.finished.connect(progress_dialog.reset)
         
@@ -1030,11 +1062,11 @@ class MainWindow(QMainWindow):
         self.load_thread.start()
         progress_dialog.exec()
     
-    def _on_data_loaded_async(self, data: pd.DataFrame, epsg_code: Optional[int], progress_dialog):
+    def _on_data_loaded_async(self, loaded: LoadedSurveyData, progress_dialog):
         """Обработка успешной загрузки данных"""
         progress_dialog.setValue(100)
         progress_dialog.close()
-        self._process_loaded_data(data, epsg_code)
+        self._process_loaded_data(loaded)
     
     def _on_load_error_async(self, error_message: str, progress_dialog):
         """Обработка ошибки загрузки"""
@@ -1042,6 +1074,9 @@ class MainWindow(QMainWindow):
         QMessageBox.critical(self, 'Ошибка загрузки', f'Ошибка загрузки файла:\n{error_message}')
         self.statusBar.showMessage('Ошибка загрузки')
         self.current_file_path = None
+        self.import_context = None
+        self.import_diagnostics = None
+        self.transformation_audit = None
     
     def _load_file_sync(self, file_path: str):
         """Синхронная загрузка файла (старый метод)"""
@@ -1050,19 +1085,24 @@ class MainWindow(QMainWindow):
             self.current_file_path = file_path
             
             # Загружаем данные
-            data, epsg = load_data_from_file(file_path)
+            loaded = load_survey_data(file_path)
             
-            self._process_loaded_data(data, epsg)
+            self._process_loaded_data(loaded)
             
         except (DataLoadError, FileFormatError, DataValidationError, IOError, OSError) as e:
             logger.error(f"Ошибка загрузки файла: {e}", exc_info=True)
             QMessageBox.critical(self, 'Ошибка', f'Ошибка загрузки файла:\n{str(e)}')
             self.statusBar.showMessage('Ошибка загрузки')
             self.current_file_path = None
+            self.import_context = None
+            self.import_diagnostics = None
+            self.transformation_audit = None
     
-    def _process_loaded_data(self, data: pd.DataFrame, epsg_code: Optional[int]):
+    def _process_loaded_data(self, loaded: LoadedSurveyData):
         """Обработка загруженных данных (общий метод для синхронной и асинхронной загрузки)"""
         try:
+            data = loaded.data
+            epsg_code = loaded.epsg_code
             # Валидация
             is_valid, message = validate_data(data)
             if not is_valid:
@@ -1076,7 +1116,12 @@ class MainWindow(QMainWindow):
                 logger.info("Найдены сохраненные настройки сортировки")
             
             # Открываем мастер импорта с сохраненными настройками
-            wizard = DataImportWizard(data, saved_settings, self)
+            wizard = DataImportWizard(
+                data,
+                saved_settings,
+                self,
+                import_payload=loaded.to_context_dict(),
+            )
             
             if wizard.exec() == QDialog.DialogCode.Accepted:
                 # Получаем обработанные данные с назначенными поясами
@@ -1089,8 +1134,13 @@ class MainWindow(QMainWindow):
                 
                 # Сохраняем EPSG код и путь (данные будут установлены командой)
                 self.epsg_code = epsg_code
+                self.import_context = loaded.to_context_dict()
+                self.import_diagnostics = loaded.diagnostics.to_dict()
+                self.transformation_audit = None
                 # Синхронизируем с project_manager
                 self.project_manager.current_file_path = self.current_file_path
+                self.project_manager.import_context = self.import_context
+                self.project_manager.import_diagnostics = self.import_diagnostics
                 
                 # Устанавливаем EPSG в комбобокс
                 if epsg_code:
@@ -1101,6 +1151,26 @@ class MainWindow(QMainWindow):
                 
                 # Получаем количество поясов из настроек мастера импорта
                 sorting_settings = wizard.get_cached_sorting_settings()
+                import_audit = wizard.get_import_audit()
+                if self.import_context is None:
+                    self.import_context = {}
+                self.import_context['wizard_audit'] = import_audit
+                self.import_context['sorting_settings'] = sorting_settings or {}
+                if self.import_diagnostics is not None:
+                    self.import_diagnostics['details'] = self.import_diagnostics.get('details', {})
+                    self.import_diagnostics['details']['wizard_audit'] = import_audit
+                    self.import_diagnostics['belt_summary'] = import_audit.get(
+                        'belt_summary',
+                        self.import_diagnostics.get('belt_summary', {}),
+                    )
+                    self.import_diagnostics['tower_part_summary'] = import_audit.get(
+                        'tower_part_summary',
+                        self.import_diagnostics.get('tower_part_summary', {}),
+                    )
+                    self.import_diagnostics['standing_point_candidates'] = import_audit.get(
+                        'standing_candidates',
+                        self.import_diagnostics.get('standing_point_candidates', []),
+                    )
                 if sorting_settings and 'belt_count' in sorting_settings:
                     belt_count = sorting_settings['belt_count']
                     logger.info(f"Количество поясов взято из настроек мастера импорта: {belt_count}")
@@ -1115,6 +1185,7 @@ class MainWindow(QMainWindow):
                     
                 self.belt_count_spin.setValue(belt_count)
                 self.expected_belt_count = belt_count
+                self._show_import_diagnostics_summary(loaded)
                 
                 # Определяем количество граней башни
                 self._determine_tower_faces(processed_data)
@@ -1140,7 +1211,7 @@ class MainWindow(QMainWindow):
                     if not station_data.empty:
                         station = station_data.iloc[0]
                         # Вычисляем расстояние и угол от центра башни
-                        tower_data = processed_data[processed_data['is_station'] != True]
+                        tower_data = processed_data[build_working_tower_mask(processed_data)]
                         if not tower_data.empty:
                             tower_center = tower_data[['x', 'y']].mean()
                             station_xy = np.array([station['x'], station['y']])
@@ -1188,7 +1259,8 @@ class MainWindow(QMainWindow):
                     instrument_distance=instrument_distance,
                     instrument_angle_deg=instrument_angle_deg,
                     instrument_height=instrument_height,
-                    base_rotation_deg=0.0
+                    base_rotation_deg=0.0,
+                    default_faces=self.tower_faces_count or self.expected_belt_count,
                 )
                 
                 self._tower_blueprint = blueprint
@@ -1246,11 +1318,46 @@ class MainWindow(QMainWindow):
             else:
                 self.statusBar.showMessage('Загрузка отменена')
                 self.current_file_path = None
+                self.import_context = None
+                self.import_diagnostics = None
+                self.transformation_audit = None
             
         except (DataLoadError, FileFormatError, DataValidationError, IOError, OSError) as e:
             logger.error(f"Ошибка загрузки файла: {e}", exc_info=True)
             QMessageBox.critical(self, 'Ошибка', f'Ошибка загрузки файла:\n{str(e)}')
             self.statusBar.showMessage('Ошибка загрузки')
+
+    def _show_import_diagnostics_summary(self, loaded: LoadedSurveyData) -> None:
+        """Кратко показывает стратегию и предупреждения импорта."""
+        diagnostics = loaded.diagnostics
+        warnings = diagnostics.warnings if diagnostics is not None else []
+        if warnings:
+            preview = "\n".join(f"• {item}" for item in warnings[:4])
+            if len(warnings) > 4:
+                preview += f"\n• ... и ещё {len(warnings) - 4}"
+            QMessageBox.information(
+                self,
+                'Диагностика импорта',
+                f"Стратегия: {loaded.parser_strategy or diagnostics.parser_strategy}\n"
+                f"Уверенность: {loaded.confidence:.2f}\n\n"
+                f"{preview}"
+            )
+        else:
+            self.statusBar.showMessage(
+                f"Импорт завершён: стратегия {loaded.parser_strategy}, confidence {loaded.confidence:.2f}",
+                5000,
+            )
+
+    def _attach_import_metadata_to_results(self, results: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+        if results is None:
+            return None
+        if self.import_context is not None:
+            results['import_context'] = self.import_context
+        if self.import_diagnostics is not None:
+            results['import_diagnostics'] = self.import_diagnostics
+        if self.transformation_audit is not None:
+            results['transformation_audit'] = self.transformation_audit
+        return results
             
     def calculate(self, use_async: bool = True):
         """
@@ -1293,7 +1400,7 @@ class MainWindow(QMainWindow):
             epsg_code=self.epsg_code,
             height_tolerance=self.height_tolerance,
             center_method=self.center_method,
-            use_assigned_belts=True,
+            section_grouping_mode='height_levels',
             parent=self
         )
         
@@ -1327,7 +1434,7 @@ class MainWindow(QMainWindow):
         progress_dialog.close()
         
         try:
-            self.processed_data = results
+            self.processed_data = self._attach_import_metadata_to_results(results)
             self.data_table.set_processed_results(results)
             if hasattr(self.editor_3d, 'set_processed_results'):
                 self.editor_3d.set_processed_results(results)
@@ -1413,10 +1520,10 @@ class MainWindow(QMainWindow):
                 epsg_code=self.epsg_code,
                 height_tolerance=self.height_tolerance,
                 center_method=self.center_method,
-                use_assigned_belts=True
+                section_grouping_mode='height_levels'
             )
             
-            self.processed_data = results
+            self.processed_data = self._attach_import_metadata_to_results(results)
             self.data_table.set_processed_results(results)
             if hasattr(self.editor_3d, 'set_processed_results'):
                 self.editor_3d.set_processed_results(results)
@@ -1649,6 +1756,9 @@ class MainWindow(QMainWindow):
                 tower_builder_state=tower_builder_state,
                 full_report_state=full_report_state,
                 undo_history=undo_history,
+                import_context=self.import_context,
+                import_diagnostics=self.import_diagnostics,
+                transformation_audit=self.transformation_audit,
             )
             
             # Активируем кнопку быстрого сохранения
@@ -1714,6 +1824,9 @@ class MainWindow(QMainWindow):
         self.raw_data = None
         self.processed_data = None
         self.epsg_code = None
+        self.import_context = None
+        self.import_diagnostics = None
+        self.transformation_audit = None
         self.current_file_path = None
         self.original_data_before_sections = None
         if not preserve_builder:
@@ -1727,7 +1840,7 @@ class MainWindow(QMainWindow):
 
         if self.full_report_tab is not None:
             self.full_report_tab.clear_form()
-            self.full_report_tab.set_source_data(None, None)
+            self.full_report_tab.set_source_data(None, None, {}, {}, project_path=self.project_manager.current_project_path, tower_blueprint=None)
         
         # Очистка ProjectManager
         self.project_manager.current_project_path = None
@@ -1993,10 +2106,16 @@ class MainWindow(QMainWindow):
                 self.processed_data = project_data.get('processed_data')
                 full_report_state = project_data.get('full_report_state', {})
                 self.epsg_code = project_data.get('epsg_code')
+                self.import_context = project_data.get('import_context')
+                self.import_diagnostics = project_data.get('import_diagnostics')
+                self.transformation_audit = project_data.get('transformation_audit')
                 self.current_file_path = project_data.get('current_file_path')
                 self.original_data_before_sections = project_data.get('original_data_before_sections')
                 # Синхронизируем с project_manager
                 self.project_manager.current_file_path = self.current_file_path
+                self.project_manager.import_context = self.import_context
+                self.project_manager.import_diagnostics = self.import_diagnostics
+                self.project_manager.transformation_audit = self.transformation_audit
                 self.height_tolerance = project_data.get('height_tolerance', 0.1)
                 self.center_method = project_data.get('center_method', 'mean')
                 self.expected_belt_count = project_data.get('expected_belt_count')
@@ -2082,7 +2201,7 @@ class MainWindow(QMainWindow):
                                 if not station_data.empty:
                                     station = station_data.iloc[0]
                                     # Вычисляем расстояние и угол от центра башни
-                                    tower_data = self.raw_data[self.raw_data['is_station'] != True]
+                                    tower_data = self.raw_data[build_working_tower_mask(self.raw_data)]
                                     if not tower_data.empty:
                                         tower_center = tower_data[['x', 'y']].mean()
                                         station_xy = np.array([station['x'], station['y']])
@@ -2138,7 +2257,8 @@ class MainWindow(QMainWindow):
                                 instrument_distance=instrument_distance,
                                 instrument_angle_deg=instrument_angle_deg,
                                 instrument_height=instrument_height,
-                                base_rotation_deg=0.0
+                                base_rotation_deg=0.0,
+                                default_faces=self.tower_faces_count or self.expected_belt_count,
                             )
                             
                             self._tower_blueprint = blueprint
@@ -2197,7 +2317,14 @@ class MainWindow(QMainWindow):
                         self.full_report_tab.load_state(full_report_state)
                     else:
                         self.full_report_tab.clear_form()
-                    self.full_report_tab.set_source_data(self.raw_data, self.processed_data)
+                    self.full_report_tab.set_source_data(
+                        self.raw_data,
+                        self.processed_data,
+                        self.import_context,
+                        self.import_diagnostics,
+                        project_path=self.project_manager.current_project_path,
+                        tower_blueprint=self._tower_blueprint,
+                    )
                 
             except (ProjectLoadError, IOError, OSError, pickle.UnpicklingError, AttributeError, KeyError, ValueError) as e:
                 logger.error(f"Ошибка загрузки проекта: {e}", exc_info=True)
@@ -2467,6 +2594,39 @@ class MainWindow(QMainWindow):
     
     def _determine_tower_faces(self, data: pd.DataFrame):
         """Определяет количество граней башни на основе данных"""
+        if self.expected_belt_count is not None and int(self.expected_belt_count) >= 3:
+            self.tower_faces_count = int(self.expected_belt_count)
+            logger.info(
+                f"РљРѕР»РёС‡РµСЃС‚РІРѕ РіСЂР°РЅРµР№ РІР·СЏС‚Рѕ РёР· РЅР°СЃС‚СЂРѕРµРє РјР°СЃС‚РµСЂР° РёРјРїРѕСЂС‚Р°: {self.tower_faces_count}"
+            )
+            return
+
+        if 'faces' in data.columns:
+            face_values = pd.to_numeric(data['faces'], errors='coerce').dropna()
+            face_values = face_values[face_values >= 3]
+            if not face_values.empty:
+                self.tower_faces_count = int(face_values.mode().iloc[0])
+                logger.info(
+                    f"РљРѕР»РёС‡РµСЃС‚РІРѕ РіСЂР°РЅРµР№ РІР·СЏС‚Рѕ РёР· РёРјРїРѕСЂС‚РёСЂРѕРІР°РЅРЅС‹С… РґР°РЅРЅС‹С…: {self.tower_faces_count}"
+                )
+                return
+
+        if 'belt' in data.columns:
+            belt_values = pd.to_numeric(data['belt'], errors='coerce').dropna()
+            belt_values = belt_values[belt_values > 0]
+            if not belt_values.empty:
+                unique_belts = sorted({int(value) for value in belt_values})
+                self.tower_faces_count = max(3, max(len(unique_belts), max(unique_belts)))
+                logger.warning(
+                    f"РљРѕР»РёС‡РµСЃС‚РІРѕ РіСЂР°РЅРµР№ РѕРїСЂРµРґРµР»РµРЅРѕ РїРѕ РЅРѕРјРµСЂР°Рј РїРѕСЏСЃРѕРІ: {self.tower_faces_count}. "
+                    f"РќР°Р№РґРµРЅС‹ РїРѕСЏСЃР°: {unique_belts}"
+                )
+                return
+
+        self.tower_faces_count = 4
+        logger.warning("РќРµ СѓРґР°Р»РѕСЃСЊ РѕРїСЂРµРґРµР»РёС‚СЊ РєРѕР»РёС‡РµСЃС‚РІРѕ РіСЂР°РЅРµР№, РёСЃРїРѕР»СЊР·СѓРµРј Р·РЅР°С‡РµРЅРёРµ РїРѕ СѓРјРѕР»С‡Р°РЅРёСЋ: 4")
+        return
+
         if 'belt' not in data.columns:
             logger.warning("Колонка 'belt' не найдена, используем значение по умолчанию")
             self.tower_faces_count = 4
@@ -2477,8 +2637,8 @@ class MainWindow(QMainWindow):
         for belt_num in data['belt'].dropna().unique():
             belt_points = data[data['belt'] == belt_num]
             # Исключаем точки стояния
-            if 'is_station' in belt_points.columns:
-                belt_points = belt_points[~belt_points['is_station'].fillna(False)]
+            if not belt_points.empty:
+                belt_points = belt_points[build_working_tower_mask(belt_points)]
             belt_counts[belt_num] = len(belt_points)
         
         if belt_counts:
@@ -2615,7 +2775,25 @@ class MainWindow(QMainWindow):
 
     def _update_full_report_context(self):
         if self.full_report_tab is not None:
-            self.full_report_tab.set_source_data(self.raw_data, self.processed_data)
+            angular = None
+            if hasattr(self, 'data_table') and self.data_table is not None and hasattr(self.data_table, 'get_angular_measurements'):
+                try:
+                    angular = self.data_table.get_angular_measurements()
+                except Exception:
+                    angular = None
+            self.full_report_tab.set_source_data(
+                self.raw_data,
+                self.processed_data,
+                import_context=self.import_context,
+                import_diagnostics=self.import_diagnostics,
+                project_path=self.project_manager.current_project_path,
+                tower_blueprint=self._tower_blueprint,
+                angular_measurements=angular,
+            )
+
+    def _on_report_info_changed(self, report_info: Dict[str, Any]):
+        if self.full_report_tab is not None:
+            self.full_report_tab.apply_shared_report_info(report_info, force=False)
 
     def update_export_actions_state(self):
         """Включает или отключает элементы управления экспортом схемы в зависимости от наличия данных."""
@@ -3308,6 +3486,9 @@ class MainWindow(QMainWindow):
                     section_data=section_data,
                     tower_builder_state=tower_builder_state,
                     full_report_state=full_report_state,
+                    import_context=self.import_context,
+                    import_diagnostics=self.import_diagnostics,
+                    transformation_audit=self.transformation_audit,
                 )
                 
                 if autosave_file:
@@ -3366,10 +3547,16 @@ class MainWindow(QMainWindow):
             self.processed_data = project_data.get('processed_data')
             full_report_state = project_data.get('full_report_state', {})
             self.epsg_code = project_data.get('epsg_code')
+            self.import_context = project_data.get('import_context')
+            self.import_diagnostics = project_data.get('import_diagnostics')
+            self.transformation_audit = project_data.get('transformation_audit')
             self.current_file_path = project_data.get('current_file_path')
             self.original_data_before_sections = project_data.get('original_data_before_sections')
             # Синхронизируем с project_manager
             self.project_manager.current_file_path = self.current_file_path
+            self.project_manager.import_context = self.import_context
+            self.project_manager.import_diagnostics = self.import_diagnostics
+            self.project_manager.transformation_audit = self.transformation_audit
             self.height_tolerance = project_data.get('height_tolerance', 0.1)
             self.center_method = project_data.get('center_method', 'mean')
             self.expected_belt_count = project_data.get('expected_belt_count')
@@ -3421,7 +3608,14 @@ class MainWindow(QMainWindow):
                     self.full_report_tab.load_state(full_report_state)
                 else:
                     self.full_report_tab.clear_form()
-                self.full_report_tab.set_source_data(self.raw_data, self.processed_data)
+                self.full_report_tab.set_source_data(
+                    self.raw_data,
+                    self.processed_data,
+                    self.import_context,
+                    self.import_diagnostics,
+                    project_path=self.project_manager.current_project_path,
+                    tower_blueprint=self._tower_blueprint,
+                )
         except Exception as e:
             logger.error(f"Ошибка загрузки проекта из файла: {e}", exc_info=True)
             QMessageBox.warning(self, 'Ошибка', f'Не удалось восстановить проект:\n{str(e)}')
@@ -3564,10 +3758,12 @@ class MainWindow(QMainWindow):
                 try:
                     bdf = self.raw_data[self.raw_data['belt'] == target_belt]
                     if bdf is not None and not bdf.empty:
-                        cx, cy = bdf['x'].mean(), bdf['y'].mean()
-                        angles = np.arctan2(bdf['y'] - cy, bdf['x'] - cx)
-                        order = np.argsort(angles.values)
-                        ordered = bdf.iloc[order][['x','y','z']].values
+                        from core.planar_orientation import extract_reference_station_xy, sort_points_clockwise
+
+                        ordered = sort_points_clockwise(
+                            bdf,
+                            station_xy=extract_reference_station_xy(self.raw_data),
+                        )[['x', 'y', 'z']].to_numpy(dtype=float)
                         self.editor_3d.set_belt_polyline(int(target_belt), ordered)
                 except (AttributeError, KeyError, ValueError, IndexError) as e:
                     logger.debug(f"Не удалось создать полилинию для пояса {target_belt}: {e}")
@@ -3590,4 +3786,3 @@ class MainWindow(QMainWindow):
         if self.raw_data is None or self.raw_data.empty:
             return
         self.calculate()
-

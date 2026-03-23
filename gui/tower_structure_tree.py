@@ -283,7 +283,7 @@ class TowerStructureTreeWidget(QWidget):
                         return f"{PROFILE_TYPE_NAMES[type_part]} {designation} ({standard})"
             
             return profile_name
-        except:
+        except (ValueError, IndexError, KeyError):
             return profile_name
     
     def _on_selection_changed(self) -> None:

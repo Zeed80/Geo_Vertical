@@ -1,6 +1,8 @@
 import numpy as np
 import pandas as pd
-from core.survey_registration import shift_points_along_z, translate_points_xy, rotate_points_around_z
+
+from core.survey_registration import rotate_points_around_z, shift_points_along_z, translate_points_xy
+
 
 def test_method2_sequence_aligns_and_removes_belt():
     # Первая съемка: два пояса, по одной точке в каждом

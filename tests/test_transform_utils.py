@@ -1,6 +1,12 @@
 import numpy as np
 import pandas as pd
-from core.survey_registration import shift_points_along_z, translate_points_xy, rotate_points_around_z, compute_xy_signed_angle
+
+from core.survey_registration import (
+    compute_xy_signed_angle,
+    rotate_points_around_z,
+    shift_points_along_z,
+    translate_points_xy,
+)
 
 
 def test_shift_points_along_z():
@@ -31,5 +37,5 @@ def test_compute_xy_signed_angle():
     v2 = np.array([0.0, 1.0])
     angle_cw = compute_xy_signed_angle(v1, v2, 1)
     angle_ccw = compute_xy_signed_angle(v1, v2, -1)
-    assert np.isclose(angle_cw, np.pi/2)
-    assert np.isclose(angle_ccw, -np.pi/2)
+    assert np.isclose(angle_cw, -np.pi/2)
+    assert np.isclose(angle_ccw, np.pi/2)

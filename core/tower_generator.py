@@ -7,16 +7,17 @@
 
 from __future__ import annotations
 
-import json
+import logging
 import math
-from dataclasses import dataclass, field, asdict
 from collections import defaultdict
-from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
+from collections.abc import Sequence
+from dataclasses import asdict, dataclass, field
+from typing import Any, Union
 
 import numpy as np
 import pandas as pd
 
-import logging
+from core.planar_orientation import clockwise_order_indices
 
 logger = logging.getLogger(__name__)
 
@@ -27,61 +28,15 @@ def _deg2rad(value: float) -> float:
     return value * math.pi / 180.0
 
 
-def _decode_part_memberships(value) -> List[int]:
-    if value is None:
-        return []
-    if isinstance(value, float) and np.isnan(value):
-        return []
-    if isinstance(value, str):
-        try:
-            data = json.loads(value)
-        except Exception:
-            return []
-    elif isinstance(value, (list, tuple, set)):
-        data = list(value)
-    else:
-        return []
-    memberships: List[int] = []
-    for item in data:
-        try:
-            memberships.append(int(item))
-        except (TypeError, ValueError):
-            continue
-    return memberships
-
-
-def _row_belongs_to_part(row: pd.Series, part_num: int) -> bool:
-    memberships = []
-    if 'tower_part_memberships' in row and pd.notna(row.get('tower_part_memberships')):
-        memberships = _decode_part_memberships(row.get('tower_part_memberships'))
-    if memberships:
-        return part_num in memberships
-    return int(row.get('tower_part', 1)) == part_num
-
-
-def _filter_points_by_part(data: pd.DataFrame, part_num: int) -> pd.DataFrame:
-    if 'tower_part_memberships' in data.columns:
-        mask = data.apply(lambda row: _row_belongs_to_part(row, part_num), axis=1)
-        return data[mask].copy()
-    return data[data['tower_part'] == part_num].copy()
-
-
-def _build_is_station_mask(series: pd.Series) -> pd.Series:
-    series = series.copy()
-    if series.dtype == 'object':
-        string_mask = series.map(lambda value: isinstance(value, str))
-        if string_mask.any():
-            lowered = series[string_mask].str.strip().str.lower()
-            mapping = {'true': True, 'false': False, '1': True, '0': False, 'yes': True, 'no': False}
-            mapped = lowered.map(mapping)
-            valid_idx = mapped.dropna().index
-            if len(valid_idx) > 0:
-                series.loc[valid_idx] = mapped.loc[valid_idx]
-        series = series.infer_objects(copy=False)
-    null_mask = series.isna()
-    if null_mask.any():
-        series.loc[null_mask] = False
-    return series.astype(bool)
+from core.point_utils import (
+    build_is_station_mask as _build_is_station_mask,
+)
+from core.point_utils import (
+    decode_part_memberships as _decode_part_memberships,
+)
+from core.point_utils import (
+    filter_points_by_part as _filter_points_by_part,
+)
 
 
 def _size_to_radius(size_m: float) -> float:
@@ -98,20 +53,21 @@ def _size_to_radius(size_m: float) -> float:
 
 
 def _build_polygon_points(
-    center: Tuple[float, float],
+    center: tuple[float, float],
     radius: float,
     faces: int,
     z_value: float,
     rotation_deg: float,
     deviation_m: float,
     rng: np.random.Generator,
-) -> List[Tuple[float, float, float]]:
+    reference_station_xy: tuple[float, float] | None = None,
+) -> list[tuple[float, float, float]]:
     """Формирует точки правильного многоугольника с небольшой девиацией."""
     if faces < 3:
         raise ValueError("Количество граней должно быть >= 3")
 
     rotation = _deg2rad(rotation_deg)
-    points: List[Tuple[float, float, float]] = []
+    raw_points: list[tuple[float, float, float]] = []
     for face_idx in range(faces):
         angle = rotation + 2.0 * math.pi * face_idx / faces
         x = center[0] + radius * math.cos(angle)
@@ -121,7 +77,20 @@ def _build_polygon_points(
             # Используем uniform распределение для равномерного распределения в диапазоне [-deviation_m, +deviation_m]
             x += rng.uniform(-deviation_m, deviation_m)
             y += rng.uniform(-deviation_m, deviation_m)
-        points.append((x, y, z_value))
+        raw_points.append((x, y, z_value))
+
+    order = clockwise_order_indices(
+        np.array([[point[0], point[1]] for point in raw_points], dtype=float),
+        center_xy=np.array(center, dtype=float),
+        station_xy=np.array(reference_station_xy, dtype=float)
+        if reference_station_xy is not None
+        else None,
+    )
+
+    points: list[tuple[float, float, float]] = []
+    for point_idx in order:
+        x, y, z_coord = raw_points[int(point_idx)]
+        points.append((x, y, z_coord))
     return points
 
 
@@ -133,23 +102,23 @@ class SectionSpec:
     height: float
     tilt_mm: float = 0.0
     tilt_direction_deg: float = 0.0
-    lower_tilt_mm: Optional[float] = None
+    lower_tilt_mm: float | None = None
     lower_tilt_direction_deg: float = 0.0
-    upper_tilt_mm: Optional[float] = None
+    upper_tilt_mm: float | None = None
     upper_tilt_direction_deg: float = 0.0
     shape: str = "prism"
-    faces: Optional[int] = None
-    rotation_deg: Optional[float] = None
-    lower_size: Optional[float] = None
-    upper_size: Optional[float] = None
-    deviation_mm: Optional[float] = None
-    segment_id: Optional[int] = None
+    faces: int | None = None
+    rotation_deg: float | None = None
+    lower_size: float | None = None
+    upper_size: float | None = None
+    deviation_mm: float | None = None
+    segment_id: int | None = None
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         return asdict(self)
 
     @staticmethod
-    def from_dict(data: Dict[str, Any]) -> "SectionSpec":
+    def from_dict(data: dict[str, Any]) -> SectionSpec:
         return SectionSpec(
             name=data.get("name", "Секция"),
             height=float(data.get("height", 0.0)),
@@ -195,17 +164,17 @@ class LegacyTowerBlueprint:
     base_size: float = 4.0
     top_size: float = 3.0
     total_height: float = 30.0
-    sections: List[SectionSpec] = field(default_factory=list)
+    sections: list[SectionSpec] = field(default_factory=list)
     instrument_distance: float = 60.0
     instrument_angle_deg: float = 0.0
     instrument_height: float = 1.7
     base_rotation_deg: float = 0.0
     default_deviation_mm: float = 5.0
     orientation: str = "bottom_up"
-    metadata: Dict[str, Any] = field(default_factory=dict)
+    metadata: dict[str, Any] = field(default_factory=dict)
     global_tilt_mm: float = 0.0
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         return {
             "tower_type": self.tower_type,
             "faces": self.faces,
@@ -224,7 +193,7 @@ class LegacyTowerBlueprint:
         }
 
     @staticmethod
-    def from_dict(data: Dict[str, Any]) -> "LegacyTowerBlueprint":
+    def from_dict(data: dict[str, Any]) -> LegacyTowerBlueprint:
         sections_data = data.get("sections", []) or []
         sections = [SectionSpec.from_dict(section) for section in sections_data]
         return LegacyTowerBlueprint(
@@ -244,7 +213,7 @@ class LegacyTowerBlueprint:
             global_tilt_mm=float(data.get("global_tilt_mm", data.get("metadata", {}).get("global_tilt_mm", 0.0)) or 0.0),
         )
 
-    def ensure_sections(self) -> List[SectionSpec]:
+    def ensure_sections(self) -> list[SectionSpec]:
         """
         Гарантирует наличие хотя бы одной секции.
         Если пользователь не задал секции, создаём одну секцию на всю высоту.
@@ -264,13 +233,13 @@ class LegacyTowerBlueprint:
         )
         return [default_section]
 
-    def get_sections_bottom_up(self) -> List[SectionSpec]:
+    def get_sections_bottom_up(self) -> list[SectionSpec]:
         sections = self.ensure_sections()
         if self.orientation == "top_down":
             return list(reversed(sections))
         return sections
 
-    def get_sections_top_down(self) -> List[SectionSpec]:
+    def get_sections_top_down(self) -> list[SectionSpec]:
         sections = self.ensure_sections()
         if self.orientation == "top_down":
             return sections
@@ -288,7 +257,7 @@ class LegacyTowerBlueprint:
 
         base_faces = max(3, int(self.faces))
         base_rotation = float(self.base_rotation_deg)
-        prev_upper_size: Optional[float] = None
+        prev_upper_size: float | None = None
         current_segment = 1
         for idx, section in enumerate(sections):
             if not section.shape:
@@ -354,7 +323,7 @@ class LegacyTowerBlueprint:
         if sections:
             self.faces = sections[0].faces or self.faces
 
-        segments_meta: List[Dict[str, Any]] = []
+        segments_meta: list[dict[str, Any]] = []
         for section in sections:
             found = next((seg for seg in segments_meta if seg["id"] == section.segment_id), None)
             if not found:
@@ -378,14 +347,14 @@ class TowerSectionSpec:
     offset_x: float = 0.0
     offset_y: float = 0.0
     lattice_type: str = "cross"
-    profile_spec: Dict[str, Any] = field(default_factory=dict)
+    profile_spec: dict[str, Any] = field(default_factory=dict)
 
     def validate(self) -> None:
         # Нижние секции могут иметь высоту 0
         if self.height < 0 or (self.height == 0 and self.name.lower() not in ("нижняя", "нижняя секция")):
             raise ValueError(f"Высота секции '{self.name}' должна быть > 0")
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         return {
             "name": self.name,
             "height": self.height,
@@ -396,7 +365,7 @@ class TowerSectionSpec:
         }
 
     @staticmethod
-    def from_dict(data: Dict[str, Any]) -> "TowerSectionSpec":
+    def from_dict(data: dict[str, Any]) -> TowerSectionSpec:
         return TowerSectionSpec(
             name=data.get("name", "Секция"),
             height=float(data.get("height", 0.0)),
@@ -417,11 +386,11 @@ class TowerSegmentSpec:
     height: float = 10.0
     levels: int = 1
     base_size: float = 4.0
-    top_size: Optional[float] = None
+    top_size: float | None = None
     deviation_mm: float = 0.0
-    sections: List[TowerSectionSpec] = field(default_factory=list)
+    sections: list[TowerSectionSpec] = field(default_factory=list)
     lattice_type: str = "cross"
-    profile_spec: Dict[str, Any] = field(default_factory=dict)
+    profile_spec: dict[str, Any] = field(default_factory=dict)
 
     def validate(self) -> None:
         if self.shape not in SUPPORTED_SHAPES:
@@ -455,7 +424,7 @@ class TowerSegmentSpec:
                     f"Сумма высот секций части '{self.name}' ({total_height:.3f}) не совпадает с высотой части {self.height:.3f}"
                 )
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         return {
             "name": self.name,
             "shape": self.shape,
@@ -471,7 +440,7 @@ class TowerSegmentSpec:
         }
 
     @staticmethod
-    def from_dict(data: Dict[str, Any]) -> "TowerSegmentSpec":
+    def from_dict(data: dict[str, Any]) -> TowerSegmentSpec:
         return TowerSegmentSpec(
             name=data.get("name", "Часть"),
             shape=data.get("shape", "prism"),
@@ -491,13 +460,13 @@ class TowerSegmentSpec:
 class TowerBlueprintV2:
     """Новая модель башни, описывающая составные части."""
 
-    segments: List[TowerSegmentSpec] = field(default_factory=list)
+    segments: list[TowerSegmentSpec] = field(default_factory=list)
     instrument_distance: float = 60.0
     instrument_angle_deg: float = 0.0
     instrument_height: float = 1.7
     base_rotation_deg: float = 0.0
     default_deviation_mm: float = 0.0
-    metadata: Dict[str, Any] = field(default_factory=dict)
+    metadata: dict[str, Any] = field(default_factory=dict)
 
     def total_height(self) -> float:
         return sum(segment.height for segment in self.segments)
@@ -524,7 +493,7 @@ class TowerBlueprintV2:
             for segment in self.segments
         ]
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         return {
             "segments": [segment.to_dict() for segment in self.segments],
             "instrument_distance": self.instrument_distance,
@@ -536,7 +505,7 @@ class TowerBlueprintV2:
         }
 
     @staticmethod
-    def from_dict(data: Dict[str, Any]) -> "TowerBlueprintV2":
+    def from_dict(data: dict[str, Any]) -> TowerBlueprintV2:
         if "segments" in data:
             segments_data = data.get("segments") or []
             segments = [TowerSegmentSpec.from_dict(item) for item in segments_data]
@@ -589,7 +558,7 @@ class TowerBlueprintV2:
         )
 
     @staticmethod
-    def from_legacy_blueprint(legacy: LegacyTowerBlueprint) -> "TowerBlueprintV2":
+    def from_legacy_blueprint(legacy: LegacyTowerBlueprint) -> TowerBlueprintV2:
         segments = []
         for idx, section in enumerate(legacy.get_sections_bottom_up(), start=1):
             segments.append(
@@ -625,7 +594,7 @@ def _section_deviation(section: SectionSpec, default_mm: float) -> float:
 def _resolve_section_radii(
     section: SectionSpec,
     current_radius: float,
-) -> Tuple[float, float]:
+) -> tuple[float, float]:
     """Возвращает радиусы нижнего и верхнего пояса секции."""
     lower_radius = _size_to_radius(section.lower_size) if section.lower_size else current_radius
     upper_radius = _size_to_radius(section.upper_size) if section.upper_size else lower_radius
@@ -635,13 +604,14 @@ def _resolve_section_radii(
 def _build_level_points(
     *,
     z_value: float,
-    center: Tuple[float, float],
+    center: tuple[float, float],
     radius: float,
     faces: int,
     rotation_deg: float,
     deviation_m: float,
     rng: np.random.Generator,
-) -> List[Tuple[float, float, float]]:
+    reference_station_xy: tuple[float, float] | None = None,
+) -> list[tuple[float, float, float]]:
     """Возвращает набор точек уровня (горизонтального сечения)."""
     return _build_polygon_points(
         center=center,
@@ -651,6 +621,7 @@ def _build_level_points(
         rotation_deg=rotation_deg,
         deviation_m=deviation_m,
         rng=rng,
+        reference_station_xy=reference_station_xy,
     )
 
 
@@ -668,7 +639,7 @@ def _vector_angle_deg(vector: np.ndarray) -> float:
     return (math.degrees(math.atan2(vector[1], vector[0])) + 360.0) % 360.0
 
 
-def _vector_from_tilt(mm_value: Optional[float], direction_deg: float) -> np.ndarray:
+def _vector_from_tilt(mm_value: float | None, direction_deg: float) -> np.ndarray:
     if mm_value is None:
         return np.zeros(2, dtype=float)
     length = max(mm_value, 0.0) / 1000.0
@@ -676,7 +647,7 @@ def _vector_from_tilt(mm_value: Optional[float], direction_deg: float) -> np.nda
 
 
 def _absolute_center_from_values(
-    mm_value: Optional[float],
+    mm_value: float | None,
     direction_deg: float,
     fallback: np.ndarray,
 ) -> np.ndarray:
@@ -686,11 +657,11 @@ def _absolute_center_from_values(
 
 
 def _apply_global_tilt_to_sections(
-    sections: List[SectionSpec],
+    sections: list[SectionSpec],
     rng: np.random.Generator,
     *,
     tilt_mm: float,
-    direction_deg: Optional[float] = None,
+    direction_deg: float | None = None,
 ) -> None:
     """Распределяет глобальный крен между секциями без индивидуальных смещений."""
     if tilt_mm <= 0 or not sections:
@@ -742,9 +713,9 @@ def _segment_radius(segment: TowerSegmentSpec, level_fraction: float) -> float:
 def _segment_level_descriptors(
     segment: TowerSegmentSpec,
     start_center: np.ndarray,
-) -> Tuple[List[Dict[str, Any]], np.ndarray]:
+) -> tuple[list[dict[str, Any]], np.ndarray]:
     """Формирует список уровней внутри части с учётом секций и смещений."""
-    descriptors: List[Dict[str, Any]] = []
+    descriptors: list[dict[str, Any]] = []
     center = np.array(start_center, dtype=float)
     descriptors.append(
         {
@@ -785,17 +756,30 @@ def _segment_level_descriptors(
 def build_tower_geometry_v2(
     blueprint: TowerBlueprintV2,
     *,
-    seed: Optional[int] = None,
-) -> Dict[str, Any]:
+    seed: int | None = None,
+) -> dict[str, Any]:
     """
     Создаёт геометрию башни по новой модели, основанной на частях.
     """
     blueprint.validate()
     rng = np.random.default_rng(seed)
 
+    instrument_distance = (
+        float(blueprint.instrument_distance) if hasattr(blueprint, 'instrument_distance') else 60.0
+    )
+    instrument_angle_deg = (
+        float(blueprint.instrument_angle_deg) if hasattr(blueprint, 'instrument_angle_deg') else 0.0
+    )
+    instrument_height = (
+        float(blueprint.instrument_height) if hasattr(blueprint, 'instrument_height') else 1.7
+    )
+    tower_offset_x = instrument_distance * math.cos(_deg2rad(instrument_angle_deg))
+    tower_offset_y = instrument_distance * math.sin(_deg2rad(instrument_angle_deg))
+    local_reference_station_xy = (-tower_offset_x, -tower_offset_y)
+
     current_height = 0.0
     level_index = 1
-    levels: List[Dict[str, Any]] = []
+    levels: list[dict[str, Any]] = []
     current_center = np.array([0.0, 0.0], dtype=float)
 
     for part_index, segment in enumerate(blueprint.segments, start=1):
@@ -817,6 +801,7 @@ def build_tower_geometry_v2(
                 rotation_deg=blueprint.base_rotation_deg,
                 deviation_m=deviation_m,
                 rng=rng,
+                reference_station_xy=local_reference_station_xy,
             )
             if level_points is None or len(level_points) == 0:
                 logger.warning(f"Не удалось создать точки для уровня {level_index}, сегмент {part_index}, высота {z_value:.2f}м")
@@ -838,7 +823,7 @@ def build_tower_geometry_v2(
         current_height += segment.height
         current_center = final_center.copy()
 
-    rows: List[Dict[str, Any]] = []
+    rows: list[dict[str, Any]] = []
     for level in levels:
         segment_id = level["segment"]
         level_points = level.get("points")
@@ -870,26 +855,26 @@ def build_tower_geometry_v2(
     instrument_distance = float(blueprint.instrument_distance) if hasattr(blueprint, 'instrument_distance') else 60.0
     instrument_angle_deg = float(blueprint.instrument_angle_deg) if hasattr(blueprint, 'instrument_angle_deg') else 0.0
     instrument_height = float(blueprint.instrument_height) if hasattr(blueprint, 'instrument_height') else 1.7
-    
+
     standing_point = {
         "x": 0.0,
         "y": 0.0,
         "z": instrument_height,
     }
-    
+
     # Вычисляем смещение башни от точки стояния
     # Башня должна быть смещена на instrument_distance в направлении instrument_angle_deg
     tower_offset_x = instrument_distance * math.cos(_deg2rad(instrument_angle_deg))
     tower_offset_y = instrument_distance * math.sin(_deg2rad(instrument_angle_deg))
-    
+
     logger.info(f"Точка стояния: X=0.000 м, Y=0.000 м, Z={standing_point['z']:.3f} м (начало координат XYZ)")
     logger.info(f"Смещение башни от точки стояния: X={tower_offset_x:.3f} м, Y={tower_offset_y:.3f} м (расстояние={instrument_distance:.1f} м, угол={instrument_angle_deg:.1f}°)")
-    
+
     # Смещаем все точки башни от точки стояния
     for row in rows:
         row["x"] = float(row["x"]) + tower_offset_x
         row["y"] = float(row["y"]) + tower_offset_y
-    
+
     rows.append(
         {
             "name": "STATION_1",
@@ -908,29 +893,29 @@ def build_tower_geometry_v2(
     )
 
     data = pd.DataFrame(rows)
-    
+
     # Обновляем section_data с учетом смещения башни от точки стояния
     # Дедуплицируем уровни по высоте, чтобы избежать задваивания секций на границах частей
     height_tolerance = 0.01  # Допуск для определения одинаковой высоты (1 см)
-    
+
     # Группируем levels по высоте
-    levels_by_height: Dict[float, List[Dict[str, Any]]] = {}
+    levels_by_height: dict[float, list[dict[str, Any]]] = {}
     for level in levels:
         level_height = level["height"]
         # Ищем существующую группу для этой высоты
         matched_height = None
-        for existing_height in levels_by_height.keys():
+        for existing_height in levels_by_height:
             if abs(level_height - existing_height) <= height_tolerance:
                 matched_height = existing_height
                 break
-        
+
         if matched_height is not None:
             # Добавляем к существующей группе
             levels_by_height[matched_height].append(level)
         else:
             # Создаем новую группу
             levels_by_height[level_height] = [level]
-    
+
     section_data = []
     for height, grouped_levels in sorted(levels_by_height.items()):
         if len(grouped_levels) == 1:
@@ -946,7 +931,7 @@ def build_tower_geometry_v2(
                 float(level["center"][0]) + tower_offset_x,
                 float(level["center"][1]) + tower_offset_y
             )
-            
+
             section_info = {
                 "height": height,
                 "points": shifted_points,
@@ -964,14 +949,14 @@ def build_tower_geometry_v2(
             # Несколько уровней на одной высоте (граничная секция между частями)
             # Объединяем их в одну секцию с информацией о принадлежности к нескольким частям
             logger.info(f"Объединение {len(grouped_levels)} уровней на высоте {height:.3f}м (граничная секция между частями)")
-            
+
             # Собираем все точки из всех уровней (они должны быть одинаковыми или очень близкими)
             all_points = []
             all_belt_nums = set()
             all_segments = set()
             segment_names = []
             section_names = []
-            
+
             for level in grouped_levels:
                 shifted_points = [
                     (float(p[0]) + tower_offset_x, float(p[1]) + tower_offset_y, float(p[2]))
@@ -981,14 +966,14 @@ def build_tower_geometry_v2(
                 for point in shifted_points:
                     if point not in all_points:
                         all_points.append(point)
-                
+
                 all_belt_nums.update(range(1, level["faces"] + 1))
                 all_segments.add(level["segment"])
                 if level.get("segment_name"):
                     segment_names.append(level["segment_name"])
                 if level.get("section_name"):
                     section_names.append(level["section_name"])
-            
+
             # Усредняем центры всех уровней
             centers_x = [level["center"][0] + tower_offset_x for level in grouped_levels]
             centers_y = [level["center"][1] + tower_offset_y for level in grouped_levels]
@@ -996,10 +981,10 @@ def build_tower_geometry_v2(
                 float(np.mean(centers_x)),
                 float(np.mean(centers_y))
             )
-            
+
             # Определяем основную часть (нижняя часть, если граница)
             primary_segment = min(all_segments)
-            
+
             section_info = {
                 "height": height,
                 "points": all_points,
@@ -1015,7 +1000,7 @@ def build_tower_geometry_v2(
                 "is_part_boundary": True,  # Граничная секция
             }
             section_data.append(section_info)
-            
+
             logger.debug(f"  Объединенная секция: части {sorted(all_segments)}, поясов {len(sorted(all_belt_nums))}, точек {len(all_points)}")
 
     metadata = {
@@ -1045,8 +1030,8 @@ def build_tower_geometry_v2(
 def build_tower_geometry(
     blueprint: LegacyTowerBlueprint,
     *,
-    seed: Optional[int] = None,
-) -> Dict[str, Any]:
+    seed: int | None = None,
+) -> dict[str, Any]:
     """
     Создаёт геометрию башни по заданному blueprint.
 
@@ -1061,6 +1046,16 @@ def build_tower_geometry(
     blueprint.validate()
     rng = np.random.default_rng(seed)
 
+    instrument_distance = (
+        float(blueprint.instrument_distance) if hasattr(blueprint, 'instrument_distance') else 60.0
+    )
+    instrument_angle_deg = (
+        float(blueprint.instrument_angle_deg) if hasattr(blueprint, 'instrument_angle_deg') else 0.0
+    )
+    tower_offset_x = instrument_distance * math.cos(_deg2rad(instrument_angle_deg))
+    tower_offset_y = instrument_distance * math.sin(_deg2rad(instrument_angle_deg))
+    local_reference_station_xy = (-tower_offset_x, -tower_offset_y)
+
     sections = blueprint.get_sections_bottom_up()
     global_tilt_mm = float(
         getattr(blueprint, "global_tilt_mm", 0.0)
@@ -1073,7 +1068,7 @@ def build_tower_geometry(
         tilt_mm=global_tilt_mm,
         direction_deg=blueprint.metadata.get("global_tilt_direction_deg"),
     )
-    levels: List[Dict[str, Any]] = []
+    levels: list[dict[str, Any]] = []
 
     current_center = np.array([0.0, 0.0], dtype=float)
     current_height = 0.0
@@ -1109,6 +1104,7 @@ def build_tower_geometry(
                 rotation_deg=section_rotation,
                 deviation_m=deviation_m,
                 rng=rng,
+                reference_station_xy=local_reference_station_xy,
             )
             levels.append(
                 {
@@ -1142,6 +1138,7 @@ def build_tower_geometry(
             rotation_deg=section_rotation,
             deviation_m=deviation_m,
             rng=rng,
+            reference_station_xy=local_reference_station_xy,
         )
         levels.append(
             {
@@ -1158,12 +1155,12 @@ def build_tower_geometry(
         current_center = upper_center
         current_radius = upper_radius
 
-    rows: List[Dict[str, Any]] = []
-    belt_tracks: Dict[Tuple[int, int], List[Tuple[float, float, float]]] = defaultdict(list)
+    rows: list[dict[str, Any]] = []
+    belt_tracks: dict[tuple[int, int], list[tuple[float, float, float]]] = defaultdict(list)
     point_index_counter = 1
 
     for level in levels:
-        belt_nums: List[int] = []
+        belt_nums: list[int] = []
         segment_id = int(level.get("segment", 1))
         for vertex_idx, point in enumerate(level["points"], start=1):
             belt_nums.append(vertex_idx)
@@ -1193,20 +1190,20 @@ def build_tower_geometry(
     # Башня строится на расстоянии от точки стояния
     instrument_distance = float(blueprint.instrument_distance) if hasattr(blueprint, 'instrument_distance') else 60.0
     instrument_angle_deg = float(blueprint.instrument_angle_deg) if hasattr(blueprint, 'instrument_angle_deg') else 0.0
-    
+
     standing_point = {
         "x": 0.0,
         "y": 0.0,
         "z": blueprint.instrument_height,
     }
-    
+
     # Вычисляем смещение башни от точки стояния
     tower_offset_x = instrument_distance * math.cos(_deg2rad(instrument_angle_deg))
     tower_offset_y = instrument_distance * math.sin(_deg2rad(instrument_angle_deg))
-    
+
     logger.info(f"Точка стояния: X=0.000 м, Y=0.000 м, Z={standing_point['z']:.3f} м (начало координат XYZ)")
     logger.info(f"Смещение башни от точки стояния: X={tower_offset_x:.3f} м, Y={tower_offset_y:.3f} м (расстояние={instrument_distance:.1f} м, угол={instrument_angle_deg:.1f}°)")
-    
+
     # Смещаем все точки башни от точки стояния
     for row in rows:
         row["x"] = float(row["x"]) + tower_offset_x
@@ -1236,25 +1233,25 @@ def build_tower_geometry(
     # Обновляем section_data с учетом смещения башни от точки стояния
     # Дедуплицируем уровни по высоте, чтобы избежать задваивания секций на границах частей
     height_tolerance = 0.01  # Допуск для определения одинаковой высоты (1 см)
-    
+
     # Группируем levels по высоте
-    levels_by_height: Dict[float, List[Dict[str, Any]]] = {}
+    levels_by_height: dict[float, list[dict[str, Any]]] = {}
     for level in levels:
         level_height = level["height"]
         # Ищем существующую группу для этой высоты
         matched_height = None
-        for existing_height in levels_by_height.keys():
+        for existing_height in levels_by_height:
             if abs(level_height - existing_height) <= height_tolerance:
                 matched_height = existing_height
                 break
-        
+
         if matched_height is not None:
             # Добавляем к существующей группе
             levels_by_height[matched_height].append(level)
         else:
             # Создаем новую группу
             levels_by_height[level_height] = [level]
-    
+
     section_data = []
     for height, grouped_levels in sorted(levels_by_height.items()):
         if len(grouped_levels) == 1:
@@ -1265,7 +1262,7 @@ def build_tower_geometry(
                 (float(p[0]) + tower_offset_x, float(p[1]) + tower_offset_y, float(p[2]))
                 for p in level["points"]
             ]
-            
+
             section_info = {
                 "height": height,
                 "points": shifted_points,
@@ -1274,23 +1271,23 @@ def build_tower_geometry(
                 "faces": level.get("faces"),
                 "section_name": level.get("section"),
             }
-            
+
             # Добавляем информацию о части
             segment_id = level.get("segment")
             if segment_id is not None:
                 section_info["tower_part"] = int(segment_id)
-            
+
             section_data.append(section_info)
         else:
             # Несколько уровней на одной высоте (граничная секция между частями)
             logger.info(f"Объединение {len(grouped_levels)} уровней на высоте {height:.3f}м (граничная секция между частями)")
-            
+
             # Собираем все точки из всех уровней
             all_points = []
             all_belt_nums = set()
             all_segments = set()
             section_names = []
-            
+
             for level in grouped_levels:
                 shifted_points = [
                     (float(p[0]) + tower_offset_x, float(p[1]) + tower_offset_y, float(p[2]))
@@ -1300,7 +1297,7 @@ def build_tower_geometry(
                 for point in shifted_points:
                     if point not in all_points:
                         all_points.append(point)
-                
+
                 belt_nums = level.get("belt_nums", list(range(1, (level.get("faces") or blueprint.faces) + 1)))
                 all_belt_nums.update(belt_nums)
                 segment_id = level.get("segment")
@@ -1309,10 +1306,10 @@ def build_tower_geometry(
                 section_name = level.get("section")
                 if section_name:
                     section_names.append(section_name)
-            
+
             # Определяем основную часть (нижняя часть, если граница)
             primary_segment = min(all_segments) if all_segments else 1
-            
+
             section_info = {
                 "height": height,
                 "points": all_points,
@@ -1325,7 +1322,7 @@ def build_tower_geometry(
                 "is_part_boundary": True,
             }
             section_data.append(section_info)
-            
+
             logger.debug(f"  Объединенная секция: части {sorted(all_segments)}, поясов {len(sorted(all_belt_nums))}, точек {len(all_points)}")
 
     max_faces = max((int(level.get("faces") or blueprint.faces) for level in levels), default=blueprint.faces)
@@ -1354,10 +1351,10 @@ def build_tower_geometry(
 
 
 def generate_tower_data(
-    blueprint: Union[LegacyTowerBlueprint, TowerBlueprintV2, Dict[str, Any]],
+    blueprint: Union[LegacyTowerBlueprint, TowerBlueprintV2, dict[str, Any]],
     *,
-    seed: Optional[int] = None,
-) -> Tuple[pd.DataFrame, List[Dict[str, Any]], Dict[str, Any]]:
+    seed: int | None = None,
+) -> tuple[pd.DataFrame, list[dict[str, Any]], dict[str, Any]]:
     """
     Высокоуровневая функция для генерации данных.
 
@@ -1375,7 +1372,7 @@ def blueprint_from_sections(
     base_size: float,
     top_size: float,
     total_height: float,
-    sections: Sequence[Dict[str, Any]],
+    sections: Sequence[dict[str, Any]],
     instrument_distance: float,
     instrument_angle_deg: float,
     instrument_height: float,
@@ -1405,7 +1402,7 @@ def blueprint_from_sections(
 
 def append_sections(
     blueprint: LegacyTowerBlueprint,
-    new_sections: Sequence[Dict[str, Any] | SectionSpec],
+    new_sections: Sequence[dict[str, Any] | SectionSpec],
     *,
     inherit_center: bool = True,
 ) -> LegacyTowerBlueprint:
@@ -1437,7 +1434,7 @@ def append_sections(
         source_sections.append(base_section)
 
     last_section = source_sections[-1]
-    appended: List[SectionSpec] = []
+    appended: list[SectionSpec] = []
     next_segment = (last_section.segment_id or len(source_sections)) + 1
     inherit_tilt_mm = last_section.upper_tilt_mm if last_section.upper_tilt_mm is not None else last_section.tilt_mm
     inherit_tilt_dir = (
@@ -1477,7 +1474,7 @@ def append_sections(
 
 
 def _ensure_blueprint_v2(
-    blueprint: Union[TowerBlueprintV2, LegacyTowerBlueprint, Dict[str, Any]],
+    blueprint: Union[TowerBlueprintV2, LegacyTowerBlueprint, dict[str, Any]],
 ) -> TowerBlueprintV2:
     if isinstance(blueprint, TowerBlueprintV2):
         return blueprint
@@ -1492,20 +1489,61 @@ def _ensure_blueprint_v2(
 TowerBlueprint = TowerBlueprintV2
 
 
+def _coerce_face_count(value: Any) -> int | None:
+    if value is None:
+        return None
+    if isinstance(value, float) and np.isnan(value):
+        return None
+    try:
+        face_count = int(value)
+    except (TypeError, ValueError):
+        return None
+    if face_count < 3:
+        return None
+    return face_count
+
+
+def _resolve_faces_from_imported_data(
+    data: pd.DataFrame,
+    default_faces: int | None = None,
+    belt_column: str = "belt",
+) -> int:
+    if 'faces' in data.columns:
+        face_values = pd.to_numeric(data['faces'], errors='coerce').dropna()
+        face_values = face_values[face_values >= 3]
+        if not face_values.empty:
+            return int(face_values.mode().iloc[0])
+
+    explicit_faces = _coerce_face_count(default_faces)
+    if explicit_faces is not None:
+        return explicit_faces
+
+    if belt_column in data.columns:
+        belt_values = pd.to_numeric(data[belt_column], errors='coerce').dropna()
+        belt_values = belt_values[belt_values > 0]
+        if not belt_values.empty:
+            unique_belts = sorted({int(value) for value in belt_values})
+            if unique_belts:
+                return max(3, max(len(unique_belts), max(unique_belts)))
+
+    return 4
+
+
 def create_blueprint_from_imported_data(
     data: pd.DataFrame,
-    tower_parts_info: Optional[Dict[str, Any]] = None,
+    tower_parts_info: dict[str, Any] | None = None,
     instrument_distance: float = 60.0,
     instrument_angle_deg: float = 0.0,
     instrument_height: float = 1.7,
-    base_rotation_deg: float = 0.0
+    base_rotation_deg: float = 0.0,
+    default_faces: int | None = None,
 ) -> TowerBlueprintV2:
     """
     Создает TowerBlueprintV2 из импортированных данных
-    
+
     Преобразует информацию о частях башни из импортированных данных
     в формат TowerBlueprintV2 для использования в конструкторе башен.
-    
+
     Args:
         data: DataFrame с точками башни (может содержать колонки 'tower_part', 'part_belt')
         tower_parts_info: Информация о частях башни (опционально):
@@ -1520,17 +1558,17 @@ def create_blueprint_from_imported_data(
         instrument_angle_deg: Угол прибора
         instrument_height: Высота прибора
         base_rotation_deg: Поворот граней
-        
+
     Returns:
         TowerBlueprintV2 с сегментами, соответствующими частям башни
     """
     segments = []
-    
+
     # Исключаем точки standing
     tower_data = data.copy()
     if 'is_station' in tower_data.columns:
         tower_data = tower_data[~_build_is_station_mask(tower_data['is_station'])]
-    
+
     if tower_data.empty:
         # Минимальная башня по умолчанию
         segments.append(
@@ -1548,15 +1586,14 @@ def create_blueprint_from_imported_data(
         # Составная башня из tower_parts_info
         split_height = tower_parts_info.get('split_height')
         parts = tower_parts_info['parts']
-        
+
         for part_info in parts:
             part_num = part_info.get('part_number', 1)
             shape = part_info.get('shape', 'prism')
-            faces = part_info.get('faces', 4)
-            
+
             # Определяем высоту части и данные части
             part_data = pd.DataFrame()  # Инициализируем пустым DataFrame
-            
+
             if part_num == 1:
                 if split_height is not None:
                     part_data = tower_data[tower_data['z'] < split_height]
@@ -1576,7 +1613,13 @@ def create_blueprint_from_imported_data(
                         height = 10.0
                 else:
                     height = 10.0
-            
+
+            faces = _resolve_faces_from_imported_data(
+                part_data,
+                default_faces=part_info.get('faces', default_faces),
+                belt_column='part_belt' if 'part_belt' in part_data.columns else 'belt',
+            )
+
             # Определяем размеры (приблизительно)
             if part_data.empty:
                 base_size = 4.0
@@ -1589,7 +1632,7 @@ def create_blueprint_from_imported_data(
                 avg_radius = radii.mean()
                 base_size = avg_radius * 2.0  # Диаметр
                 top_size = base_size * 0.75 if shape == 'truncated_pyramid' else base_size
-            
+
             segments.append(
                 TowerSegmentSpec(
                     name=f"Часть {part_num}",
@@ -1613,28 +1656,29 @@ def create_blueprint_from_imported_data(
         if not unique_parts and 'tower_part' in tower_data.columns:
             unique_parts.update(tower_data['tower_part'].dropna().unique())
         unique_parts = sorted(int(part) for part in unique_parts if part is not None)
-        
+
         for part_num in unique_parts:
             part_data = _filter_points_by_part(tower_data, part_num)
             if part_data.empty:
                 continue
-            
+
             # Определяем форму и количество граней из данных
             shape = 'prism'  # По умолчанию
-            if 'part_belt' in part_data.columns:
-                faces = int(part_data['part_belt'].nunique())
-            else:
-                faces = int(part_data['belt'].nunique()) if 'belt' in part_data.columns else 4
-            
+            faces = _resolve_faces_from_imported_data(
+                part_data,
+                default_faces=default_faces,
+                belt_column='part_belt' if 'part_belt' in part_data.columns else 'belt',
+            )
+
             height = part_data['z'].max() - part_data['z'].min()
-            
+
             # Определяем размеры
             part_data_xy = part_data[['x', 'y']].values
             center = part_data_xy.mean(axis=0)
             radii = np.linalg.norm(part_data_xy - center, axis=1)
             avg_radius = radii.mean()
             base_size = avg_radius * 2.0
-            
+
             segments.append(
                 TowerSegmentSpec(
                     name=f"Часть {int(part_num)}",
@@ -1649,15 +1693,15 @@ def create_blueprint_from_imported_data(
     else:
         # Обычная башня
         height = tower_data['z'].max() - tower_data['z'].min()
-        faces = int(tower_data['belt'].nunique()) if 'belt' in tower_data.columns else 4
-        
+        faces = _resolve_faces_from_imported_data(tower_data, default_faces=default_faces)
+
         # Определяем размеры
         tower_data_xy = tower_data[['x', 'y']].values
         center = tower_data_xy.mean(axis=0)
         radii = np.linalg.norm(tower_data_xy - center, axis=1)
         avg_radius = radii.mean()
         base_size = avg_radius * 2.0
-        
+
         segments.append(
             TowerSegmentSpec(
                 name="Часть 1",
@@ -1669,7 +1713,7 @@ def create_blueprint_from_imported_data(
                 top_size=max(base_size, 0.5),
             )
         )
-    
+
     if not segments:
         # Fallback: минимальная башня
         segments.append(
@@ -1683,7 +1727,7 @@ def create_blueprint_from_imported_data(
                 top_size=4.0,
             )
         )
-    
+
     blueprint = TowerBlueprintV2(
         segments=segments,
         instrument_distance=instrument_distance,
@@ -1692,10 +1736,10 @@ def create_blueprint_from_imported_data(
         base_rotation_deg=base_rotation_deg,
         default_deviation_mm=0.0,
     )
-    
+
     blueprint.validate()
     logger.info(f"Создан blueprint из импортированных данных: {len(segments)} частей")
-    
+
     return blueprint
 
 

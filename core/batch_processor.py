@@ -3,17 +3,14 @@
 """
 
 import logging
-from typing import List, Dict, Any, Optional
-import pandas as pd
 from pathlib import Path
+from typing import Any
+
+import pandas as pd
 
 from core.data_loader import load_data_from_file, validate_data
+from core.exceptions import CalculationError, DataLoadError, DataValidationError
 from core.services.calculation_service import CalculationService
-from core.exceptions import (
-    DataLoadError,
-    CalculationError,
-    DataValidationError
-)
 
 logger = logging.getLogger(__name__)
 
@@ -22,42 +19,42 @@ class BatchProcessor:
     """
     Класс для пакетной обработки нескольких файлов
     """
-    
+
     def __init__(self):
         """Инициализация процессора"""
         self.calculation_service = CalculationService()
-        self.results: List[Dict[str, Any]] = []
-    
+        self.results: list[dict[str, Any]] = []
+
     def process_files(
         self,
-        file_paths: List[str],
+        file_paths: list[str],
         height_tolerance: float = 0.1,
         center_method: str = 'mean',
-        progress_callback: Optional[callable] = None
-    ) -> List[Dict[str, Any]]:
+        progress_callback: callable | None = None
+    ) -> list[dict[str, Any]]:
         """
         Обрабатывает список файлов
-        
+
         Args:
             file_paths: Список путей к файлам
             height_tolerance: Допуск группировки по высоте
             center_method: Метод расчета центра
             progress_callback: Функция обратного вызова для прогресса (current, total, message)
-            
+
         Returns:
             Список результатов обработки для каждого файла
         """
         self.results = []
         total_files = len(file_paths)
-        
+
         for i, file_path in enumerate(file_paths, 1):
             try:
                 if progress_callback:
                     progress_callback(i, total_files, f"Обработка {Path(file_path).name}...")
-                
+
                 # Загружаем данные
                 data, epsg_code = load_data_from_file(file_path)
-                
+
                 # Валидация
                 is_valid, message = validate_data(data, check_outliers=False)  # Отключаем проверку выбросов для пакетной обработки
                 if not is_valid:
@@ -69,7 +66,7 @@ class BatchProcessor:
                         'points_count': 0
                     })
                     continue
-                
+
                 # Выполняем расчеты
                 results = self.calculation_service.calculate(
                     raw_data=data,
@@ -77,14 +74,14 @@ class BatchProcessor:
                     epsg_code=epsg_code,
                     height_tolerance=height_tolerance,
                     center_method=center_method,
-                    use_assigned_belts=True
+                    section_grouping_mode='height_levels'
                 )
-                
+
                 # Извлекаем статистику
                 centers = results.get('centers', pd.DataFrame())
                 vertical_check = results.get('vertical_check', {'passed': 0, 'failed': 0})
                 straightness_check = results.get('straightness_check', {'passed': 0, 'failed': 0})
-                
+
                 # Сохраняем результат
                 self.results.append({
                     'file_path': file_path,
@@ -99,49 +96,49 @@ class BatchProcessor:
                     'epsg_code': epsg_code,
                     'results': results  # Полные результаты для сводного отчета
                 })
-                
+
                 logger.info(
                     f"Файл обработан: {Path(file_path).name} - "
                     f"{len(centers)} поясов, "
                     f"Вертикальность: ✓{vertical_check.get('passed', 0)} ✗{vertical_check.get('failed', 0)}"
                 )
-                
+
             except (DataLoadError, DataValidationError) as e:
                 self.results.append({
                     'file_path': file_path,
                     'file_name': Path(file_path).name,
                     'success': False,
-                    'error': f"Ошибка загрузки: {str(e)}",
+                    'error': f"Ошибка загрузки: {e!s}",
                     'points_count': 0
                 })
                 logger.error(f"Ошибка обработки файла {file_path}: {e}", exc_info=True)
-                
+
             except CalculationError as e:
                 self.results.append({
                     'file_path': file_path,
                     'file_name': Path(file_path).name,
                     'success': False,
-                    'error': f"Ошибка расчета: {str(e)}",
+                    'error': f"Ошибка расчета: {e!s}",
                     'points_count': len(data) if 'data' in locals() else 0
                 })
                 logger.error(f"Ошибка расчета для файла {file_path}: {e}", exc_info=True)
-                
+
             except Exception as e:
                 self.results.append({
                     'file_path': file_path,
                     'file_name': Path(file_path).name,
                     'success': False,
-                    'error': f"Неожиданная ошибка: {str(e)}",
+                    'error': f"Неожиданная ошибка: {e!s}",
                     'points_count': 0
                 })
                 logger.error(f"Неожиданная ошибка при обработке файла {file_path}: {e}", exc_info=True)
-        
+
         return self.results
-    
-    def generate_summary_report(self) -> Dict[str, Any]:
+
+    def generate_summary_report(self) -> dict[str, Any]:
         """
         Генерирует сводный отчет по всем обработанным файлам
-        
+
         Returns:
             Словарь со сводной статистикой
         """
@@ -153,10 +150,10 @@ class BatchProcessor:
                 'total_points': 0,
                 'total_belts': 0
             }
-        
+
         successful = [r for r in self.results if r.get('success', False)]
         failed = [r for r in self.results if not r.get('success', False)]
-        
+
         summary = {
             'total_files': len(self.results),
             'successful': len(successful),
@@ -170,6 +167,6 @@ class BatchProcessor:
             'failed_files': [r['file_name'] for r in failed],
             'errors': [{'file': r['file_name'], 'error': r.get('error', 'Неизвестная ошибка')} for r in failed]
         }
-        
+
         return summary
 

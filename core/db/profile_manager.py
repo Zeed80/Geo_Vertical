@@ -1,12 +1,12 @@
-import sqlite3
 import logging
-from typing import List, Dict, Optional, Any
+import sqlite3
 from pathlib import Path
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
 class ProfileManager:
-    def __init__(self, db_path: Optional[str] = None):
+    def __init__(self, db_path: str | None = None):
         if db_path is None:
             # Default to profiles.db in the same directory
             db_path = str(Path(__file__).parent / "profiles.db")
@@ -43,7 +43,7 @@ class ProfileManager:
         try:
             with self._get_connection() as conn:
                 conn.execute(create_table_sql)
-                
+
             # Check if empty and populate
             self._check_and_populate()
         except sqlite3.Error as e:
@@ -53,14 +53,14 @@ class ProfileManager:
         if not self.get_profiles_by_type("pipe"):
             # Import here to avoid circular dep if moved
             try:
-                from core.db.init_db import populate_gost_8732, populate_gost_8509, populate_gost_8240
+                from core.db.init_db import populate_gost_8240, populate_gost_8509, populate_gost_8732
                 populate_gost_8732(self)
                 populate_gost_8509(self)
                 populate_gost_8240(self)
             except ImportError:
                 logger.warning("Could not auto-populate database: init_db module not found")
 
-    def add_profile(self, profile_data: Dict[str, Any]) -> bool:
+    def add_profile(self, profile_data: dict[str, Any]) -> bool:
         """Add a new profile to the database."""
         keys = [
             "standard", "type", "designation", "A", "Ix", "Iy", "Wx", "Wy",
@@ -69,9 +69,9 @@ class ProfileManager:
         columns = ", ".join(keys)
         placeholders = ", ".join(["?"] * len(keys))
         values = [profile_data.get(k) for k in keys]
-        
+
         sql = f"INSERT OR REPLACE INTO profiles ({columns}) VALUES ({placeholders})"
-        
+
         try:
             with self._get_connection() as conn:
                 conn.execute(sql, values)
@@ -80,7 +80,7 @@ class ProfileManager:
             logger.error(f"Failed to add profile {profile_data.get('designation')}: {e}")
             return False
 
-    def get_profiles_by_type(self, profile_type: str) -> List[Dict[str, Any]]:
+    def get_profiles_by_type(self, profile_type: str) -> list[dict[str, Any]]:
         """Get all profiles of a specific type."""
         sql = "SELECT * FROM profiles WHERE type = ? ORDER BY designation"
         try:
@@ -92,7 +92,7 @@ class ProfileManager:
             logger.error(f"Failed to get profiles by type {profile_type}: {e}")
             return []
 
-    def get_profile_by_designation(self, standard: str, designation: str) -> Optional[Dict[str, Any]]:
+    def get_profile_by_designation(self, standard: str, designation: str) -> dict[str, Any] | None:
         """Get a specific profile."""
         sql = "SELECT * FROM profiles WHERE standard = ? AND designation = ?"
         try:
@@ -105,7 +105,7 @@ class ProfileManager:
             logger.error(f"Failed to get profile {designation}: {e}")
             return None
 
-    def get_all_standards(self) -> List[str]:
+    def get_all_standards(self) -> list[str]:
         """Get list of available standards."""
         sql = "SELECT DISTINCT standard FROM profiles ORDER BY standard"
         try:

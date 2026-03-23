@@ -1,5 +1,5 @@
 import logging
-import os
+
 from core.db.profile_manager import ProfileManager
 
 logger = logging.getLogger(__name__)
@@ -70,7 +70,7 @@ def populate_gost_8509(manager: ProfileManager):
             "Ix": Ix,
             "Iy": Ix,
             "i_x": i_x,
-            "i_y": i_x, 
+            "i_y": i_x,
         }
         manager.add_profile(data)
     logger.info(f"Added {len(angles)} profiles for GOST 8509-93")
@@ -83,7 +83,7 @@ def populate_gost_8240(manager: ProfileManager):
         ("16P", 160, 64, 5.0, 8.4, 14.2, 18.1, 747, 63.3, 93.4, 13.8),
         ("20P", 200, 76, 5.2, 9.0, 18.4, 23.4, 1520, 113, 152, 20.5),
     ]
-    
+
     for c in channels:
         designation, h, b, s, t, mass, A, Ix, Iy, Wx, Wy = c
         data = {

@@ -12,8 +12,6 @@
 import logging
 import logging.handlers
 from pathlib import Path
-from datetime import datetime
-
 
 # Создаем директорию для логов, если её нет
 LOGS_DIR = Path(__file__).parent.parent / 'logs'
@@ -23,40 +21,40 @@ LOGS_DIR.mkdir(exist_ok=True)
 def setup_logging(level=logging.INFO, console=True, file=True, file_level=logging.DEBUG):
     """
     Настройка системы логирования
-    
+
     Args:
         level: Уровень логирования для консоли
         console: Выводить логи в консоль
         file: Сохранять логи в файл
         file_level: Уровень логирования для файла
     """
-    
+
     # Создаем корневой логгер
     root_logger = logging.getLogger()
     root_logger.setLevel(logging.DEBUG)
-    
+
     # Очищаем существующие обработчики
     root_logger.handlers.clear()
-    
+
     # Формат логов - очень подробный для файла
     detailed_formatter = logging.Formatter(
         fmt='%(asctime)s.%(msecs)03d | %(levelname)-8s | [%(name)s] %(funcName)s():%(lineno)d | %(message)s',
         datefmt='%Y-%m-%d %H:%M:%S'
     )
-    
+
     # Средняя детальность для консоли
     simple_formatter = logging.Formatter(
         fmt='%(asctime)s | %(levelname)-8s | %(message)s',
         datefmt='%H:%M:%S'
     )
-    
+
     # Консольный обработчик
     if console:
         console_handler = logging.StreamHandler()
         console_handler.setLevel(level)
         console_handler.setFormatter(simple_formatter)
         root_logger.addHandler(console_handler)
-    
+
     # Файловый обработчик (rotation)
     if file:
         # Основной лог-файл с rotation
@@ -69,7 +67,7 @@ def setup_logging(level=logging.INFO, console=True, file=True, file_level=loggin
         file_handler.setLevel(file_level)
         file_handler.setFormatter(detailed_formatter)
         root_logger.addHandler(file_handler)
-        
+
         # Файл только с ошибками
         error_handler = logging.handlers.RotatingFileHandler(
             filename=LOGS_DIR / 'errors.log',
@@ -80,7 +78,7 @@ def setup_logging(level=logging.INFO, console=True, file=True, file_level=loggin
         error_handler.setLevel(logging.ERROR)
         error_handler.setFormatter(detailed_formatter)
         root_logger.addHandler(error_handler)
-        
+
         # Файл с операциями 3D редактора (отдельно для удобства)
         editor_handler = logging.handlers.RotatingFileHandler(
             filename=LOGS_DIR / 'editor_3d.log',
@@ -93,7 +91,7 @@ def setup_logging(level=logging.INFO, console=True, file=True, file_level=loggin
         # Фильтр только для логов из gui.point_editor_3d
         editor_handler.addFilter(lambda record: 'point_editor_3d' in record.name)
         root_logger.addHandler(editor_handler)
-    
+
     # Логгируем старт приложения
     logger = logging.getLogger(__name__)
     logger.info('='*70)
@@ -107,10 +105,10 @@ def setup_logging(level=logging.INFO, console=True, file=True, file_level=loggin
 def get_logger(name: str) -> logging.Logger:
     """
     Получить логгер для модуля
-    
+
     Args:
         name: Имя модуля (обычно __name__)
-        
+
     Returns:
         Настроенный логгер
     """
@@ -120,7 +118,7 @@ def get_logger(name: str) -> logging.Logger:
 # Настройка логирования для сторонних библиотек
 def configure_third_party_logging():
     """Настройка уровней логирования для сторонних библиотек"""
-    
+
     # Отключаем или уменьшаем детальность логов сторонних библиотек
     logging.getLogger('matplotlib').setLevel(logging.WARNING)
     logging.getLogger('PIL').setLevel(logging.WARNING)
@@ -135,7 +133,7 @@ class ContextFilter(logging.Filter):
     Фильтр для добавления контекстной информации в логи
     Может быть расширен для добавления пользовательской информации
     """
-    
+
     def filter(self, record):
         # Добавляем дополнительную информацию в record
         record.app_name = 'GeoVertical'
@@ -145,13 +143,13 @@ class ContextFilter(logging.Filter):
 def log_exception(logger: logging.Logger, exc: Exception, message: str = "Исключение"):
     """
     Логирование исключения с полной информацией
-    
+
     Args:
         logger: Логгер
         exc: Исключение
         message: Дополнительное сообщение
     """
-    logger.error(f"{message}: {type(exc).__name__}: {str(exc)}", exc_info=True)
+    logger.error(f"{message}: {type(exc).__name__}: {exc!s}", exc_info=True)
 
 
 # Примеры использования в других модулях:

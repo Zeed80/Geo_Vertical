@@ -1259,7 +1259,7 @@ class TowerBuilderPanel(QWidget):
         current_blueprint = None
         try:
             current_blueprint = self.build_blueprint()
-        except:
+        except (ValueError, TypeError, KeyError):
             pass
         
         # Удалить старую панель

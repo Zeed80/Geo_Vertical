@@ -18,6 +18,11 @@ import logging
 from typing import Any, Dict, List, Optional, Tuple, Iterable
 
 from gui.ui_helpers import apply_compact_button_style
+from core.point_utils import (
+    build_is_station_mask,
+    build_working_tower_mask,
+    normalize_tower_point_flags,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -111,21 +116,11 @@ class DataTableWidget(QWidget):
     
     @staticmethod
     def _build_is_station_mask(series: pd.Series) -> pd.Series:
-        series = series.copy()
-        if series.dtype == 'object':
-            string_mask = series.map(lambda value: isinstance(value, str))
-            if string_mask.any():
-                lowered = series[string_mask].str.strip().str.lower()
-                mapping = {'true': True, 'false': False, '1': True, '0': False, 'yes': True, 'no': False}
-                mapped = lowered.map(mapping)
-                valid_idx = mapped.dropna().index
-                if len(valid_idx) > 0:
-                    series.loc[valid_idx] = mapped.loc[valid_idx]
-            series = series.infer_objects(copy=False)
-        null_mask = series.isna()
-        if null_mask.any():
-            series.loc[null_mask] = False
-        return series.astype(bool)
+        return build_is_station_mask(series)
+
+    @staticmethod
+    def _build_working_tower_mask(data: pd.DataFrame) -> pd.Series:
+        return build_working_tower_mask(data)
     
     def _row_has_part(self, row: pd.Series, part_num: int) -> bool:
         memberships = []
@@ -342,11 +337,7 @@ class DataTableWidget(QWidget):
             self.original_data = pd.DataFrame()
             self.processed_results = None
         else:
-            work_data = data.copy()
-            if 'is_station' not in work_data.columns:
-                work_data['is_station'] = False
-            else:
-                work_data['is_station'] = self._build_is_station_mask(work_data['is_station'])
+            work_data = normalize_tower_point_flags(data)
             if 'tower_part' not in work_data.columns:
                 work_data['tower_part'] = 1
             if 'tower_part_memberships' not in work_data.columns:
@@ -419,7 +410,7 @@ class DataTableWidget(QWidget):
         # Используем новый синтаксис для избежания FutureWarning
         station_mask = self._build_is_station_mask(self.original_data['is_station'])
         station_data = self.original_data[station_mask].copy()
-        tower_data = self.original_data[~station_mask].copy()
+        tower_data = self.original_data[self._build_working_tower_mask(self.original_data)].copy()
         
         # ДИАГНОСТИКА: логируем информацию о станциях
         logger.info(
@@ -683,8 +674,7 @@ class DataTableWidget(QWidget):
         if self.original_data is None or self.original_data.empty:
             self._current_tower_data = pd.DataFrame()
             return
-        mask = self._build_is_station_mask(self.original_data['is_station'])
-        tower_df = self.original_data[~mask].copy()
+        tower_df = self.original_data[self._build_working_tower_mask(self.original_data)].copy()
         # НЕ сортируем, чтобы порядок соответствовал 3D редактору
         self._current_tower_data = tower_df.copy()
 
@@ -1484,9 +1474,13 @@ class DataTableWidget(QWidget):
         unique_heights = np.unique(np.round(heights, 6))
         if unique_heights.size > 1:
             min_step = np.min(np.diff(unique_heights))
-            tolerance = max(0.02, float(min_step) * 0.25)
+            # UI sections may be rounded/manual and differ from calculated center
+            # heights by up to about a meter. Prefer the processed verticality
+            # result over angular fallback whenever the nearest center is still
+            # clearly the same section.
+            tolerance = max(0.05, min(1.5, float(min_step) * 0.6))
         else:
-            tolerance = 0.05
+            tolerance = 0.3
 
         lookup = {
             'heights': heights,
@@ -1959,8 +1953,7 @@ class DataTableWidget(QWidget):
         # Определяем, является ли башня составной
         is_composite_tower = False
         if self.original_data is not None and not self.original_data.empty:
-            mask = self._build_is_station_mask(self.original_data['is_station'])
-            tower_data_check = self.original_data[~mask]
+            tower_data_check = self.original_data[self._build_working_tower_mask(self.original_data)]
             has_memberships = 'tower_part_memberships' in tower_data_check.columns and tower_data_check['tower_part_memberships'].notna().any()
             has_numeric_parts = 'tower_part' in tower_data_check.columns and tower_data_check['tower_part'].notna().any()
             is_composite_tower = has_memberships or has_numeric_parts
@@ -2246,8 +2239,7 @@ class DataTableWidget(QWidget):
             # Определяем, является ли это составная башня (используем тот же способ, что и при заполнении таблицы)
             is_composite = False
             if self.original_data is not None and not self.original_data.empty:
-                mask = self._build_is_station_mask(self.original_data['is_station'])
-                tower_data = self.original_data[~mask]
+                tower_data = self.original_data[self._build_working_tower_mask(self.original_data)]
                 has_memberships = 'tower_part_memberships' in tower_data.columns and tower_data['tower_part_memberships'].notna().any()
                 has_numeric_parts = 'tower_part' in tower_data.columns and tower_data['tower_part'].notna().any()
                 is_composite = has_memberships or has_numeric_parts
@@ -3249,4 +3241,3 @@ class DataTableWidget(QWidget):
         rows_x = self.compute_axis_rows(tower_data, axis='x')
         rows_y = self.compute_axis_rows(tower_data, axis='y')
         return {'x': rows_x, 'y': rows_y}
-

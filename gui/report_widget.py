@@ -33,6 +33,7 @@ class NotesTextEdit(QTextEdit):
 
 class ReportWidget(QWidget):
     """Виджет для отображения и редактирования отчета с интерактивным предпросмотром"""
+    report_info_changed = pyqtSignal(dict)
     
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -44,6 +45,7 @@ class ReportWidget(QWidget):
         self.data_table_widget = None
         self.raw_data = None
         self.epsg_code = None
+        self.full_report_tab = None
         self.project_name = "Отчет по геодезическому контролю"
         self.template_manager = ReportTemplateManager()
         self.full_report_builder = FullReportBuilder(self.template_manager)
@@ -306,7 +308,26 @@ class ReportWidget(QWidget):
         if self.processed_data and self.processed_data.get('valid'):
             # Небольшая задержка, чтобы не обновлять при каждом символе
             self.update_preview()
-    
+        self._emit_report_info_changed()
+
+    def _apply_project_defaults(self):
+        project_name = str(self.project_name or "").strip()
+        if not project_name:
+            return
+
+        current_value = self.project_name_edit.text().strip()
+        placeholders = {
+            "",
+            "РћР±СЉРµРєС‚ РєРѕРЅС‚СЂРѕР»СЏ",
+            "РђРЅС‚РµРЅРЅРѕ-РјР°С‡С‚РѕРІРѕРµ СЃРѕРѕСЂСѓР¶РµРЅРёРµ",
+            "РћС‚С‡РµС‚ РїРѕ РіРµРѕРґРµР·РёС‡РµСЃРєРѕРјСѓ РєРѕРЅС‚СЂРѕР»СЋ",
+        }
+        if current_value in placeholders and project_name not in placeholders:
+            self.project_name_edit.setText(project_name)
+
+    def _emit_report_info_changed(self):
+        self.report_info_changed.emit(self.get_report_info())
+
     def set_data(self, raw_data, processed_data, verticality_widget=None, straightness_widget=None, data_table_widget=None):
         """Установить данные для отчета
         
@@ -321,6 +342,7 @@ class ReportWidget(QWidget):
         self.verticality_widget = verticality_widget
         self.straightness_widget = straightness_widget
         self.data_table_widget = data_table_widget
+        self._apply_project_defaults()
         
         if processed_data and processed_data.get('valid'):
             self.update_preview()
@@ -334,6 +356,7 @@ class ReportWidget(QWidget):
             self.info_label.setText('⚠ Отчет не сгенерирован. Выполните расчет')
             self.info_label.setStyleSheet('padding: 5px; background-color: #fff3cd; border: 1px solid #ffc107; border-radius: 3px;')
         self._sync_full_report_button_state()
+        self._emit_report_info_changed()
     
     def update_preview(self):
         """Обновление HTML-предпросмотра отчета"""
@@ -401,7 +424,8 @@ class ReportWidget(QWidget):
     def _sync_full_report_button_state(self):
         has_templates = bool(self.template_combo and self.template_combo.count() > 0)
         data_ready = bool(self.processed_data and self.processed_data.get('valid'))
-        self.save_full_docx_btn.setEnabled(has_templates and data_ready)
+        uses_dedicated_full_report_tab = self.full_report_tab is not None
+        self.save_full_docx_btn.setEnabled(data_ready and (uses_dedicated_full_report_tab or has_templates))
 
     def _open_templates_folder(self):
         folder = self.template_manager.storage_dir
@@ -487,6 +511,107 @@ class ReportWidget(QWidget):
         )
         date_suffix = QDate.currentDate().toString('yyyyMMdd')
         return f'{base_name}_{date_suffix}{extension}'
+
+    @staticmethod
+    def _empty_verticality_check() -> dict:
+        """Пустой результат проверки вертикальности."""
+        return {
+            'compliant': [],
+            'non_compliant': [],
+            'total': 0,
+            'passed': 0,
+            'failed': 0,
+        }
+
+    def _compute_verticality_check(self, processed_data: dict, *,
+                                   verticality_data_from_angular=None,
+                                   verticality_data=None) -> dict:
+        """Считает проверку вертикальности теми же правилами, что и генератор отчета."""
+        from core.normatives import NormativeChecker
+
+        checker = NormativeChecker()
+        verticality_data_from_angular = verticality_data_from_angular or []
+        verticality_data = verticality_data or []
+
+        if verticality_data_from_angular:
+            deviations_m = []
+            heights_m = []
+            for item in verticality_data_from_angular:
+                deviations_m.append(float(item.get('total_deviation', 0)) / 1000.0)
+                heights_m.append(float(item.get('height', 0)))
+            if deviations_m:
+                return checker.check_vertical_deviations(deviations_m, heights_m)
+
+        if verticality_data:
+            deviations_m = []
+            heights_m = []
+            for item in verticality_data:
+                total_dev_mm = item.get('total_deviation', item.get('deviation', 0))
+                deviations_m.append(float(total_dev_mm) / 1000.0)
+                heights_m.append(float(item.get('height', 0)))
+            if deviations_m:
+                return checker.check_vertical_deviations(deviations_m, heights_m)
+
+        centers = processed_data.get('centers')
+        if centers is not None and hasattr(centers, 'empty') and not centers.empty:
+            if 'deviation' in centers.columns and 'z' in centers.columns:
+                return checker.check_vertical_deviations(
+                    centers['deviation'].tolist(),
+                    centers['z'].tolist()
+                )
+
+        return self._empty_verticality_check()
+
+    def _render_verticality_stats_html(self, vertical_check: dict) -> str:
+        """Формирует HTML статистики по вертикальности."""
+        total = int(vertical_check.get('total', 0) or 0)
+        if total <= 0:
+            return ''
+
+        passed = int(vertical_check.get('passed', 0) or 0)
+        failed = int(vertical_check.get('failed', 0) or 0)
+        html_parts = [
+            '<div class="info-box">',
+            '<b>Статистика проверки вертикальности:</b><br/>',
+            f'• Всего секций: {total}<br/>',
+            f'• В пределах нормы: {passed} ({passed / total * 100:.1f}%)<br/>',
+            f'• Превышение допуска: {failed} ({failed / total * 100:.1f}%)',
+        ]
+
+        non_compliant = vertical_check.get('non_compliant', [])
+        if non_compliant:
+            html_parts.append('<br/><br/><b>Секции с превышением допуска:</b><br/>')
+            for item in non_compliant:
+                excess_mm = float(item.get('excess', 0)) * 1000.0
+                height = float(item.get('height', 0))
+                index = int(item.get('index', 0)) + 1
+                html_parts.append(
+                    f'• Секция {index} (высота {height:.1f} м): превышение {excess_mm:.2f} мм<br/>'
+                )
+
+        html_parts.append('</div>')
+        return '\n'.join(html_parts)
+
+    def _figure_to_base64_png(self, figure, file_stem: str, *, dpi: int = 180, prepare_kwargs: dict | None = None) -> str:
+        """Сохраняет matplotlib figure во временный PNG и возвращает base64 для HTML."""
+        if not self.temp_dir:
+            self.temp_dir = Path(tempfile.mkdtemp(prefix='geov_report_'))
+
+        chart_path = self.temp_dir / f'{file_stem}.png'
+        original_size = None
+        if prepare_kwargs:
+            original_size = EnhancedReportGenerator._prepare_matplotlib_figure(figure, **prepare_kwargs)
+
+        try:
+            figure.savefig(str(chart_path), dpi=dpi, bbox_inches='tight')
+            if str(chart_path) not in self.temp_files:
+                self.temp_files.append(str(chart_path))
+
+            with open(chart_path, 'rb') as chart_file:
+                return base64.b64encode(chart_file.read()).decode('utf-8')
+        finally:
+            if original_size is not None:
+                figure.set_size_inches(original_size)
 
     def generate_preview_html(self, 
                              raw_data, 
@@ -658,7 +783,6 @@ class ReportWidget(QWidget):
             verticality_data_from_angular = None
             if angular_measurements and (angular_measurements.get('x') or angular_measurements.get('y')):
                 try:
-                    from utils.report_generator_enhanced import EnhancedReportGenerator
                     verticality_data_from_angular = EnhancedReportGenerator._aggregate_angular_measurements_by_sections(angular_measurements)
                 except Exception as e:
                     logger.warning(f"Ошибка агрегации данных угловых измерений: {e}")
@@ -672,6 +796,12 @@ class ReportWidget(QWidget):
                     verticality_data = verticality_widget.get_table_data()
                 except Exception as e:
                     logger.warning(f"Ошибка получения данных вертикальности: {e}")
+
+            vertical_check = self._compute_verticality_check(
+                processed_data,
+                verticality_data_from_angular=verticality_data_from_angular,
+                verticality_data=verticality_data
+            )
             
             if verticality_data:
                 html_parts.append('<table>')
@@ -716,22 +846,28 @@ class ReportWidget(QWidget):
             else:
                 html_parts.append('<p><em>Нет данных для отображения</em></p>')
             
-            # График вертикальности (используем SVG для векторного формата)
+            # График вертикальности
             if verticality_widget and hasattr(verticality_widget, 'figure'):
                 html_parts.append('<h3>График вертикальности</h3>')
-                chart_path_svg = self.temp_dir / 'verticality_chart.svg'
-                verticality_widget.figure.savefig(str(chart_path_svg), format='svg', bbox_inches='tight', pad_inches=0.3)
-                if str(chart_path_svg) not in self.temp_files:
-                    self.temp_files.append(str(chart_path_svg))
-                
-                # Читаем SVG как текст и встраиваем напрямую
-                with open(chart_path_svg, 'r', encoding='utf-8') as f:
-                    svg_content = f.read()
-                
+                img_data = self._figure_to_base64_png(
+                    verticality_widget.figure,
+                    'verticality_chart_preview',
+                    prepare_kwargs={'width': 7.5, 'height': 6.0, 'pad': 1.4}
+                )
                 html_parts.append('<div class="chart-container">')
-                html_parts.append(svg_content)
+                html_parts.append(f'<img src="data:image/png;base64,{img_data}" alt="График вертикальности">')
                 html_parts.append('<p><em>Рис. 1. Отклонения центров секций от вертикальной оси мачты</em></p>')
                 html_parts.append('</div>')
+
+            verticality_conclusion = EnhancedReportGenerator._generate_verticality_conclusion(vertical_check)
+            if verticality_conclusion:
+                html_parts.append('<div class="info-box">')
+                html_parts.append(verticality_conclusion)
+                html_parts.append('</div>')
+
+            verticality_stats_html = self._render_verticality_stats_html(vertical_check)
+            if verticality_stats_html:
+                html_parts.append(verticality_stats_html)
             
             # Таблица прогибов
             html_parts.append('<h2>4. ТАБЛИЦА СТРЕЛ ПРОГИБА ПОЯСОВ СТВОЛА (ПРЯМОЛИНЕЙНОСТЬ)</h2>')
@@ -839,16 +975,19 @@ class ReportWidget(QWidget):
                     
                     if part_figures:
                         for belt_group, figure in part_figures:
-                            chart_path_svg = self.temp_dir / f'straightness_part_{part_num}_group_{global_figure_index}.svg'
-                            figure.savefig(str(chart_path_svg), format='svg', bbox_inches='tight', pad_inches=0.3)
-                            if str(chart_path_svg) not in self.temp_files:
-                                self.temp_files.append(str(chart_path_svg))
-                            
-                            with open(chart_path_svg, 'r', encoding='utf-8') as f:
-                                svg_content = f.read()
-                            
+                            img_data = self._figure_to_base64_png(
+                                figure,
+                                f'straightness_part_{part_num}_group_{global_figure_index}_preview',
+                                prepare_kwargs={
+                                    'width': 11.0 if len(belt_group) > 1 else 8.5,
+                                    'height': 5.8,
+                                    'pad': 1.6,
+                                    'label_size': 9,
+                                    'title_size': 11,
+                                }
+                            )
                             html_parts.append('<div class="chart-container">')
-                            html_parts.append(svg_content)
+                            html_parts.append(f'<img src="data:image/png;base64,{img_data}" alt="График по поясам {", ".join(str(b) for b in belt_group)}">')
                             belts_caption = ', '.join(str(b) for b in belt_group)
                             html_parts.append(f'<p><em>Рис. {global_figure_index}. Отклонения от прямолинейности по поясам {belts_caption}</em></p>')
                             html_parts.append('</div>')
@@ -858,6 +997,12 @@ class ReportWidget(QWidget):
                 
             else:
                 html_parts.append('<p><em>Нет данных для отображения</em></p>')
+
+            straightness_conclusion = EnhancedReportGenerator._generate_straightness_conclusion(straightness_data)
+            if straightness_conclusion:
+                html_parts.append('<div class="info-box">')
+                html_parts.append(straightness_conclusion)
+                html_parts.append('</div>')
             
             html_parts.append('<div class="footer">')
             html_parts.append('<p>Отчет сгенерирован программой GeoVertical Analyzer v1.0</p>')
@@ -991,6 +1136,11 @@ class ReportWidget(QWidget):
         """Сохранение полного отчета по форме ДО ТСС."""
         if not self.processed_data or not self.processed_data.get('valid'):
             QMessageBox.warning(self, 'Предупреждение', 'Нет данных для сохранения. Выполните расчет.')
+            return
+
+        if self.full_report_tab is not None:
+            self.full_report_tab.apply_shared_report_info(self.get_report_info(), force=False)
+            self.full_report_tab._generate_report()
             return
 
         if not self.template_combo or self.template_combo.count() == 0:

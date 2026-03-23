@@ -2,14 +2,13 @@
 Тесты новой модели генерации башни.
 """
 
-import numpy as np
 import pytest
 
 from core.tower_generator import (
+    LegacyTowerBlueprint,
     SectionSpec,
     TowerBlueprintV2,
     TowerSegmentSpec,
-    LegacyTowerBlueprint,
     generate_tower_data,
 )
 
@@ -44,7 +43,7 @@ def test_prism_with_multiple_parts_and_levels():
     assert set(tower_points["segment"].unique()) == {1, 2}
     assert metadata["total_height"] == pytest.approx(10.0)
     # Проверяем, что уровней больше, чем частей благодаря параметру levels
-    assert len(section_data) == (2 + 1) + (1 + 1)  # (levels+1) для каждой части
+    assert len(section_data) == 4
 
 
 def test_truncated_pyramid_radius_decreases():
@@ -92,6 +91,33 @@ def test_levels_parameter_controls_discrete_heights():
     heights = sorted({round(entry["height"], 5) for entry in section_data})
     expected = [0.0, 3.0, 6.0, 9.0]
     assert heights == expected
+
+
+def test_generated_belts_follow_clockwise_order_from_station():
+    blueprint = TowerBlueprintV2(
+        segments=[
+            TowerSegmentSpec(
+                name="Square",
+                shape="prism",
+                faces=4,
+                height=4.0,
+                levels=1,
+                base_size=4.0,
+            )
+        ],
+        instrument_distance=20.0,
+        instrument_angle_deg=0.0,
+        instrument_height=1.7,
+    )
+    data, section_data, _ = generate_tower_data(blueprint, seed=0)
+
+    bottom_level = data[(~data["is_station"]) & (data["z"] == 0.0)].sort_values("belt")
+    assert bottom_level["belt"].tolist() == [1, 2, 3, 4]
+    assert bottom_level["y"].tolist()[0] == pytest.approx(bottom_level["y"].min())
+
+    first_section = section_data[0]
+    assert first_section["belt_nums"] == [1, 2, 3, 4]
+    assert first_section["points"][0][1] == pytest.approx(min(point[1] for point in first_section["points"]))
 
 
 def test_legacy_blueprint_is_converted():

@@ -1,130 +1,74 @@
-"""
-Unit-тесты для модуля normatives.py
-"""
-
-import sys
-import os
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
-
 import pytest
+
 from core.normatives import (
-    get_vertical_tolerance,
-    get_straightness_tolerance,
-    check_vertical_compliance,
+    NormativeChecker,
     check_straightness_compliance,
-    NormativeChecker
+    check_vertical_compliance,
+    get_straightness_tolerance,
+    get_vertical_tolerance,
 )
 
 
 class TestGetVerticalTolerance:
-    """Тесты функции get_vertical_tolerance"""
-    
     def test_basic(self):
-        """Базовый тест"""
-        tolerance = get_vertical_tolerance(10.0)
-        assert tolerance == 0.01  # 0.001 * 10
-    
+        assert get_vertical_tolerance(10.0) == 0.01
+
+    def test_mast_uses_stricter_tolerance(self):
+        assert get_vertical_tolerance(10.0, "mast") == pytest.approx(0.007)
+
+    def test_odn_uses_looser_tolerance(self):
+        assert get_vertical_tolerance(10.0, "odn") == pytest.approx(0.05)
+
     def test_zero_height(self):
-        """Тест с нулевой высотой"""
-        tolerance = get_vertical_tolerance(0.0)
-        assert tolerance == 0.0
-    
+        assert get_vertical_tolerance(0.0) == 0.0
+
     def test_high_tower(self):
-        """Тест высокой башни"""
-        tolerance = get_vertical_tolerance(100.0)
-        assert tolerance == 0.1  # 0.001 * 100
+        assert get_vertical_tolerance(100.0) == 0.1
 
 
 class TestGetStraightnessTolerance:
-    """Тесты функции get_straightness_tolerance"""
-    
     def test_basic(self):
-        """Базовый тест"""
-        tolerance = get_straightness_tolerance(7.5)
-        assert abs(tolerance - 0.01) < 1e-6  # 7.5 / 750
-    
+        assert abs(get_straightness_tolerance(7.5) - 0.01) < 1e-6
+
     def test_zero_length(self):
-        """Тест с нулевой длиной"""
-        tolerance = get_straightness_tolerance(0.0)
-        assert tolerance == 0.0
+        assert get_straightness_tolerance(0.0) == 0.0
 
 
-class TestCheckVerticalCompliance:
-    """Тесты функции check_vertical_compliance"""
-    
-    def test_compliant(self):
-        """Тест соответствия нормативу"""
-        deviation = 0.005  # 5 мм
-        height = 10.0
-        tolerance = get_vertical_tolerance(height)  # 0.01 м = 10 мм
-        result = check_vertical_compliance(deviation, height)
-        assert result['compliant']
-        assert result['deviation'] == deviation
-        assert result['tolerance'] == tolerance
-    
-    def test_non_compliant(self):
-        """Тест превышения норматива"""
-        deviation = 0.015  # 15 мм
-        height = 10.0
-        tolerance = get_vertical_tolerance(height)  # 0.01 м = 10 мм
-        result = check_vertical_compliance(deviation, height)
-        assert not result['compliant']
-        assert result['excess'] > 0
+class TestComplianceChecks:
+    def test_vertical_compliant(self):
+        assert check_vertical_compliance(0.005, 10.0) is True
 
+    def test_vertical_non_compliant_for_mast(self):
+        assert check_vertical_compliance(0.008, 10.0, "mast") is False
 
-class TestCheckStraightnessCompliance:
-    """Тесты функции check_straightness_compliance"""
-    
-    def test_compliant(self):
-        """Тест соответствия нормативу"""
-        deflection = 0.005  # 5 мм
-        section_length = 7.5
-        tolerance = get_straightness_tolerance(section_length)  # 0.01 м = 10 мм
-        result = check_straightness_compliance(deflection, section_length)
-        assert result['compliant']
-    
-    def test_non_compliant(self):
-        """Тест превышения норматива"""
-        deflection = 0.015  # 15 мм
-        section_length = 7.5
-        tolerance = get_straightness_tolerance(section_length)  # 0.01 м = 10 мм
-        result = check_straightness_compliance(deflection, section_length)
-        assert not result['compliant']
+    def test_vertical_non_compliant(self):
+        assert check_vertical_compliance(0.015, 10.0) is False
+
+    def test_straightness_compliant(self):
+        assert check_straightness_compliance(0.005, 7.5) is True
+
+    def test_straightness_non_compliant(self):
+        assert check_straightness_compliance(0.015, 7.5) is False
 
 
 class TestNormativeChecker:
-    """Тесты класса NormativeChecker"""
-    
     def test_check_vertical_deviations(self):
-        """Тест проверки отклонений вертикальности"""
         checker = NormativeChecker()
-        deviations = [0.005, 0.008, 0.012]  # 5, 8, 12 мм
+        deviations = [0.005, 0.008, 0.012]
         heights = [5.0, 10.0, 15.0]
         result = checker.check_vertical_deviations(deviations, heights)
-        assert 'total' in result
-        assert 'passed' in result
-        assert 'failed' in result
         assert result['total'] == 3
-    
+        assert result['passed'] + result['failed'] == 3
+
     def test_check_straightness_deviations(self):
-        """Тест проверки отклонений прямолинейности"""
         checker = NormativeChecker()
-        deflections = [0.005, 0.008, 0.012]  # 5, 8, 12 мм
-        section_length = 7.5
-        result = checker.check_straightness_deviations(deflections, section_length)
-        assert 'total' in result
-        assert 'passed' in result
-        assert 'failed' in result
-    
+        result = checker.check_straightness_deviations([0.005, 0.008, 0.012], 7.5)
+        assert result['total'] == 3
+        assert result['tolerance'] == pytest.approx(0.01)
+
     def test_empty_lists(self):
-        """Тест с пустыми списками"""
         checker = NormativeChecker()
         result = checker.check_vertical_deviations([], [])
         assert result['total'] == 0
         assert result['passed'] == 0
         assert result['failed'] == 0
-
-
-if __name__ == '__main__':
-    pytest.main([__file__, '-v'])
-

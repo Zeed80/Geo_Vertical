@@ -17,6 +17,10 @@ from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.figure import Figure
 import logging
 
+from core.normatives import get_straightness_tolerance
+from core.point_utils import build_working_tower_mask
+from core.straightness_calculations import calculate_belt_deflections as calculate_canonical_belt_deflections
+
 logger = logging.getLogger(__name__)
 
 
@@ -107,6 +111,55 @@ class StraightnessWidget(QWidget):
                     base_part = 1
                 parts.update({base_part, base_part + 1})
         return sorted(int(part) for part in parts if part is not None)
+
+    def _get_working_data(self) -> pd.DataFrame:
+        if self.data is None or self.data.empty:
+            return pd.DataFrame()
+        try:
+            return self.data[build_working_tower_mask(self.data)].copy()
+        except Exception:
+            return self.data.copy()
+
+    def _get_profile_lookup(self) -> dict[tuple[int, int], dict]:
+        lookup: dict[tuple[int, int], dict] = {}
+        if not isinstance(self.processed_data, dict):
+            return lookup
+        for profile in self.processed_data.get('straightness_profiles', []) or []:
+            try:
+                part_number = int(profile.get('part_number', 1))
+                belt_number = int(profile.get('belt', 0))
+            except (TypeError, ValueError):
+                continue
+            lookup[(part_number, belt_number)] = profile
+        return lookup
+
+    def _get_profile_deflections(
+        self,
+        belt_points: pd.DataFrame,
+        belt_num: int,
+        part_num: Optional[int],
+    ) -> Optional[list[float]]:
+        if belt_points is None or belt_points.empty:
+            return []
+        lookup = self._get_profile_lookup()
+        profile = lookup.get((int(part_num or 1), int(belt_num)))
+        if not profile:
+            return None
+
+        point_map = {}
+        for point in profile.get('points', []):
+            try:
+                point_map[int(point.get('source_index'))] = float(point.get('deflection_mm', 0.0))
+            except (TypeError, ValueError):
+                continue
+
+        belt_sorted = belt_points.sort_values('z')
+        if belt_sorted.empty:
+            return []
+        if not point_map:
+            return [0.0] * len(belt_sorted)
+
+        return [float(point_map.get(int(idx), 0.0)) for idx in belt_sorted.index]
         
     def init_ui(self):
         """Инициализация интерфейса"""
@@ -242,11 +295,7 @@ class StraightnessWidget(QWidget):
             self.deviation_table.setRowCount(0)
             
             # Исключаем точки standing
-            data_without_station = self.data.copy()
-            if 'is_station' in self.data.columns:
-                mask = self._build_is_station_mask(data_without_station['is_station'])
-                data_without_station['is_station'] = mask
-                data_without_station = data_without_station[~mask]
+            data_without_station = self._get_working_data()
             
             # Проверяем, является ли башня составной
             has_memberships = 'tower_part_memberships' in data_without_station.columns and data_without_station['tower_part_memberships'].notna().any()
@@ -835,6 +884,16 @@ class StraightnessWidget(QWidget):
         
         if len(belt_sorted) < 2:
             return [0.0] * len(belt_sorted)
+        belt_numbers = pd.to_numeric(belt_sorted.get('belt'), errors='coerce').dropna()
+        if not belt_numbers.empty:
+            profile_deflections = self._get_profile_deflections(
+                belt_sorted,
+                int(belt_numbers.iloc[0]),
+                part_num,
+            )
+            if profile_deflections is not None:
+                return profile_deflections
+        return [float(value) for value in calculate_canonical_belt_deflections(belt_sorted)]
         
         # Для составной башни используем границы части для определения опорных точек
         # Если границы части переданы, используем их для поиска опорных точек
@@ -1059,13 +1118,33 @@ class StraightnessWidget(QWidget):
             return all_data_by_parts
         
         # Исключаем точки standing
-        data_without_station = self.data.copy()
-        if 'is_station' in self.data.columns:
-            mask = self._build_is_station_mask(data_without_station['is_station'])
-            data_without_station['is_station'] = mask
-            data_without_station = data_without_station[~mask]
+        data_without_station = self._get_working_data()
         
         # Проверяем, является ли башня составной
+        profiles = self.processed_data.get('straightness_profiles') if isinstance(self.processed_data, dict) else None
+        if isinstance(profiles, list) and profiles:
+            for profile in profiles:
+                try:
+                    part_id = int(profile.get('part_number', 1))
+                    belt_id = int(profile.get('belt', 0))
+                except (TypeError, ValueError):
+                    continue
+                part_entry = all_data_by_parts.setdefault(part_id, {
+                    'min_height': float(profile.get('part_min_height', 0.0)),
+                    'max_height': float(profile.get('part_max_height', 0.0)),
+                    'belts': {},
+                })
+                part_entry['belts'][belt_id] = [
+                    {
+                        'height': float(point.get('z', 0.0)),
+                        'deflection': float(point.get('deflection_mm', 0.0)),
+                        'tolerance': float(profile.get('tolerance_mm', 0.0)),
+                    }
+                    for point in profile.get('points', [])
+                ]
+            if all_data_by_parts:
+                return all_data_by_parts
+
         has_memberships = 'tower_part_memberships' in data_without_station.columns and data_without_station['tower_part_memberships'].notna().any()
         has_numeric_parts = 'tower_part' in data_without_station.columns and data_without_station['tower_part'].notna().any()
         is_composite = has_memberships or has_numeric_parts
@@ -1174,13 +1253,14 @@ class StraightnessWidget(QWidget):
         """
         figures = []
         
-        if self.data is None or self.data.empty or 'belt' not in self.data.columns:
+        working_data = self._get_working_data()
+        if working_data.empty or 'belt' not in working_data.columns:
             return figures
-        
-        belts = sorted(self.data['belt'].dropna().unique())
+
+        belts = sorted(working_data['belt'].dropna().unique())
         
         for belt_num in belts:
-            belt_points = self.data[self.data['belt'] == belt_num]
+            belt_points = working_data[working_data['belt'] == belt_num]
             
             if len(belt_points) < 2:
                 continue
@@ -1198,10 +1278,11 @@ class StraightnessWidget(QWidget):
         Returns:
             Figure: Matplotlib figure с субплотами для всех поясов
         """
-        if self.data is None or self.data.empty or 'belt' not in self.data.columns:
+        working_data = self._get_working_data()
+        if working_data.empty or 'belt' not in working_data.columns:
             return None
-        
-        belts = sorted(self.data['belt'].dropna().unique())
+
+        belts = sorted(working_data['belt'].dropna().unique())
         
         if len(belts) == 0:
             return None
@@ -1218,7 +1299,7 @@ class StraightnessWidget(QWidget):
         subplot_pos = 1
 
         for belt_num in belts:
-            belt_points = self.data[self.data['belt'] == belt_num]
+            belt_points = working_data[working_data['belt'] == belt_num]
             if len(belt_points) < 2:
                 continue
 
@@ -1238,10 +1319,11 @@ class StraightnessWidget(QWidget):
 
     def get_grouped_figures_for_pdf(self, group_size: int = 2):
         """Получить фигуры с графиками, сгруппированными по несколько поясов."""
-        if self.data is None or self.data.empty or 'belt' not in self.data.columns:
+        working_data = self._get_working_data()
+        if working_data.empty or 'belt' not in working_data.columns:
             return []
 
-        belts = sorted(self.data['belt'].dropna().unique())
+        belts = sorted(working_data['belt'].dropna().unique())
         if not belts:
             return []
 
@@ -1256,7 +1338,7 @@ class StraightnessWidget(QWidget):
             plotted_belts: list[int] = []
 
             for belt_num in belt_group:
-                belt_points = self.data[self.data['belt'] == belt_num]
+                belt_points = working_data[working_data['belt'] == belt_num]
                 if len(belt_points) < 2:
                     continue
 
