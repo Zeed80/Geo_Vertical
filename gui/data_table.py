@@ -18,6 +18,12 @@ import logging
 from typing import Any, Dict, List, Optional, Tuple, Iterable
 
 from gui.ui_helpers import apply_compact_button_style
+from core.calculations import (
+    approximate_tower_axis,
+    calculate_local_coordinate_system,
+    calculate_vertical_deviation_with_local_cs,
+)
+from core.normatives import NormativeChecker, get_vertical_tolerance
 from core.point_utils import (
     build_is_station_mask,
     build_working_tower_mask,
@@ -90,7 +96,154 @@ class DataTableWidget(QWidget):
         self._current_station_data = pd.DataFrame()
         self._current_tower_data = pd.DataFrame()
         self.processed_results: Optional[Dict[str, Any]] = None
+        self._angular_verticality_payload: Optional[Dict[str, Any]] = None
+        self._secondary_station_prompted = False
         self.init_ui()
+
+    def _invalidate_angular_verticality_cache(self):
+        """Сбрасывает кэш payload журнала и вертикальности."""
+        self._angular_verticality_payload = None
+
+    @staticmethod
+    def _safe_int(value: Any, default: Optional[int] = None) -> Optional[int]:
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return default
+
+    @staticmethod
+    def _make_section_key(section_num: Optional[int], height: Optional[float]) -> str:
+        try:
+            if section_num is not None and not pd.isna(section_num):
+                return f"section:{int(section_num)}"
+        except (TypeError, ValueError):
+            pass
+        if height is None:
+            return "section:unknown"
+        return f"height:{float(height):.6f}"
+
+    def _empty_verticality_check(self) -> Dict[str, Any]:
+        return NormativeChecker().check_vertical_deviations([], [])
+
+    @staticmethod
+    def _stations_form_valid_angular_basis(
+        primary_coords: Optional[Tuple[float, float, float]],
+        secondary_coords: Optional[Tuple[float, float, float]],
+        *,
+        min_xy_distance_m: float = 0.1,
+    ) -> bool:
+        if primary_coords is None or secondary_coords is None:
+            return False
+        try:
+            delta_xy = np.array(
+                [
+                    float(secondary_coords[0]) - float(primary_coords[0]),
+                    float(secondary_coords[1]) - float(primary_coords[1]),
+                ],
+                dtype=float,
+            )
+        except (TypeError, ValueError):
+            return False
+        return float(np.linalg.norm(delta_xy)) >= float(min_xy_distance_m)
+
+    def _build_angular_basis_metadata(self) -> Dict[str, Any]:
+        primary_station = self._serialize_station_entry(self.primary_station_id)
+        secondary_station = self._serialize_station_entry(self.secondary_station_id)
+        primary_coords = self.get_station_coordinates(self.primary_station_id)
+        secondary_coords = self.get_station_coordinates(self.secondary_station_id)
+        secondary_is_synthetic = bool(secondary_station and secondary_station.get('station_origin') == 'synthetic')
+        has_required_stations = (
+            primary_station is not None
+            and secondary_station is not None
+            and self._stations_form_valid_angular_basis(primary_coords, secondary_coords)
+        )
+        has_authoritative_stations = has_required_stations and not secondary_is_synthetic
+        if has_authoritative_stations:
+            mode = 'stations'
+        elif has_required_stations:
+            mode = 'stations_synthetic_secondary'
+        elif primary_station is not None:
+            mode = 'stations_incomplete'
+        else:
+            mode = 'processed_fallback'
+        return {
+            'mode': mode,
+            'primary_station': primary_station,
+            'secondary_station': secondary_station,
+            'requires_two_stations': True,
+            'has_required_stations': has_required_stations,
+            'has_authoritative_stations': has_authoritative_stations,
+            'secondary_station_is_synthetic': secondary_is_synthetic,
+        }
+
+    def has_complete_angular_station_basis(self) -> bool:
+        try:
+            self._update_station_ids()
+        except Exception:
+            logger.exception("Не удалось обновить точки стояния перед проверкой angular-базы")
+            return False
+        primary_coords = self._get_station_for_axis('x')
+        secondary_coords = self._get_station_for_axis('y')
+        return self._stations_form_valid_angular_basis(primary_coords, secondary_coords)
+
+    def ensure_complete_angular_station_basis(self, interactive: bool = True) -> bool:
+        if self.has_complete_angular_station_basis():
+            self._secondary_station_prompted = False
+            return True
+
+        if self._get_station_for_axis('x') is None:
+            return False
+        if not interactive or self._secondary_station_prompted:
+            return False
+
+        self._secondary_station_prompted = True
+        QMessageBox.information(
+            self,
+            'Требуется вторая точка стояния',
+            'Для расчета вертикальности по угловым измерениям добавьте вторую точку стояния прибора.',
+        )
+        if not self.show_add_station_dialog():
+            return False
+
+        self._secondary_station_prompted = False
+        try:
+            self._update_station_ids()
+            self._rebuild_cached_tower_data()
+        except Exception:
+            logger.exception("Не удалось обновить данные после добавления второй точки стояния")
+            return False
+        return self.has_complete_angular_station_basis()
+
+    def _ensure_section_numbers(self, sections: List[Dict[str, Any]]):
+        """Присваивает секциям сквозную нумерацию с учетом близких высот."""
+        if not sections:
+            return
+
+        height_tolerance = 0.01
+        section_num = 0
+        seen_heights: List[float] = []
+
+        for section in sections:
+            section_height = float(section.get('height', 0.0) or 0.0)
+            existing_section_num = self._safe_int(section.get('section_num'))
+            if existing_section_num is not None:
+                seen_heights.append(section_height)
+                section['section_num'] = existing_section_num
+                section_num = max(section_num, existing_section_num + 1)
+                continue
+
+            matched_height = None
+            for seen_height in seen_heights:
+                if abs(section_height - seen_height) <= height_tolerance:
+                    matched_height = seen_height
+                    break
+
+            if matched_height is None:
+                section['section_num'] = section_num
+                seen_heights.append(section_height)
+                section_num += 1
+            else:
+                section['section_num'] = max(section_num - 1, 0)
     
     def _decode_part_memberships(self, value) -> List[int]:
         if value is None:
@@ -333,6 +486,8 @@ class DataTableWidget(QWidget):
         # Не меняем порядок исходных данных — сохраняем как есть
         # ВАЖНО: нормализуем столбец is_station до булевого, чтобы корректно
         # определять принадлежность строки таблице при синхронизации выбора
+        self._invalidate_angular_verticality_cache()
+        self._secondary_station_prompted = False
         if data is None or data.empty:
             self.original_data = pd.DataFrame()
             self.processed_results = None
@@ -499,11 +654,19 @@ class DataTableWidget(QWidget):
     def set_processed_results(self, results: Optional[Dict[str, Any]]):
         """Сохраняет результаты расчетов для синхронизации с вертикальностью."""
         self.processed_results = results
+        self._invalidate_angular_verticality_cache()
+        payload = self.get_angular_verticality_payload()
+        if isinstance(self.processed_results, dict):
+            self.processed_results['angular_verticality'] = payload
+            vertical_check = payload.get('vertical_check')
+            if isinstance(vertical_check, dict) and vertical_check.get('total', 0):
+                self.processed_results['vertical_check'] = vertical_check
         if self.show_angular_mode:
             self.populate_tower_table()
     
     def update_sections_table(self):
         """Обновляет таблицу секций на основе section_data из editor_3d"""
+        self._invalidate_angular_verticality_cache()
         if not self.editor_3d or not hasattr(self.editor_3d, 'section_data'):
             self.sections_table.setRowCount(0)
             return
@@ -523,29 +686,7 @@ class DataTableWidget(QWidget):
         
         # Сортируем секции по высоте
         sorted_sections = sorted(section_data, key=lambda s: s.get('height', 0))
-        
-        # Пронумеровываем секции сквозной нумерацией с 0 (если еще не пронумерованы)
-        # Используем ту же логику, что и в verticality_widget
-        height_tolerance = 0.01
-        section_num = 0
-        seen_heights = []
-        
-        for section in sorted_sections:
-            section_height = section.get('height', 0)
-            # Если номер уже есть, используем его
-            if 'section_num' not in section or section.get('section_num') is None:
-                # Проверяем, не создали ли мы уже секцию на близкой высоте
-                is_duplicate = False
-                for seen_height in seen_heights:
-                    if abs(section_height - seen_height) <= height_tolerance:
-                        is_duplicate = True
-                        section['section_num'] = section_num - 1
-                        break
-                
-                if not is_duplicate:
-                    section['section_num'] = section_num
-                    seen_heights.append(section_height)
-                    section_num += 1
+        self._ensure_section_numbers(sorted_sections)
         
         self.sections_table.setRowCount(len(sorted_sections))
         
@@ -723,6 +864,8 @@ class DataTableWidget(QWidget):
             or not bool(self.original_data.at[self.active_station_id, 'is_station'])
         ):
             self.active_station_id = None
+        if self.secondary_station_id is not None or self.primary_station_id is None:
+            self._secondary_station_prompted = False
 
     def on_tower_mode_toggled(self, checked: bool):
         """Переключает режим отображения таблицы башни."""
@@ -788,20 +931,43 @@ class DataTableWidget(QWidget):
             rotated_vector /= rotated_norm
 
         new_xy = np.array([center_x, center_y]) + rotated_vector * distance
+        new_coords = (float(new_xy[0]), float(new_xy[1]), float(sz))
+
+        if not self._stations_form_valid_angular_basis(base_coords, new_coords):
+            QMessageBox.warning(
+                self,
+                'Некорректная геометрия станции',
+                'Новая точка стояния совпадает с основной или расположена слишком близко. '
+                'Укажите другой угол или расстояние.',
+            )
+            return False
+
+        for station_idx in self._current_station_data.index.tolist():
+            existing_coords = self.get_station_coordinates(int(station_idx))
+            if existing_coords is None:
+                continue
+            if not self._stations_form_valid_angular_basis(existing_coords, new_coords):
+                QMessageBox.warning(
+                    self,
+                    'Дублирующая станция',
+                    'Новая точка стояния совпадает с уже существующей станцией или расположена слишком близко к ней.',
+                )
+                return False
 
         if 'station_role' not in self.original_data.columns:
             self.original_data['station_role'] = None
 
         new_index = int(self.original_data.index.max() + 1) if not self.original_data.empty else 0
         new_station = {
-            'x': float(new_xy[0]),
-            'y': float(new_xy[1]),
+            'x': new_coords[0],
+            'y': new_coords[1],
             'z': float(sz),
             'name': f"Станция {len(self._current_station_data) + 1}",
             'belt': None,
             'is_station': True,
             'point_index': self._determine_next_point_index(),
             'station_role': 'secondary',
+            'station_origin': 'synthetic',
         }
 
         if self.original_data is None or self.original_data.empty:
@@ -1102,15 +1268,18 @@ class DataTableWidget(QWidget):
         if self._get_station_for_axis('y') is None:
             QMessageBox.information(self, 'Требуется вторая точка стояния', 'Для расчета по оси Y добавьте дополнительную точку стояния.')
             if self.show_add_station_dialog():
+                self._rebuild_cached_tower_data()
+                data = self._current_tower_data if self._current_tower_data is not None else pd.DataFrame()
+                rows_y = self.compute_axis_rows(data, axis='y')
+            else:
+                self.angular_table_y.setColumnCount(len(headers))
+                self.angular_table_y.setHorizontalHeaderLabels(headers)
+                self.angular_table_y.setRowCount(0)
+                self.tower_add_btn.setEnabled(False)
+                self.tower_delete_btn.setEnabled(False)
                 return
-            self.angular_table_y.setColumnCount(len(headers))
-            self.angular_table_y.setHorizontalHeaderLabels(headers)
-            self.angular_table_y.setRowCount(0)
-            self.tower_add_btn.setEnabled(False)
-            self.tower_delete_btn.setEnabled(False)
-            return
-
-        rows_y = self.compute_axis_rows(data, axis='y')
+        else:
+            rows_y = self.compute_axis_rows(data, axis='y')
         self.angular_table_y.setColumnCount(len(headers))
         self.angular_table_y.setHorizontalHeaderLabels(headers)
         self.angular_table_y.setRowCount(len(rows_y))
@@ -1143,128 +1312,525 @@ class DataTableWidget(QWidget):
         return self.get_station_coordinates(self.primary_station_id)
 
     def compute_axis_rows(self, tower_data: pd.DataFrame, axis: str) -> List[Dict[str, Any]]:
-        """Формирует строки угловых измерений для заданной оси."""
-        station_coords = self._get_station_for_axis(axis)
-        if station_coords is None:
-            return []
+        """Формирует строки угловых измерений для заданной оси из общего payload."""
+        payload = self.get_angular_verticality_payload(tower_data)
+        rows = payload.get('rows_by_axis', {}).get((axis or 'x').lower(), [])
+        return [dict(row) for row in rows]
 
-        rows: List[Dict[str, Any]] = []
-        section_entries = []
-        if self.editor_3d and hasattr(self.editor_3d, 'section_data'):
-            section_entries = self.editor_3d.section_data or []
+    def _serialize_station_entry(self, station_id: Optional[int]) -> Optional[Dict[str, Any]]:
+        if station_id is None:
+            return None
+        coords = self.get_station_coordinates(station_id)
+        record = self._get_original_record(station_id)
+        if coords is None and not record:
+            return None
+        station_payload: Dict[str, Any] = {'id': station_id}
+        if record.get('name'):
+            station_payload['name'] = record.get('name')
+        if coords is not None:
+            station_payload['coords'] = [float(coords[0]), float(coords[1]), float(coords[2])]
+        station_origin = record.get('station_origin')
+        if station_origin is not None and not pd.isna(station_origin):
+            station_payload['station_origin'] = str(station_origin)
+        return station_payload
 
-        rows: List[Dict[str, Any]] = []
-        if section_entries:
-            for index, section in enumerate(sorted(section_entries, key=lambda s: s.get('height', 0.0))):
-                points = section.get('points', []) or []
-                if len(points) < 2:
-                    continue
-                belt_nums = section.get('belt_nums', []) or []
-                df = pd.DataFrame(points, columns=['x', 'y', 'z'])
-                if len(belt_nums) == len(df):
-                    df['belt'] = belt_nums
-                else:
-                    df['belt'] = [None] * len(df)
-                belt_sequence = section.get('belt_nums', []) if isinstance(section.get('belt_nums'), (list, tuple)) else None
-                rows.extend(self._build_axis_rows_from_points(
-                    df,
-                    station_coords,
-                    section_label=section.get('name') or section.get('label') or f"{index + 1}",
-                    belt_sequence=belt_sequence,
-                ))
-        else:
-            # Сортируем данные по поясам и высоте перед обработкой
-            tower_data_sorted = tower_data.copy()
-            if 'belt' in tower_data_sorted.columns:
-                tower_data_sorted['belt_num'] = pd.to_numeric(tower_data_sorted['belt'], errors='coerce')
-                tower_data_sorted = tower_data_sorted.sort_values(by=['belt_num', 'z'], ascending=[True, True], na_position='last')
-                tower_data_sorted = tower_data_sorted.drop(columns=['belt_num'])
-            
-            heights = sorted(tower_data_sorted['z'].unique())
-            for index, height in enumerate(heights):
-                df = tower_data_sorted[np.isclose(tower_data_sorted['z'], height)].copy()
-                if len(df) < 2:
-                    continue
-                df['belt'] = df.get('belt', None)
-                rows.extend(self._build_axis_rows_from_points(df, station_coords, section_label=f"{index + 1}", belt_sequence=None))
+    def _default_angular_verticality_payload(self) -> Dict[str, Any]:
+        return {
+            'x': [],
+            'y': [],
+            'rows_by_axis': {'x': [], 'y': []},
+            'sections': [],
+            'basis': self._build_angular_basis_metadata(),
+            'complete': False,
+            'vertical_check': self._empty_verticality_check(),
+        }
 
-        rows.sort(key=lambda r: (r['height'], r['belt']))
-        if not rows:
-            return rows
+    def get_angular_verticality_payload(self, tower_data: Optional[pd.DataFrame] = None) -> Dict[str, Any]:
+        """Возвращает единый payload журнала угловых измерений и вертикальности."""
+        use_cache = tower_data is None or tower_data is self._current_tower_data
+        if use_cache and self._angular_verticality_payload is not None:
+            return self._angular_verticality_payload
 
-        baseline_row = min(rows, key=lambda r: r.get('height', 0.0))
-        baseline_center = baseline_row.get('center_sec')
-        baseline_range = baseline_row.get('center_range_m', 0.0)
+        if tower_data is None:
+            try:
+                self._update_station_ids()
+                self._rebuild_cached_tower_data()
+            except Exception:
+                logger.exception("Не удалось подготовить кэш данных для angular_verticality")
+                payload = self._default_angular_verticality_payload()
+                if use_cache:
+                    self._angular_verticality_payload = payload
+                return payload
+            tower_data = self._current_tower_data if self._current_tower_data is not None else pd.DataFrame()
 
-        vertical_lookup = self._get_verticality_lookup()
+        try:
+            payload = self._build_angular_verticality_payload(tower_data)
+        except Exception:
+            logger.exception("Ошибка при формировании payload angular_verticality")
+            payload = self._default_angular_verticality_payload()
+            payload['sections'] = self._build_sections_from_processed_results([])
+            payload['vertical_check'] = self._build_verticality_check_from_sections(payload['sections'])
 
-        for row in rows:
-            center_sec = row.get('center_sec')
-            if center_sec is None or baseline_center is None:
-                row['delta_sec'] = None
-                row['delta_str'] = '—'
-                row['delta_mm'] = None
-                row['delta_mm_str'] = '—'
+        if use_cache:
+            self._angular_verticality_payload = payload
+        return payload
+
+    def _build_angular_verticality_payload(self, tower_data: pd.DataFrame) -> Dict[str, Any]:
+        payload = self._default_angular_verticality_payload()
+        section_entries = self._prepare_angular_sections(tower_data)
+        rows_by_axis: Dict[str, List[Dict[str, Any]]] = {'x': [], 'y': []}
+        axis_sections: Dict[str, Dict[str, Dict[str, Any]]] = {'x': {}, 'y': {}}
+        payload['basis'] = self._build_angular_basis_metadata()
+        has_required_stations = bool(payload['basis'].get('has_required_stations'))
+        has_authoritative_stations = bool(payload['basis'].get('has_authoritative_stations', has_required_stations))
+        fallback_sections = self._build_sections_from_processed_results(section_entries)
+
+        for axis in ('x', 'y'):
+            station_coords = self._get_station_for_axis(axis)
+            if station_coords is None:
                 continue
 
-            delta_sec = self._normalized_angle_diff(center_sec, baseline_center)
-            row['delta_sec'] = delta_sec
-            row['delta_str'] = f"{delta_sec:+.2f}\""
-
-            delta_mm_value: Optional[float] = None
-            if vertical_lookup is not None:
-                delta_mm_value = self._match_verticality_deviation(
-                    row.get('height'), axis, vertical_lookup,
+            raw_rows: List[Dict[str, Any]] = []
+            for section in section_entries:
+                points_df = section.get('points_df')
+                if points_df is None or points_df.empty or len(points_df) < 2:
+                    continue
+                raw_rows.extend(
+                    self._build_axis_rows_from_points(
+                        points_df,
+                        station_coords,
+                        section_label=str(section.get('section_label', '')),
+                        section_num=section.get('section_num'),
+                        part_num=section.get('part_num'),
+                        part_memberships=section.get('part_memberships'),
+                        section_height=section.get('height'),
+                        belt_sequence=section.get('belt_sequence'),
+                    )
                 )
 
-            if delta_mm_value is None:
-                range_m = row.get('center_range_m')
-                if range_m is None or range_m <= 0.0:
-                    range_m = baseline_range
-                if range_m is not None and range_m > 0.0:
-                    delta_rad = math.radians(delta_sec / 3600.0)
-                    delta_mm_value = math.tan(delta_rad) * range_m * 1000.0
+            finalized_rows, finalized_sections = self._finalize_axis_rows(axis, station_coords, raw_rows)
+            rows_by_axis[axis] = finalized_rows
+            axis_sections[axis] = finalized_sections
 
-            if delta_mm_value is not None:
-                row['delta_mm'] = float(delta_mm_value)
-                row['delta_mm_str'] = f"{delta_mm_value:+.1f}"
+        station_sections: List[Dict[str, Any]] = []
+        if has_required_stations:
+            station_sections = self._build_sections_from_axis_payload(axis_sections)
+            if has_authoritative_stations:
+                merged_sections = self._merge_station_sections_with_fallback(station_sections, fallback_sections)
             else:
-                row['delta_mm'] = None
-                row['delta_mm_str'] = '—'
-        return rows
+                merged_sections = fallback_sections or station_sections
+        else:
+            merged_sections = fallback_sections
 
-    def _build_rows_from_verticality(self, axis: str, station_coords: Tuple[float, float, float]) -> List[Dict[str, Any]]:
-        logger = logging.getLogger(__name__)
-        axis = (axis or 'x').lower()
+        payload['rows_by_axis'] = rows_by_axis
+        payload['x'] = rows_by_axis['x']
+        payload['y'] = rows_by_axis['y']
+        payload['sections'] = merged_sections
+        self._synchronize_axis_rows_with_sections(payload)
+        payload['complete'] = has_authoritative_stations and bool(merged_sections) and all(
+            bool(item.get('basis_complete')) for item in merged_sections
+        )
+        payload['vertical_check'] = self._build_verticality_check_from_sections(merged_sections)
+        return payload
+
+    @staticmethod
+    def _bearing_seconds_between_points(
+        from_xy: np.ndarray,
+        to_xy: np.ndarray,
+    ) -> Optional[float]:
+        vector = np.asarray(to_xy, dtype=float) - np.asarray(from_xy, dtype=float)
+        norm = float(np.linalg.norm(vector))
+        if norm < 1e-9:
+            return None
+        angle_deg = math.degrees(math.atan2(vector[1], vector[0])) % 360.0
+        return angle_deg * 3600.0
+
+    @staticmethod
+    def _station_axis_projection_mm(
+        station_xy: np.ndarray,
+        reference_xy: np.ndarray,
+        actual_xy: np.ndarray,
+    ) -> Optional[float]:
+        reference_vec = np.asarray(reference_xy, dtype=float) - np.asarray(station_xy, dtype=float)
+        ref_norm = float(np.linalg.norm(reference_vec))
+        if ref_norm < 1e-9:
+            return None
+        view_unit = reference_vec / ref_norm
+        normal_unit = np.array([-view_unit[1], view_unit[0]], dtype=float)
+        residual_xy = np.asarray(actual_xy, dtype=float) - np.asarray(reference_xy, dtype=float)
+        return float(np.dot(residual_xy, normal_unit) * 1000.0)
+
+    def _synchronize_axis_rows_with_sections(self, payload: Dict[str, Any]) -> None:
+        sections = payload.get('sections')
+        if not isinstance(sections, list) or not sections:
+            return
+
+        section_map = {
+            section.get('section_key'): section
+            for section in sections
+            if isinstance(section, dict) and section.get('section_key')
+        }
+        if not section_map:
+            return
+
+        has_both_axes = all(self._get_station_for_axis(axis) is not None for axis in ('x', 'y'))
+        section_axis_values: Dict[str, Dict[str, float]] = {}
+
+        for axis in ('x', 'y'):
+            station_coords = self._get_station_for_axis(axis)
+            if station_coords is None:
+                continue
+
+            station_xy = np.array([float(station_coords[0]), float(station_coords[1])], dtype=float)
+            rows = payload.get('rows_by_axis', {}).get(axis, [])
+            for row in rows:
+                section = section_map.get(row.get('section_key'))
+                if section is None:
+                    continue
+
+                center_xy = section.get('center_xy')
+                axis_point_xy = section.get('axis_point_xy')
+                if center_xy is None or axis_point_xy is None:
+                    continue
+
+                actual_xy = np.asarray(center_xy, dtype=float)
+                reference_xy = np.asarray(axis_point_xy, dtype=float)
+                measured_sec = self._bearing_seconds_between_points(station_xy, actual_xy)
+                reference_sec = self._bearing_seconds_between_points(station_xy, reference_xy)
+                delta_mm = self._station_axis_projection_mm(station_xy, reference_xy, actual_xy)
+                if measured_sec is None or reference_sec is None or delta_mm is None:
+                    continue
+
+                delta_sec = self._normalized_angle_diff(measured_sec, reference_sec)
+                row['reference_center_sec'] = float(reference_sec)
+                row['center_str'] = self._format_angle_seconds(reference_sec)
+                row['delta_sec'] = float(delta_sec)
+                row['delta_str'] = '0.00"' if abs(delta_sec) < 1e-9 else f"{float(delta_sec):+.2f}\""
+                row['delta_mm'] = float(delta_mm)
+                row['delta_mm_str'] = f"{float(delta_mm):+.1f}"
+
+                axis_values = section_axis_values.setdefault(str(section.get('section_key')), {})
+                axis_values[axis] = float(delta_mm)
+
+        if has_both_axes:
+            for section in sections:
+                axis_values = section_axis_values.get(str(section.get('section_key')))
+                if not axis_values:
+                    continue
+                if 'x' in axis_values:
+                    section['deviation_x'] = float(axis_values['x'])
+                if 'y' in axis_values:
+                    section['deviation_y'] = float(axis_values['y'])
+
+    def _match_section_points_from_tower_data(
+        self,
+        section: Dict[str, Any],
+        tower_df: pd.DataFrame,
+        tolerance: float = 0.3,
+    ) -> pd.DataFrame:
+        if tower_df is None or tower_df.empty or 'z' not in tower_df.columns:
+            return pd.DataFrame(columns=['x', 'y', 'z', 'belt'])
+
+        try:
+            section_height = float(section.get('height', 0.0) or 0.0)
+        except (TypeError, ValueError):
+            return pd.DataFrame(columns=['x', 'y', 'z', 'belt'])
+
+        numeric_z = pd.to_numeric(tower_df['z'], errors='coerce')
+        mask = numeric_z.notna() & (numeric_z.sub(section_height).abs() <= float(tolerance))
+
+        section_memberships = self._extract_part_memberships(section)
+        if section_memberships:
+            part_mask = pd.Series(False, index=tower_df.index)
+            if 'tower_part_memberships' in tower_df.columns:
+                for membership in section_memberships:
+                    encoded = tower_df['tower_part_memberships'].map(
+                        lambda value: membership in self._decode_part_memberships(value)
+                    )
+                    part_mask |= encoded.fillna(False)
+            if 'tower_part' in tower_df.columns:
+                numeric_parts = pd.to_numeric(tower_df['tower_part'], errors='coerce')
+                part_mask |= numeric_parts.isin(section_memberships)
+            if part_mask.any():
+                mask &= part_mask
+
+        belt_sequence = section.get('belt_nums', []) if isinstance(section.get('belt_nums'), (list, tuple)) else []
+        if belt_sequence and 'belt' in tower_df.columns:
+            belt_values = [self._safe_int(value) for value in belt_sequence]
+            belt_values = [value for value in belt_values if value is not None]
+            if belt_values:
+                numeric_belts = pd.to_numeric(tower_df['belt'], errors='coerce')
+                belt_mask = numeric_belts.isin(belt_values)
+                if (mask & belt_mask).any():
+                    mask &= belt_mask
+
+        points_df = tower_df[mask].copy()
+        if points_df.empty:
+            return pd.DataFrame(columns=['x', 'y', 'z', 'belt'])
+
+        if 'belt' not in points_df.columns:
+            points_df['belt'] = [None] * len(points_df)
+            return points_df
+
+        if belt_sequence:
+            belt_order = {
+                belt_num: order
+                for order, belt_num in enumerate(
+                    value for value in (self._safe_int(item) for item in belt_sequence) if value is not None
+                )
+            }
+            numeric_belts = pd.to_numeric(points_df['belt'], errors='coerce')
+            points_df = points_df.assign(
+                _belt_order=numeric_belts.map(lambda value: belt_order.get(self._safe_int(value), len(belt_order)))
+            ).sort_values(by=['_belt_order', 'z'], ascending=[True, True]).drop(columns=['_belt_order'])
+
+        return points_df
+
+    def _build_section_points_df_from_snapshot(self, section: Dict[str, Any]) -> pd.DataFrame:
+        points = section.get('points', []) or []
+        points_df = pd.DataFrame(points, columns=['x', 'y', 'z']) if points else pd.DataFrame(columns=['x', 'y', 'z'])
+        belt_sequence = section.get('belt_nums', []) if isinstance(section.get('belt_nums'), (list, tuple)) else None
+        if not points_df.empty:
+            if belt_sequence and len(belt_sequence) == len(points_df):
+                points_df['belt'] = list(belt_sequence)
+            else:
+                points_df['belt'] = [None] * len(points_df)
+        return points_df
+
+    def _prepare_angular_sections(self, tower_data: Optional[pd.DataFrame]) -> List[Dict[str, Any]]:
+        section_entries: List[Dict[str, Any]] = []
+        tower_df = tower_data.copy() if isinstance(tower_data, pd.DataFrame) else pd.DataFrame()
+
+        if self.editor_3d and hasattr(self.editor_3d, 'section_data') and self.editor_3d.section_data:
+            sections = sorted(self.editor_3d.section_data or [], key=lambda s: s.get('height', 0.0))
+            self._ensure_section_numbers(sections)
+            matched_current_sections = 0
+
+            for index, section in enumerate(sections):
+                points_df = self._match_section_points_from_tower_data(section, tower_df, tolerance=0.3)
+                if not points_df.empty:
+                    matched_current_sections += 1
+                elif tower_df.empty:
+                    points_df = self._build_section_points_df_from_snapshot(section)
+                else:
+                    continue
+
+                belt_sequence = section.get('belt_nums', []) if isinstance(section.get('belt_nums'), (list, tuple)) else None
+
+                section_num = self._safe_int(section.get('section_num'), index)
+                part_memberships = self._extract_part_memberships(section)
+                section_height = float(points_df['z'].mean()) if not points_df.empty and 'z' in points_df.columns else float(section.get('height', 0.0) or 0.0)
+                section_entries.append({
+                    'section_key': self._make_section_key(section_num, section_height),
+                    'section_num': section_num,
+                    'section_label': section.get('name') or section.get('label') or str(section_num),
+                    'height': section_height,
+                    'points_df': points_df,
+                    'belt_sequence': belt_sequence,
+                    'part_memberships': part_memberships,
+                    'part_num': part_memberships[0] if part_memberships else None,
+                })
+            if section_entries and matched_current_sections:
+                return section_entries
+
+        if tower_df.empty or 'z' not in tower_df.columns:
+            return []
+
+        numeric_z = pd.to_numeric(tower_df['z'], errors='coerce')
+        heights = sorted(numeric_z.dropna().unique())
+        for index, height in enumerate(heights):
+            points_df = tower_df[np.isclose(numeric_z, height)].copy()
+            if points_df.empty:
+                continue
+            if 'belt' not in points_df.columns:
+                points_df['belt'] = [None] * len(points_df)
+            section_num = index
+            part_memberships = self._extract_part_memberships(points_df)
+            section_entries.append({
+                'section_key': self._make_section_key(section_num, height),
+                'section_num': section_num,
+                'section_label': str(section_num),
+                'height': float(height),
+                'points_df': points_df,
+                'belt_sequence': None,
+                'part_memberships': part_memberships,
+                'part_num': part_memberships[0] if part_memberships else None,
+            })
+        return section_entries
+
+    def _extract_part_memberships(self, source: Any) -> List[int]:
+        memberships = set()
+
+        if isinstance(source, pd.DataFrame):
+            if 'tower_part_memberships' in source.columns:
+                for value in source['tower_part_memberships'].dropna():
+                    memberships.update(self._decode_part_memberships(value))
+            if not memberships and 'tower_part' in source.columns:
+                for value in source['tower_part'].dropna().tolist():
+                    safe_value = self._safe_int(value)
+                    if safe_value is not None:
+                        memberships.add(safe_value)
+            if not memberships and 'segment' in source.columns:
+                for value in source['segment'].dropna().tolist():
+                    safe_value = self._safe_int(value)
+                    if safe_value is not None:
+                        memberships.add(safe_value)
+            return sorted(memberships)
+
+        if isinstance(source, dict):
+            memberships.update(self._decode_part_memberships(source.get('tower_part_memberships')))
+            if not memberships:
+                safe_value = self._safe_int(source.get('tower_part'))
+                if safe_value is not None:
+                    memberships.add(safe_value)
+            if not memberships:
+                safe_value = self._safe_int(source.get('segment'))
+                if safe_value is not None:
+                    memberships.add(safe_value)
+        return sorted(memberships)
+
+    @staticmethod
+    def _section_height_tolerance(entries: List[Dict[str, Any]]) -> float:
+        heights = sorted(
+            {
+                round(float(entry.get('height', 0.0) or 0.0), 6)
+                for entry in entries
+                if entry.get('height') is not None
+            }
+        )
+        if len(heights) > 1:
+            min_step = min(abs(heights[idx] - heights[idx - 1]) for idx in range(1, len(heights)))
+            return max(0.05, min(1.5, float(min_step) * 0.6))
+        return 0.3
+
+    def _match_section_entry_by_height(
+        self,
+        height: float,
+        section_entries: List[Dict[str, Any]],
+        tolerance: Optional[float] = None,
+    ) -> Optional[Dict[str, Any]]:
+        if not section_entries:
+            return None
+        tolerance = self._section_height_tolerance(section_entries) if tolerance is None else tolerance
+
+        matched_entry = None
+        matched_diff = float('inf')
+        for entry in section_entries:
+            entry_height = entry.get('height')
+            if entry_height is None:
+                continue
+            diff = abs(float(entry_height) - float(height))
+            if diff <= tolerance and diff < matched_diff:
+                matched_entry = entry
+                matched_diff = diff
+        return matched_entry
+
+    @staticmethod
+    def _infer_mm_scale(series: pd.Series) -> float:
+        numeric = pd.to_numeric(series, errors='coerce').to_numpy(dtype=float)
+        valid = numeric[np.isfinite(numeric)]
+        if valid.size == 0:
+            return 1.0
+        return 1000.0 if float(np.nanmax(np.abs(valid))) < 2.0 else 1.0
+
+    def _build_axis_based_sections_from_centers(
+        self,
+        center_rows: List[Dict[str, Any]],
+        *,
+        source: str,
+    ) -> List[Dict[str, Any]]:
+        if not center_rows:
+            return []
+
+        centers_df = pd.DataFrame(
+            [
+                {
+                    'section_key': row.get('section_key'),
+                    'section_num': row.get('section_num'),
+                    'section_label': row.get('section_label'),
+                    'x': float(row['center_xy'][0]),
+                    'y': float(row['center_xy'][1]),
+                    'z': float(row.get('height', 0.0) or 0.0),
+                    'tower_part': row.get('part_num'),
+                    'tower_part_memberships': json.dumps(row.get('part_memberships', []) or [], ensure_ascii=False),
+                }
+                for row in center_rows
+                if row.get('center_xy') is not None
+            ]
+        )
+        if centers_df.empty:
+            return []
+
+        centers_df = centers_df.sort_values('z').reset_index(drop=True)
+        primary_station = self._get_station_for_axis('x')
+        standing_point = {'x': 0.0, 'y': 0.0, 'z': 0.0}
+        if primary_station is not None:
+            standing_point = {
+                'x': float(primary_station[0]),
+                'y': float(primary_station[1]),
+                'z': float(primary_station[2]),
+            }
+
+        axis = approximate_tower_axis(centers_df)
+        local_cs = calculate_local_coordinate_system(centers_df, standing_point, None)
+        centers_with_vertical = calculate_vertical_deviation_with_local_cs(
+            centers_df,
+            axis,
+            local_cs,
+            standing_point,
+        )
+        by_key = {
+            row.get('section_key'): row
+            for _, row in centers_with_vertical.iterrows()
+        }
+
+        result: List[Dict[str, Any]] = []
+        for row in sorted(
+            center_rows,
+            key=lambda item: (
+                float(item.get('height', 0.0) or 0.0),
+                self._safe_int(item.get('section_num'), 10**9),
+            ),
+        ):
+            vertical_row = by_key.get(row.get('section_key'))
+            if vertical_row is None:
+                continue
+
+            height = float(row.get('height', 0.0) or 0.0)
+            z_diff = height - float(axis.get('z0', 0.0) or 0.0)
+            axis_point_xy = (
+                float(axis.get('x0', 0.0) or 0.0) + float(axis.get('dx', 0.0) or 0.0) * z_diff,
+                float(axis.get('y0', 0.0) or 0.0) + float(axis.get('dy', 0.0) or 0.0) * z_diff,
+            )
+            deviation_x_mm = float(vertical_row.get('deviation_x', 0.0) or 0.0) * 1000.0
+            deviation_y_mm = float(vertical_row.get('deviation_y', 0.0) or 0.0) * 1000.0
+            total_deviation_mm = float(vertical_row.get('deviation', 0.0) or 0.0) * 1000.0
+
+            merged_row = dict(row)
+            merged_row.update({
+                'axis_point_xy': axis_point_xy,
+                'local_deviation_x': deviation_x_mm,
+                'local_deviation_y': deviation_y_mm,
+                'deviation_x': deviation_x_mm,
+                'deviation_y': deviation_y_mm,
+                'total_deviation': total_deviation_mm,
+                'deviation': total_deviation_mm,
+                'tolerance': float(get_vertical_tolerance(height) * 1000.0),
+                'source': source,
+                'basis_complete': True,
+            })
+            result.append(merged_row)
+
+        return result
+
+    def _build_sections_from_processed_results(self, section_entries: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         results = self.processed_results
         if not results:
-            logger.debug("processed_results отсутствуют")
             return []
 
         centers = results.get('centers')
-        axis_params = results.get('axis')
-        local_cs = results.get('local_cs')
-        if centers is None or axis_params is None or local_cs is None:
-            logger.debug(
-                "Недостаточно данных вертикальности: centers=%s, axis=%s, local_cs=%s",
-                centers is not None,
-                axis_params is not None,
-                local_cs is not None,
-            )
+        if centers is None:
             return []
-        if not axis_params.get('valid', False) or not local_cs.get('valid', False):
-            logger.debug(
-                "Axis/local_cs недействительны (axis_valid=%s, local_valid=%s)",
-                axis_params.get('valid'),
-                local_cs.get('valid'),
-            )
-            return []
-
-        transform = self._build_local_transform(local_cs)
-        if transform is None:
-            logger.debug("Не удалось построить локальное преобразование")
-            return []
-        to_local_xy = transform['to_local_xy']
 
         if isinstance(centers, pd.DataFrame):
             centers_df = centers.copy()
@@ -1272,344 +1838,429 @@ class DataTableWidget(QWidget):
             try:
                 centers_df = pd.DataFrame(centers)
             except Exception:
-                logger.exception("Не удалось преобразовать centers в DataFrame")
+                logger.exception("Не удалось преобразовать centers в DataFrame для fallback-вертикальности")
                 return []
+
         if centers_df.empty:
-            logger.debug("centers_df пуст")
             return []
 
-        height_col = None
-        for candidate in ('z', 'height', 'belt_height'):
-            if candidate in centers_df.columns:
-                height_col = candidate
-                break
+        height_col = next((candidate for candidate in ('z', 'height', 'belt_height') if candidate in centers_df.columns), None)
         if height_col is None:
-            logger.debug("Не найдена колонка высоты в центрах")
             return []
 
-        deviation_col = 'deviation_x' if axis == 'x' else 'deviation_y'
-        if deviation_col not in centers_df.columns:
-            logger.debug("Колонка %s отсутствует в centers", deviation_col)
-            return []
+        axis = None
+        if all(column in centers_df.columns for column in ('x', 'y', height_col)):
+            axis_input = centers_df.rename(columns={height_col: 'z'})[['x', 'y', 'z']].copy()
+            axis = approximate_tower_axis(axis_input)
 
-        cols = ['x', 'y', 'z']
-        missing_xyz = [c for c in cols if c not in centers_df.columns]
-        for col in missing_xyz:
-            if col == 'z' and height_col in centers_df.columns:
-                centers_df['z'] = centers_df[height_col].astype(float)
-            else:
-                centers_df[col] = 0.0
+        scale_total = self._infer_mm_scale(centers_df['deviation']) if 'deviation' in centers_df.columns else 1.0
+        scale_x = self._infer_mm_scale(centers_df['deviation_x']) if 'deviation_x' in centers_df.columns else scale_total
+        scale_y = self._infer_mm_scale(centers_df['deviation_y']) if 'deviation_y' in centers_df.columns else scale_total
+        tolerance = self._section_height_tolerance(section_entries)
+        existing_nums = [self._safe_int(entry.get('section_num')) for entry in section_entries]
+        existing_nums = [num for num in existing_nums if num is not None]
+        next_section_num = (max(existing_nums) + 1) if existing_nums else 0
+        processed_sections: List[Dict[str, Any]] = []
 
-        try:
-            centers_df = centers_df[[height_col, 'x', 'y', 'z', deviation_col]].copy()
-        except KeyError:
-            logger.exception("Не удалось выбрать необходимые колонки из centers_df")
-            return []
- 
-        centers_df.rename(columns={height_col: 'height', deviation_col: 'deviation_axis'}, inplace=True)
-        centers_df = centers_df.loc[:, ~centers_df.columns.duplicated()]
-        centers_df['height'] = centers_df['height'].astype(float)
-        centers_df['deviation_axis'] = centers_df['deviation_axis'].astype(float)
-        centers_df.sort_values('height', inplace=True)
-
-        station_point = np.array([float(station_coords[0]), float(station_coords[1]), float(station_coords[2])], dtype=float)
-        station_local = to_local_xy(station_point)
-        logger.debug("Станция в локальных координатах: %s", station_local)
-
-        x0 = float(axis_params.get('x0', 0.0))
-        y0 = float(axis_params.get('y0', 0.0))
-        z0 = float(axis_params.get('z0', 0.0))
-        dx = float(axis_params.get('dx', 0.0))
-        dy = float(axis_params.get('dy', 0.0))
-
-        section_labels = self._prepare_section_label_index()
-
-        rows: List[Dict[str, Any]] = []
-        baseline_beta_sec: Optional[float] = None
-        baseline_height: Optional[float] = None
-        baseline_range_m: Optional[float] = None
-
-        for _, center_row in centers_df.iterrows():
-            height = float(center_row['height'])
-            deviation_axis = float(center_row['deviation_axis'])
-            if not np.isfinite(deviation_axis):
-                deviation_axis = 0.0
-
-            center_z = float(center_row['z']) if 'z' in center_row.index else height
-            center_global = np.array([
-                float(center_row['x']),
-                float(center_row['y']),
-                center_z,
-            ], dtype=float)
-            center_local = to_local_xy(center_global)
-
-            axis_point_global = np.array([
-                x0 + dx * (height - z0),
-                y0 + dy * (height - z0),
-                height,
-            ], dtype=float)
-            axis_local = to_local_xy(axis_point_global)
-
-            base_beta_deg = self._angle_from_local(station_local, axis_local)
-            base_beta_sec = base_beta_deg * 3600.0
-
-            range_m = np.linalg.norm(station_local - axis_local)
-            if range_m < 1e-6:
-                logger.debug("Секция H=%.3f: расстояние до оси слишком мало, пропуск", height)
+        for _, row in centers_df.sort_values(height_col).iterrows():
+            try:
+                height = float(row[height_col])
+            except (TypeError, ValueError):
                 continue
 
-            if baseline_beta_sec is None:
-                baseline_beta_sec = base_beta_sec
-                baseline_height = height
-                baseline_range_m = range_m
-
-            delta_rad = math.atan2(deviation_axis, range_m)
-            delta_sec = math.degrees(delta_rad) * 3600.0
-
-            beta_sec = self._normalize_angle_seconds(base_beta_sec + delta_sec)
-            beta_deg = beta_sec / 3600.0
-
-            diff_sec = 4.0
-            half_diff_deg = (diff_sec / 2.0) / 3600.0
-            kl_deg = (beta_deg + half_diff_deg) % 360.0
-            direct_kr_deg = (beta_deg - half_diff_deg) % 360.0
-            kr_deg = (direct_kr_deg + 180.0) % 360.0
-
-            kl_sec = kl_deg * 3600.0
-            direct_kr_sec = direct_kr_deg * 3600.0
-            kr_sec = kr_deg * 3600.0
-            diff_sec = self._normalized_angle_diff(kl_sec, direct_kr_sec)
-
-            delta_mm = deviation_axis * 1000.0
-
-            if baseline_beta_sec is not None:
-                delta_sec_norm = self._normalized_angle_diff(beta_sec, baseline_beta_sec)
+            matched_entry = self._match_section_entry_by_height(height, section_entries, tolerance=tolerance)
+            if matched_entry is not None:
+                section_num = matched_entry.get('section_num')
+                section_label = matched_entry.get('section_label')
+                part_num = matched_entry.get('part_num')
+                part_memberships = matched_entry.get('part_memberships', [])
             else:
-                delta_sec_norm = 0.0
+                section_num = next_section_num
+                section_label = str(section_num)
+                part_num = None
+                part_memberships = []
+                next_section_num += 1
 
-            section_label = self._match_section_label(height, section_labels)
-            if section_label is None:
-                section_label = f"{len(rows) + 1}"
+            deviation_x_mm = float(row.get('deviation_x', 0.0) or 0.0) * scale_x
+            deviation_y_mm = float(row.get('deviation_y', 0.0) or 0.0) * scale_y
+            if 'deviation' in row.index:
+                total_deviation_mm = float(row.get('deviation', 0.0) or 0.0) * scale_total
+            else:
+                total_deviation_mm = float(np.hypot(deviation_x_mm, deviation_y_mm))
 
-            center_range_m = np.linalg.norm(station_local - center_local)
+            center_xy = None
+            axis_point_xy = None
+            if 'x' in row.index and 'y' in row.index:
+                try:
+                    center_xy = (float(row.get('x', 0.0) or 0.0), float(row.get('y', 0.0) or 0.0))
+                except (TypeError, ValueError):
+                    center_xy = None
+            if axis and axis.get('valid'):
+                z_diff = height - float(axis.get('z0', 0.0) or 0.0)
+                axis_point_xy = (
+                    float(axis.get('x0', 0.0) or 0.0) + float(axis.get('dx', 0.0) or 0.0) * z_diff,
+                    float(axis.get('y0', 0.0) or 0.0) + float(axis.get('dy', 0.0) or 0.0) * z_diff,
+                )
 
-            row_data = {
+            processed_sections.append({
+                'section_key': self._make_section_key(section_num, height),
+                'section_num': section_num,
                 'section_label': section_label,
-                'belt': 'Центр',
                 'height': height,
-                'kl_sec': kl_sec,
-                'kr_sec': kr_sec,
-                'direct_kr_sec': direct_kr_sec,
-                'diff_sec': diff_sec,
-                'beta_sec': beta_sec,
-                'center_sec': beta_sec,
-                'center_range_m': center_range_m,
-                'center_str': self.seconds_to_dms_string(beta_sec),
-                'kl_str': self.degrees_to_dms_string(kl_deg),
-                'kr_str': self.degrees_to_dms_string(kr_deg),
-                'beta_str': self.seconds_to_dms_string(beta_sec),
-                'diff_str': f"{diff_sec:+.2f}\"",
-                'delta_sec': delta_sec_norm,
-                'delta_str': f"{delta_sec_norm:+.2f}\"",
-                'delta_mm': delta_mm,
-                'delta_mm_str': f"{delta_mm:+.1f}",
+                'center_xy': center_xy,
+                'axis_point_xy': axis_point_xy,
+                'local_deviation_x': float(deviation_x_mm),
+                'local_deviation_y': float(deviation_y_mm),
+                'deviation_x': float(deviation_x_mm),
+                'deviation_y': float(deviation_y_mm),
+                'total_deviation': float(total_deviation_mm),
+                'deviation': float(total_deviation_mm),
+                'part_num': part_num,
+                'part_memberships': list(part_memberships),
+                'tolerance': float(get_vertical_tolerance(height) * 1000.0),
+                'source': 'processed',
+                'basis_complete': False,
+            })
+
+        return processed_sections
+
+    def _finalize_axis_rows(
+        self,
+        axis: str,
+        station_coords: Tuple[float, float, float],
+        raw_rows: List[Dict[str, Any]],
+    ) -> Tuple[List[Dict[str, Any]], Dict[str, Dict[str, Any]]]:
+        if not raw_rows:
+            return [], {}
+
+        station_xy = np.array([float(station_coords[0]), float(station_coords[1])], dtype=float)
+        section_map: Dict[str, Dict[str, Any]] = {}
+
+        for row in raw_rows:
+            section_key = row.get('section_key')
+            if section_key is None:
+                continue
+            if section_key not in section_map:
+                section_map[section_key] = {
+                    'section_key': section_key,
+                    'section_num': row.get('section_num'),
+                    'section_label': row.get('section_label'),
+                    'height': float(row.get('height', 0.0) or 0.0),
+                    'center_sec': row.get('center_sec'),
+                    'center_xy': row.get('center_xy'),
+                    'center_range_m': row.get('center_range_m'),
+                    'part_num': row.get('part_num'),
+                    'part_memberships': list(row.get('part_memberships', []) or []),
+                    'center_ranges': [],
+                }
+            center_range_m = row.get('center_range_m')
+            if center_range_m is not None:
+                section_map[section_key]['center_ranges'].append(float(center_range_m))
+
+        for section in section_map.values():
+            center_ranges = [value for value in section.pop('center_ranges', []) if value is not None]
+            if center_ranges:
+                section['center_range_m'] = float(np.mean(center_ranges))
+
+        baseline_by_part: Dict[int, Dict[str, Any]] = {}
+        for section in section_map.values():
+            part_key = int(section['part_num']) if section.get('part_num') is not None else 0
+            current = baseline_by_part.get(part_key)
+            if current is None or section['height'] < current['height']:
+                baseline_by_part[part_key] = section
+
+        finalized_rows: List[Dict[str, Any]] = []
+        axis_sections: Dict[str, Dict[str, Any]] = {}
+
+        for row in sorted(
+            raw_rows,
+            key=lambda item: (
+                float(item.get('height', 0.0) or 0.0),
+                self._safe_int(item.get('section_num'), 10**9),
+                str(item.get('belt', '')),
+            ),
+        ):
+            section_key = row.get('section_key')
+            section = section_map.get(section_key)
+            if section is None:
+                continue
+
+            part_key = int(section['part_num']) if section.get('part_num') is not None else 0
+            baseline = baseline_by_part.get(part_key)
+            center_sec = section.get('center_sec')
+            baseline_center_sec = baseline.get('center_sec') if baseline is not None else None
+            center_xy = np.asarray(section.get('center_xy', (0.0, 0.0)), dtype=float)
+            baseline_xy = np.asarray(baseline.get('center_xy', (0.0, 0.0)), dtype=float) if baseline is not None else None
+            center_range_m = section.get('center_range_m')
+
+            delta_sec = None
+            delta_mm = None
+            normal_xy = None
+
+            if baseline is not None and center_sec is not None and baseline_center_sec is not None:
+                delta_sec = self._normalized_angle_diff(float(center_sec), float(baseline_center_sec))
+                baseline_view = baseline_xy - station_xy
+                baseline_norm = float(np.linalg.norm(baseline_view))
+                if baseline_norm >= 1e-9:
+                    view_unit = baseline_view / baseline_norm
+                    normal_xy = np.array([-view_unit[1], view_unit[0]], dtype=float)
+                    if section_key == baseline['section_key']:
+                        delta_sec = 0.0
+                        delta_mm = 0.0
+                    else:
+                        if center_range_m is not None:
+                            delta_rad = math.radians(float(delta_sec) / 3600.0)
+                            delta_mm = float(math.sin(delta_rad) * float(center_range_m) * 1000.0)
+                elif section_key == baseline['section_key']:
+                    delta_sec = 0.0
+                    delta_mm = 0.0
+
+            row_copy = dict(row)
+            row_copy['axis'] = axis
+            row_copy['center_sec'] = center_sec
+            row_copy['center_range_m'] = center_range_m
+            row_copy['center_str'] = self._format_angle_seconds(center_sec)
+            if delta_sec is None:
+                row_copy['delta_sec'] = None
+                row_copy['delta_str'] = '—'
+            else:
+                row_copy['delta_sec'] = float(delta_sec)
+                row_copy['delta_str'] = '0.00"' if abs(delta_sec) < 1e-9 else f"{float(delta_sec):+.2f}\""
+            if delta_mm is None:
+                row_copy['delta_mm'] = None
+                row_copy['delta_mm_str'] = '—'
+            else:
+                row_copy['delta_mm'] = float(delta_mm)
+                row_copy['delta_mm_str'] = f"{float(delta_mm):+.1f}"
+            finalized_rows.append(row_copy)
+
+            axis_sections[section_key] = {
+                'section_key': section_key,
+                'section_num': section.get('section_num'),
+                'section_label': section.get('section_label'),
+                'height': section.get('height'),
+                'deviation_mm': float(delta_mm) if delta_mm is not None else None,
+                'center_xy': tuple(center_xy.tolist()),
+                'center_sec': center_sec,
+                'center_range_m': float(center_range_m) if center_range_m is not None else None,
+                'part_num': section.get('part_num'),
+                'part_memberships': list(section.get('part_memberships', []) or []),
+                'normal_xy': tuple(normal_xy.tolist()) if normal_xy is not None else None,
+                'station_coords': [float(station_coords[0]), float(station_coords[1]), float(station_coords[2])],
+                'axis': axis,
+                'basis_complete': normal_xy is not None and delta_mm is not None,
             }
 
-            if baseline_height is not None and abs(height - baseline_height) < 1e-6:
-                row_data['delta_sec'] = 0.0
-                row_data['delta_str'] = '0.00"'
-                row_data['delta_mm'] = 0.0
-                row_data['delta_mm_str'] = '+0.0'
+        return finalized_rows, axis_sections
 
-            rows.append(row_data)
-
-        logger.debug("Итого сформировано %d строк для оси %s", len(rows), axis)
-        return rows
- 
-    def _get_verticality_lookup(self) -> Optional[Dict[str, Any]]:
-        """Формирует таблицу соответствия высот и отклонений по данным вертикальности."""
-        results = self.processed_results
-        if not results:
+    def _solve_station_shift(
+        self,
+        section_x: Optional[Dict[str, Any]],
+        section_y: Optional[Dict[str, Any]],
+    ) -> Optional[np.ndarray]:
+        if section_x is None or section_y is None:
             return None
-        centers = results.get('centers')
-        if centers is None:
+        if section_x.get('deviation_mm') is None or section_y.get('deviation_mm') is None:
             return None
-        if isinstance(centers, pd.DataFrame):
-            df = centers.copy()
-        else:
-            try:
-                df = pd.DataFrame(centers)
-            except Exception:
-                return None
-        if df.empty:
+        if section_x.get('normal_xy') is None or section_y.get('normal_xy') is None:
             return None
 
-        height_col = None
-        for candidate in ('z', 'height', 'belt_height'):
-            if candidate in df.columns:
-                height_col = candidate
-                break
-        if height_col is None:
+        matrix = np.array([section_x['normal_xy'], section_y['normal_xy']], dtype=float)
+        rhs = np.array([
+            float(section_x['deviation_mm']) / 1000.0,
+            float(section_y['deviation_mm']) / 1000.0,
+        ], dtype=float)
+        if abs(float(np.linalg.det(matrix))) < 1e-8:
             return None
-
-        required_cols = []
-        if 'deviation_x' in df.columns:
-            required_cols.append('deviation_x')
-        if 'deviation_y' in df.columns:
-            required_cols.append('deviation_y')
-        if not required_cols:
-            return None
-
-        heights = df[height_col].astype(float).to_numpy()
-        deviations: Dict[str, np.ndarray] = {}
-        for col in required_cols:
-            series = df[col].astype(float).to_numpy()
-            if series.size == 0:
-                deviations[col] = series
-                continue
-            max_abs = np.nanmax(np.abs(series))
-            scale = 1000.0 if np.isfinite(max_abs) and max_abs < 2.0 else 1.0
-            deviations[col] = series * scale
-
-        unique_heights = np.unique(np.round(heights, 6))
-        if unique_heights.size > 1:
-            min_step = np.min(np.diff(unique_heights))
-            # UI sections may be rounded/manual and differ from calculated center
-            # heights by up to about a meter. Prefer the processed verticality
-            # result over angular fallback whenever the nearest center is still
-            # clearly the same section.
-            tolerance = max(0.05, min(1.5, float(min_step) * 0.6))
-        else:
-            tolerance = 0.3
-
-        lookup = {
-            'heights': heights,
-            'tolerance': tolerance,
-        }
-        for col, values in deviations.items():
-            lookup[col] = values
-        return lookup
-
-    @staticmethod
-    def _match_verticality_deviation(height: Optional[float], axis: str, lookup: Dict[str, Any]) -> Optional[float]:
-        if height is None:
-            return None
-        heights = lookup.get('heights')
-        if heights is None or len(heights) == 0:
-            return None
-
-        axis = (axis or 'x').lower()
-        if axis == 'y':
-            deviations = lookup.get('deviation_y')
-        else:
-            deviations = lookup.get('deviation_x')
-        if deviations is None:
-            return None
-
-        heights_arr = np.asarray(heights, dtype=float)
-        deviations_arr = np.asarray(deviations, dtype=float)
-        if heights_arr.size == 0 or deviations_arr.size == 0:
-            return None
-
-        idx = int(np.argmin(np.abs(heights_arr - float(height))))
-        if not np.isfinite(heights_arr[idx]):
-            return None
-        tolerance = lookup.get('tolerance', 0.05)
-        if abs(heights_arr[idx] - float(height)) > tolerance:
-            return None
-        value = deviations_arr[idx]
-        if not np.isfinite(value):
-            return None
-        return float(value)
-
-    def _build_local_transform(self, local_cs: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         try:
-            origin = np.array(local_cs.get('origin', (0.0, 0.0, 0.0)), dtype=float)
-            origin_xy = origin[:2]
-            x_axis = np.array(local_cs.get('x_axis', (1.0, 0.0, 0.0)), dtype=float)[:2]
-            y_axis = np.array(local_cs.get('y_axis', (0.0, 1.0, 0.0)), dtype=float)[:2]
-        except Exception:
+            return np.linalg.solve(matrix, rhs)
+        except np.linalg.LinAlgError:
             return None
 
-        def _normalize(vec: np.ndarray) -> Optional[np.ndarray]:
-            norm = np.linalg.norm(vec)
-            if norm < 1e-9:
-                return None
-            return vec / norm
-
-        x_unit = _normalize(x_axis)
-        if x_unit is None:
-            x_unit = np.array([1.0, 0.0], dtype=float)
-        y_axis = y_axis - np.dot(y_axis, x_unit) * x_unit
-        y_unit = _normalize(y_axis)
-        if y_unit is None:
-            y_unit = np.array([-x_unit[1], x_unit[0]], dtype=float)
-
-        def to_local_xy(point: np.ndarray) -> np.ndarray:
-            point_xy = np.array(point, dtype=float)[:2]
-            vec = point_xy - origin_xy
-            return np.array([
-                np.dot(vec, x_unit),
-                np.dot(vec, y_unit),
-            ], dtype=float)
-
-        return {
-            'origin': origin,
-            'x_unit': x_unit,
-            'y_unit': y_unit,
-            'to_local_xy': to_local_xy,
-        }
-
     @staticmethod
-    def _angle_from_local(station_local: np.ndarray, target_local: np.ndarray) -> float:
-        vec = np.array(target_local, dtype=float) - np.array(station_local, dtype=float)
-        if np.linalg.norm(vec) < 1e-9:
-            return 0.0
-        angle = math.degrees(math.atan2(vec[1], vec[0]))
-        if angle < 0.0:
-            angle += 360.0
-        return angle
- 
-    def _prepare_section_label_index(self) -> List[Tuple[float, str]]:
-        if not self.editor_3d or not hasattr(self.editor_3d, 'section_data'):
-            return []
-        section_data = self.editor_3d.section_data or []
-        labels: List[Tuple[float, str]] = []
-        for section in section_data:
-            height = float(section.get('height', 0.0))
-            label = section.get('name') or section.get('label') or ''
-            if label and label.strip():
-                labels.append((height, str(label)))
-        labels.sort(key=lambda item: item[0])
-        return labels
-
-    @staticmethod
-    def _match_section_label(height: float, labels_index: List[Tuple[float, str]]) -> Optional[str]:
-        if not labels_index:
+    def _direction_from_angle_seconds(angle_sec: Optional[float]) -> Optional[np.ndarray]:
+        if angle_sec is None:
             return None
-        tolerance = 0.05
-        closest_label = None
-        closest_diff = float('inf')
-        for label_height, label in labels_index:
-            diff = abs(label_height - height)
-            if diff < closest_diff and diff <= tolerance:
-                closest_diff = diff
-                closest_label = label
-        return closest_label
+        angle_rad = math.radians(float(angle_sec) / 3600.0)
+        return np.array([math.cos(angle_rad), math.sin(angle_rad)], dtype=float)
 
-    @staticmethod
-    def _azimuth_deg(from_xy: np.ndarray, to_xy: np.ndarray) -> float:
-        vec = np.array(to_xy, dtype=float) - np.array(from_xy, dtype=float)
-        angle = math.degrees(math.atan2(vec[1], vec[0]))
-        if angle < 0.0:
-            angle += 360.0
-        return angle
+    def _intersect_station_rays(
+        self,
+        section_x: Optional[Dict[str, Any]],
+        section_y: Optional[Dict[str, Any]],
+    ) -> Optional[np.ndarray]:
+        if section_x is None or section_y is None:
+            return None
+        if section_x.get('center_sec') is None or section_y.get('center_sec') is None:
+            return None
+        if section_x.get('station_coords') is None or section_y.get('station_coords') is None:
+            return None
+
+        station_x = np.array(section_x['station_coords'][:2], dtype=float)
+        station_y = np.array(section_y['station_coords'][:2], dtype=float)
+        direction_x = self._direction_from_angle_seconds(section_x.get('center_sec'))
+        direction_y = self._direction_from_angle_seconds(section_y.get('center_sec'))
+        if direction_x is None or direction_y is None:
+            return None
+
+        matrix = np.column_stack((direction_x, -direction_y))
+        if abs(float(np.linalg.det(matrix))) < 1e-8:
+            return None
+        rhs = station_y - station_x
+        try:
+            parameters = np.linalg.solve(matrix, rhs)
+        except np.linalg.LinAlgError:
+            return None
+
+        return station_x + float(parameters[0]) * direction_x
+
+    def _build_sections_from_axis_payload(
+        self,
+        axis_sections: Dict[str, Dict[str, Dict[str, Any]]],
+    ) -> List[Dict[str, Any]]:
+        sections_x = axis_sections.get('x', {})
+        sections_y = axis_sections.get('y', {})
+        all_keys = set(sections_x.keys()) | set(sections_y.keys())
+        result: List[Dict[str, Any]] = []
+        baseline_by_part_x: Dict[int, Dict[str, Any]] = {}
+        baseline_by_part_y: Dict[int, Dict[str, Any]] = {}
+
+        for section in sections_x.values():
+            part_key = int(section['part_num']) if section.get('part_num') is not None else 0
+            current = baseline_by_part_x.get(part_key)
+            if current is None or float(section.get('height', 0.0) or 0.0) < float(current.get('height', 0.0) or 0.0):
+                baseline_by_part_x[part_key] = section
+
+        for section in sections_y.values():
+            part_key = int(section['part_num']) if section.get('part_num') is not None else 0
+            current = baseline_by_part_y.get(part_key)
+            if current is None or float(section.get('height', 0.0) or 0.0) < float(current.get('height', 0.0) or 0.0):
+                baseline_by_part_y[part_key] = section
+
+        for section_key in sorted(
+            all_keys,
+            key=lambda key: (
+                float((sections_x.get(key) or sections_y.get(key) or {}).get('height', 0.0) or 0.0),
+                self._safe_int((sections_x.get(key) or sections_y.get(key) or {}).get('section_num'), 10**9),
+            ),
+        ):
+            section_x = sections_x.get(section_key)
+            section_y = sections_y.get(section_key)
+            meta = section_x or section_y
+            if meta is None:
+                continue
+
+            part_key = int(meta['part_num']) if meta.get('part_num') is not None else 0
+            baseline_section_x = baseline_by_part_x.get(part_key)
+            baseline_section_y = baseline_by_part_y.get(part_key)
+
+            shift_xy = None
+            current_center_xy = self._intersect_station_rays(section_x, section_y)
+            baseline_center_xy = self._intersect_station_rays(baseline_section_x, baseline_section_y)
+            if current_center_xy is not None and baseline_center_xy is not None:
+                shift_xy = current_center_xy - baseline_center_xy
+            else:
+                shift_xy = self._solve_station_shift(section_x, section_y)
+            if current_center_xy is None and shift_xy is not None and baseline_center_xy is not None:
+                current_center_xy = baseline_center_xy + shift_xy
+            if current_center_xy is None and meta.get('center_xy') is not None:
+                current_center_xy = np.asarray(meta.get('center_xy'), dtype=float)
+
+            height = float(meta.get('height', 0.0) or 0.0)
+            result.append({
+                'section_key': section_key,
+                'section_num': meta.get('section_num'),
+                'section_label': meta.get('section_label'),
+                'height': height,
+                'part_num': meta.get('part_num'),
+                'part_memberships': list(meta.get('part_memberships', []) or []),
+                'center_xy': tuple(current_center_xy.tolist()) if current_center_xy is not None else None,
+                'station_deviation_x': float(section_x.get('deviation_mm', 0.0) or 0.0) if section_x is not None else 0.0,
+                'station_deviation_y': float(section_y.get('deviation_mm', 0.0) or 0.0) if section_y is not None else 0.0,
+                'resolved_shift_xy_mm': [float(shift_xy[0] * 1000.0), float(shift_xy[1] * 1000.0)] if shift_xy is not None else None,
+            })
+
+        return self._build_axis_based_sections_from_centers(result, source='stations')
+
+    def _merge_station_sections_with_fallback(
+        self,
+        station_sections: List[Dict[str, Any]],
+        fallback_sections: List[Dict[str, Any]],
+    ) -> List[Dict[str, Any]]:
+        station_map = {item['section_key']: dict(item) for item in station_sections if item.get('section_key')}
+        fallback_map = {item['section_key']: dict(item) for item in fallback_sections if item.get('section_key')}
+        all_keys = set(station_map.keys()) | set(fallback_map.keys())
+        merged: List[Dict[str, Any]] = []
+
+        for section_key in sorted(
+            all_keys,
+            key=lambda key: (
+                float((station_map.get(key) or fallback_map.get(key) or {}).get('height', 0.0) or 0.0),
+                self._safe_int((station_map.get(key) or fallback_map.get(key) or {}).get('section_num'), 10**9),
+            ),
+        ):
+            station_section = station_map.get(section_key)
+            fallback_section = fallback_map.get(section_key)
+
+            if station_section is not None and station_section.get('total_deviation') is not None:
+                merged_item = dict(station_section)
+            elif fallback_section is not None:
+                merged_item = dict(fallback_section)
+                if station_section is not None:
+                    merged_item['source'] = 'processed_fallback'
+                    merged_item['station_deviation_x'] = station_section.get('deviation_x')
+                    merged_item['station_deviation_y'] = station_section.get('deviation_y')
+                    merged_item['station_total_deviation'] = station_section.get('total_deviation')
+            elif station_section is not None:
+                merged_item = dict(station_section)
+                available = [
+                    abs(float(value))
+                    for value in (merged_item.get('deviation_x'), merged_item.get('deviation_y'))
+                    if value is not None
+                ]
+                total_deviation = max(available) if available else 0.0
+                merged_item['total_deviation'] = float(total_deviation)
+                merged_item['deviation'] = float(total_deviation)
+                merged_item['source'] = 'stations_partial'
+            else:
+                continue
+
+            height = float(merged_item.get('height', 0.0) or 0.0)
+            merged_item.setdefault('tolerance', float(get_vertical_tolerance(height) * 1000.0))
+            merged.append(merged_item)
+
+        return merged
+
+    def _build_verticality_check_from_sections(self, sections: List[Dict[str, Any]]) -> Dict[str, Any]:
+        valid_sections = [
+            item for item in sections
+            if item.get('height') is not None and item.get('total_deviation') is not None
+        ]
+        if not valid_sections:
+            return self._empty_verticality_check()
+
+        deviations_m = [float(item['total_deviation']) / 1000.0 for item in valid_sections]
+        heights_m = [float(item['height']) for item in valid_sections]
+        result = NormativeChecker().check_vertical_deviations(deviations_m, heights_m)
+
+        for collection_name in ('compliant', 'non_compliant'):
+            for item in result.get(collection_name, []):
+                source_section = valid_sections[item.get('index', 0)]
+                item['section_num'] = source_section.get('section_num')
+                item['part_num'] = source_section.get('part_num')
+
+        return result
+
 
     def _build_axis_rows_from_points(
         self,
         points_df: pd.DataFrame,
         station_coords: Tuple[float, float, float],
         section_label: str,
+        section_num: Optional[int],
+        part_num: Optional[int],
+        part_memberships: Optional[Iterable[int]],
+        section_height: Optional[float],
         belt_sequence: Optional[Iterable[Any]] = None,
     ) -> List[Dict[str, Any]]:
         if points_df is None or points_df.empty:
@@ -1627,7 +2278,10 @@ class DataTableWidget(QWidget):
             center_bearing_deg = math.degrees(math.atan2(view_vec[1], view_vec[0])) % 360.0
         perp_dir = np.array([-view_dir[1], view_dir[0]])
 
-        height = float(points_df['z'].mean())
+        if section_height is None or pd.isna(section_height):
+            height = float(points_df['z'].mean())
+        else:
+            height = float(section_height)
         center_sec = self._normalize_angle_seconds(center_bearing_deg * 3600.0)
         center_range_m = float(view_norm if view_norm >= 1e-6 else 0.0)
 
@@ -1725,6 +2379,9 @@ class DataTableWidget(QWidget):
         rows = []
         rows.append(self._create_angle_row_from_bearings(
             section_label=section_label,
+            section_num=section_num,
+            part_num=part_num,
+            part_memberships=part_memberships,
             height=height,
             side_label=f"Левый (Пояс {left_entry['belt']})" if left_entry['belt'] is not None else 'Левый',
             bearing_deg=left_entry['bearing'],
@@ -1734,6 +2391,9 @@ class DataTableWidget(QWidget):
         ))
         rows.append(self._create_angle_row_from_bearings(
             section_label=section_label,
+            section_num=section_num,
+            part_num=part_num,
+            part_memberships=part_memberships,
             height=height,
             side_label=f"Правый (Пояс {right_entry['belt']})" if right_entry['belt'] is not None else 'Правый',
             bearing_deg=right_entry['bearing'],
@@ -1746,6 +2406,9 @@ class DataTableWidget(QWidget):
     def _create_angle_row_from_bearings(
         self,
         section_label: str,
+        section_num: Optional[int],
+        part_num: Optional[int],
+        part_memberships: Optional[Iterable[int]],
         height: float,
         side_label: str,
         bearing_deg: float,
@@ -1753,22 +2416,27 @@ class DataTableWidget(QWidget):
         center_range_m: float,
         center_xy: Tuple[float, float],
     ) -> Optional[Dict[str, Any]]:
-        bearing_deg = bearing_deg % 360.0
-        kl_deg = bearing_deg
-        kl_sec = kl_deg * 3600.0
-
-        kr_deg = (kl_deg + 180.0) % 360.0
-        base_kr_sec = kr_deg * 3600.0
-        jitter = float((hash((section_label, side_label)) % 5) - 2)
-        kr_sec = base_kr_sec + jitter
-
-        direct_kr_sec = self._normalize_angle_seconds(kr_sec - 648000.0)
-        diff_sec = self._normalized_angle_diff(kl_sec, direct_kr_sec)
+        target_sec = self._normalize_angle_seconds((bearing_deg % 360.0) * 3600.0)
+        diff_sec = self._deterministic_circle_difference_seconds(
+            section_num=section_num,
+            section_label=section_label,
+            side_label=side_label,
+            height=height,
+            target_sec=target_sec,
+        )
+        half_diff_sec = diff_sec / 2.0
+        kl_sec = self._normalize_angle_seconds(target_sec + half_diff_sec)
+        direct_kr_sec = self._normalize_angle_seconds(target_sec - half_diff_sec)
+        kr_sec = self._normalize_angle_seconds(direct_kr_sec + 648000.0)
 
         beta_sec = self._compute_beta_seconds(kl_sec, kr_sec)
 
         return {
+            'section_key': self._make_section_key(section_num, height),
+            'section_num': section_num,
             'section_label': section_label,
+            'part_num': part_num,
+            'part_memberships': list(part_memberships or []),
             'belt': side_label,
             'height': height,
             'kl_sec': kl_sec,
@@ -1779,11 +2447,11 @@ class DataTableWidget(QWidget):
             'center_sec': center_sec,
             'center_range_m': center_range_m,
             'center_xy': center_xy,
-            'kl_str': self.degrees_to_dms_string(kl_deg),
-            'kr_str': self.degrees_to_dms_string((kr_sec / 3600.0) % 360.0),
-            'diff_str': f"{diff_sec:+.2f}\"",
-            'beta_str': self.seconds_to_dms_string(beta_sec),
-            'center_str': self.seconds_to_dms_string(center_sec),
+            'kl_str': self._format_angle_seconds(kl_sec),
+            'kr_str': self._format_angle_seconds(kr_sec),
+            'diff_str': '0.00"' if abs(diff_sec) < 1e-9 else f"{diff_sec:+.2f}\"",
+            'beta_str': self._format_angle_seconds(beta_sec),
+            'center_str': self._format_angle_seconds(center_sec),
             'delta_mm': None,
             'delta_mm_str': '—',
         }
@@ -1813,6 +2481,26 @@ class DataTableWidget(QWidget):
         if angle_deg < 0:
             angle_deg += 360.0
         return angle_deg * 3600.0
+
+    @classmethod
+    def _format_angle_seconds(cls, angle_sec: Optional[float]) -> str:
+        if angle_sec is None:
+            return '—'
+        return cls.degrees_to_dms_string((float(angle_sec) / 3600.0) % 360.0)
+
+    @staticmethod
+    def _deterministic_circle_difference_seconds(
+        *,
+        section_num: Optional[int],
+        section_label: str,
+        side_label: str,
+        height: float,
+        target_sec: float,
+    ) -> float:
+        signature = f"{section_num}|{section_label}|{side_label}|{height:.3f}|{target_sec:.3f}"
+        checksum = sum((index + 1) * ord(char) for index, char in enumerate(signature))
+        pattern = (-2.0, -1.0, 0.0, 1.0, 2.0)
+        return pattern[checksum % len(pattern)]
 
     @staticmethod
     def offset_to_angle_seconds(offset: float, height: float) -> float:
@@ -2133,6 +2821,7 @@ class DataTableWidget(QWidget):
     
     def on_station_item_changed(self, item):
         """Обработчик изменения ячейки в таблице точек стояния"""
+        self._invalidate_angular_verticality_cache()
         idx_item = self.station_table.item(item.row(), 0)
         global_idx = None
         if idx_item is not None:
@@ -2186,6 +2875,7 @@ class DataTableWidget(QWidget):
     
     def on_tower_item_changed(self, item):
         """Обработчик изменения ячейки в таблице точек башни"""
+        self._invalidate_angular_verticality_cache()
         table = item.tableWidget() if hasattr(item, 'tableWidget') else None
         if table is None:
             table = self.tower_table
@@ -3223,21 +3913,11 @@ class DataTableWidget(QWidget):
         self.populate_station_table()
         self._update_station_selection(state_id=current_selection)
 
-    def get_angular_measurements(self) -> Dict[str, List[Dict[str, Any]]]:
-        """Возвращает данные угловых измерений по осям X и Y."""
-        if self.original_data is None or self.original_data.empty:
-            return {'x': [], 'y': []}
-
+    def get_angular_measurements(self) -> Dict[str, Any]:
+        """Возвращает данные угловых измерений и агрегированную вертикальность."""
         try:
-            self._update_station_ids()
-            self._rebuild_cached_tower_data()
+            payload = self.get_angular_verticality_payload()
         except Exception:
-            return {'x': [], 'y': []}
-
-        tower_data = self._current_tower_data if self._current_tower_data is not None else pd.DataFrame()
-        if tower_data is None or tower_data.empty:
-            return {'x': [], 'y': []}
-
-        rows_x = self.compute_axis_rows(tower_data, axis='x')
-        rows_y = self.compute_axis_rows(tower_data, axis='y')
-        return {'x': rows_x, 'y': rows_y}
+            logger.exception("Не удалось получить payload угловых измерений")
+            return self._default_angular_verticality_payload()
+        return payload

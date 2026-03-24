@@ -260,24 +260,36 @@ class CalculationService:
             return {'passed': 0, 'failed': 0, 'violations': []}
 
         try:
-            summary = results.get('straightness_summary')
-            if isinstance(summary, dict):
-                violations = []
-                for violation in summary.get('violations', []):
-                    violations.append({
-                        'belt_height': float(violation.get('height_m', 0.0)),
-                        'deviation': float(violation.get('deviation_mm', 0.0)) / 1000.0,
-                        'section_length': float(violation.get('section_length_m', 0.0)),
-                        'normative': float(violation.get('tolerance_mm', 0.0)) / 1000.0,
-                        'part_number': int(violation.get('part_number', 1)),
-                        'belt': int(violation.get('belt', 0)),
-                    })
+            angular_payload = results.get('angular_verticality')
+            if isinstance(angular_payload, dict):
+                sections = angular_payload.get('sections', [])
+                valid_sections = [
+                    item for item in sections
+                    if isinstance(item, dict)
+                    and item.get('height') is not None
+                    and item.get('total_deviation') is not None
+                ]
+                if valid_sections:
+                    deviations = [float(item['total_deviation']) / 1000.0 for item in valid_sections]
+                    heights = [float(item['height']) for item in valid_sections]
+                    check_result = self.normative_checker.check_vertical_deviations(deviations, heights)
 
-                return {
-                    'passed': int(summary.get('passed', 0)),
-                    'failed': int(summary.get('failed', 0)),
-                    'violations': violations,
-                }
+                    violations = []
+                    for item in check_result.get('non_compliant', []):
+                        source_section = valid_sections[item.get('index', 0)]
+                        violations.append({
+                            'belt_height': item.get('height', 0.0),
+                            'deviation': item.get('deviation', 0.0),
+                            'normative': item.get('tolerance', 0.0),
+                            'section_num': source_section.get('section_num'),
+                            'part_num': source_section.get('part_num'),
+                        })
+
+                    return {
+                        'passed': check_result.get('passed', 0),
+                        'failed': check_result.get('failed', 0),
+                        'violations': violations,
+                    }
 
             centers = results['centers']
             if centers.empty:

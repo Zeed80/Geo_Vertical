@@ -63,6 +63,43 @@ class EnhancedReportGenerator:
         if not angular_measurements:
             return []
 
+        canonical_sections = angular_measurements.get('sections')
+        if isinstance(canonical_sections, list) and canonical_sections:
+            result = []
+            for item in canonical_sections:
+                if not isinstance(item, dict):
+                    continue
+                height = item.get('height')
+                if height is None:
+                    continue
+                total_dev = item.get('total_deviation', item.get('deviation'))
+                if total_dev is None:
+                    continue
+                result.append({
+                    'section_num': item.get('section_num'),
+                    'height': float(height),
+                    'deviation_x': float(item.get('deviation_x', 0.0) or 0.0),
+                    'deviation_y': float(item.get('deviation_y', 0.0) or 0.0),
+                    'total_deviation': float(total_dev),
+                    'deviation': float(total_dev),
+                    'tolerance': item.get('tolerance'),
+                    'part_num': item.get('part_num'),
+                    'source': item.get('source'),
+                })
+            if result:
+                result.sort(
+                    key=lambda row: (
+                        float(row.get('height', 0.0) or 0.0),
+                        row.get('section_num') if row.get('section_num') is not None else 10**9,
+                    )
+                )
+                return result
+
+        basis = angular_measurements.get('basis', {})
+        has_authoritative_stations = basis.get('has_authoritative_stations', basis.get('has_required_stations'))
+        if basis.get('requires_two_stations') and not has_authoritative_stations:
+            return []
+
         rows_x = angular_measurements.get('x', [])
         rows_y = angular_measurements.get('y', [])
 
@@ -674,7 +711,11 @@ class EnhancedReportGenerator:
 
             # Приоритет: данные из угловых измерений, затем из виджета вертикальности, затем стандартный способ
             verticality_data_from_angular = None
-            if angular_measurements and (angular_measurements.get('x') or angular_measurements.get('y')):
+            if angular_measurements and (
+                angular_measurements.get('x')
+                or angular_measurements.get('y')
+                or angular_measurements.get('sections')
+            ):
                 try:
                     verticality_data_from_angular = self._aggregate_angular_measurements_by_sections(angular_measurements)
                 except Exception as e:
@@ -1462,7 +1503,11 @@ class EnhancedReportGenerator:
             # Приоритет: данные из угловых измерений, затем из виджета вертикальности, затем стандартный способ
             used_widget_data = False
             verticality_data_from_angular = None
-            if angular_measurements and (angular_measurements.get('x') or angular_measurements.get('y')):
+            if angular_measurements and (
+                angular_measurements.get('x')
+                or angular_measurements.get('y')
+                or angular_measurements.get('sections')
+            ):
                 try:
                     verticality_data_from_angular = self._aggregate_angular_measurements_by_sections(angular_measurements)
                 except Exception as e:

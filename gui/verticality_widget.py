@@ -280,6 +280,99 @@ class VerticalityWidget(QWidget):
         
         return sorted(parts) if parts else [1]
     
+    @staticmethod
+    def _infer_mm_scale(series: pd.Series) -> float:
+        numeric = pd.to_numeric(series, errors='coerce').to_numpy(dtype=float)
+        valid = numeric[np.isfinite(numeric)]
+        if valid.size == 0:
+            return 1.0
+        return 1000.0 if float(np.nanmax(np.abs(valid))) < 2.0 else 1.0
+
+    @staticmethod
+    def _section_height_tolerance(section_data_list: List[Dict]) -> float:
+        heights = sorted(
+            {
+                round(float(section.get('height', 0.0) or 0.0), 6)
+                for section in section_data_list
+                if section.get('height') is not None
+            }
+        )
+        if len(heights) > 1:
+            min_step = min(abs(heights[idx] - heights[idx - 1]) for idx in range(1, len(heights)))
+            return max(0.05, min(1.5, float(min_step) * 0.6))
+        return 0.3
+
+    def _build_sections_from_processed_centers(self) -> List[Dict]:
+        if not isinstance(self.processed_data, dict):
+            return []
+
+        centers = self.processed_data.get('centers')
+        if not isinstance(centers, pd.DataFrame) or centers.empty:
+            return []
+
+        if not (self.editor_3d and hasattr(self.editor_3d, 'section_data') and self.editor_3d.section_data):
+            return []
+
+        section_data_list = sorted(self.editor_3d.section_data, key=lambda s: s.get('height', 0.0))
+        self._number_sections_sequentially(section_data_list)
+        height_col = next((candidate for candidate in ('z', 'height', 'belt_height') if candidate in centers.columns), None)
+        if height_col is None:
+            return []
+
+        scale_total = self._infer_mm_scale(centers['deviation']) if 'deviation' in centers.columns else 1.0
+        scale_x = self._infer_mm_scale(centers['deviation_x']) if 'deviation_x' in centers.columns else scale_total
+        scale_y = self._infer_mm_scale(centers['deviation_y']) if 'deviation_y' in centers.columns else scale_total
+        height_tolerance = self._section_height_tolerance(section_data_list)
+        result: List[Dict] = []
+
+        for _, row in centers.sort_values(height_col).iterrows():
+            try:
+                height = float(row[height_col])
+            except (TypeError, ValueError):
+                continue
+
+            matched_section = None
+            matched_diff = float('inf')
+            for section in section_data_list:
+                section_height = section.get('height')
+                if section_height is None:
+                    continue
+                diff = abs(float(section_height) - height)
+                if diff <= height_tolerance and diff < matched_diff:
+                    matched_section = section
+                    matched_diff = diff
+
+            deviation_x_mm = float(row.get('deviation_x', 0.0) or 0.0) * scale_x
+            deviation_y_mm = float(row.get('deviation_y', 0.0) or 0.0) * scale_y
+            total_deviation_mm = (
+                float(row.get('deviation', 0.0) or 0.0) * scale_total
+                if 'deviation' in row.index
+                else float(np.hypot(deviation_x_mm, deviation_y_mm))
+            )
+
+            part_num = None
+            section_num = len(result)
+            if matched_section is not None:
+                section_num = matched_section.get('section_num', section_num)
+                tower_part = matched_section.get('tower_part')
+                if tower_part is not None:
+                    part_num = tower_part
+                elif matched_section.get('tower_part_memberships'):
+                    memberships = self._decode_part_memberships(matched_section.get('tower_part_memberships'))
+                    if memberships:
+                        part_num = memberships[0]
+
+            result.append({
+                'section_num': section_num,
+                'height': height,
+                'deviation_x': deviation_x_mm,
+                'deviation_y': deviation_y_mm,
+                'total_deviation': total_deviation_mm,
+                'part_num': part_num,
+            })
+
+        return result
+
     def _calculate_section_deviations(self):
         """Рассчитать отклонения от вертикали для каждой секции
         
@@ -298,10 +391,22 @@ class VerticalityWidget(QWidget):
             List[Dict]: Список словарей с данными секций
         """
         # Приоритетно используем данные из таблицы угловых измерений
+        if not (self.data_table_widget and hasattr(self.data_table_widget, 'get_angular_measurements')):
+            processed_sections = self._build_sections_from_processed_centers()
+            if processed_sections:
+                logger.info(f"Using processed centers for verticality: {len(processed_sections)} sections")
+                return processed_sections
+
         if self.data_table_widget and hasattr(self.data_table_widget, 'get_angular_measurements'):
             try:
+                if hasattr(self.data_table_widget, 'ensure_complete_angular_station_basis'):
+                    self.data_table_widget.ensure_complete_angular_station_basis(interactive=False)
                 angular_measurements = self.data_table_widget.get_angular_measurements()
-                if angular_measurements and (angular_measurements.get('x') or angular_measurements.get('y')):
+                if angular_measurements and (
+                    angular_measurements.get('x')
+                    or angular_measurements.get('y')
+                    or angular_measurements.get('sections')
+                ):
                     # Агрегируем данные угловых измерений по секциям
                     from utils.report_generator_enhanced import EnhancedReportGenerator
                     angular_result = EnhancedReportGenerator._aggregate_angular_measurements_by_sections(angular_measurements)
@@ -364,6 +469,11 @@ class VerticalityWidget(QWidget):
                             return angular_result
             except Exception as e:
                 logger.warning(f"Не удалось получить данные из таблицы угловых измерений: {e}")
+
+        processed_sections = self._build_sections_from_processed_centers()
+        if processed_sections:
+            logger.info(f"Используем рассчитанные центры секций (fallback): {len(processed_sections)} секций")
+            return processed_sections
         
         # Fallback: расчет на основе центров секций
         logger.info("Используем расчет на основе центров секций (fallback)")
@@ -614,11 +724,11 @@ class VerticalityWidget(QWidget):
         for i in range(self.deviation_table.rowCount()):
             section_item = self.deviation_table.item(i, 0)  # № секции
             height_item = self.deviation_table.item(i, 1)   # Высота
-            dev_x_item = self.deviation_table.item(i, 2)    # Отклонение X
-            dev_y_item = self.deviation_table.item(i, 3)    # Отклонение Y
-            total_item = self.deviation_table.item(i, 4)    # Суммарное отклонение
-            tolerance_item = self.deviation_table.item(i, 5) # Допустимое
-            
+            dev_x_item = self.deviation_table.item(i, 3)    # Отклонение X
+            dev_y_item = self.deviation_table.item(i, 4)    # Отклонение Y
+            total_item = self.deviation_table.item(i, 5)    # Суммарное отклонение
+            tolerance_item = self.deviation_table.item(i, 6) # Допустимое
+
             if height_item and total_item:
                 try:
                     section_num = int(section_item.text()) if section_item else i + 1
@@ -657,26 +767,30 @@ class VerticalityWidget(QWidget):
         """
         # Импортируем функцию расчета допуска
         from core.normatives import get_vertical_tolerance
-        
-        heights = [d['height'] for d in section_data]
-        raw_dev_x = [d.get('deviation_x', 0.0) for d in section_data]
-        raw_dev_y = [d.get('deviation_y', 0.0) for d in section_data]
+
+        section_data_sorted = sorted(section_data, key=lambda item: float(item.get('height', 0.0) or 0.0))
+        heights = [d['height'] for d in section_data_sorted]
+        raw_dev_x = [float(d.get('deviation_x', 0.0) or 0.0) for d in section_data_sorted]
+        raw_dev_y = [float(d.get('deviation_y', 0.0) or 0.0) for d in section_data_sorted]
+        baseline_x = raw_dev_x[0] if raw_dev_x else 0.0
+        baseline_y = raw_dev_y[0] if raw_dev_y else 0.0
+        display_dev_x = [value - baseline_x for value in raw_dev_x]
+        display_dev_y = [value - baseline_y for value in raw_dev_y]
         if component == 'x':
-            deviations = raw_dev_x
+            deviations = display_dev_x
             component_label = 'X'
             color = '#E74C3C'
-            paired_deviations = raw_dev_y
-            paired_label = 'Y'
+            paired_deviations = display_dev_y
         else:
-            deviations = raw_dev_y
+            deviations = display_dev_y
             component_label = 'Y'
             color = '#3498DB'
-            paired_deviations = raw_dev_x
-            paired_label = 'X'
+            paired_deviations = display_dev_x
 
         # Применяем делитель подгонки
         if divisor and divisor > 0:
             deviations = [float(v) / divisor for v in deviations]
+            paired_deviations = [float(v) / divisor for v in paired_deviations]
         
         ax.set_xlabel(f'Отклонение {component_label}, мм', fontsize=10)
         ax.set_ylabel('Высота, м', fontsize=10)
@@ -752,4 +866,3 @@ class VerticalityWidget(QWidget):
         # Делаем шрифты тоньше
         for label in ax.get_xticklabels() + ax.get_yticklabels():
             label.set_fontsize(9)
-

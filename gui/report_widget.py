@@ -438,16 +438,20 @@ class ReportWidget(QWidget):
 
     def _collect_angular_measurements(self):
         """Собирает данные угловых измерений из таблицы."""
-        default = {'x': [], 'y': []}
+        default = {'x': [], 'y': [], 'rows_by_axis': {'x': [], 'y': []}, 'sections': []}
         widget = self.data_table_widget
         if widget and hasattr(widget, 'get_angular_measurements'):
             try:
                 measurements = widget.get_angular_measurements()
                 if isinstance(measurements, dict):
-                    result = {
-                        'x': measurements.get('x', []) or [],
-                        'y': measurements.get('y', []) or [],
-                    }
+                    result = dict(measurements)
+                    result['x'] = measurements.get('x', []) or []
+                    result['y'] = measurements.get('y', []) or []
+                    result['rows_by_axis'] = measurements.get('rows_by_axis', {
+                        'x': result['x'],
+                        'y': result['y'],
+                    })
+                    result['sections'] = measurements.get('sections', []) or []
                     return result
             except Exception as exc:  # noqa: BLE001
                 logger.warning("Не удалось получить данные угловых измерений: %s", exc)
@@ -781,7 +785,11 @@ class ReportWidget(QWidget):
             
             # Агрегируем данные угловых измерений по секциям
             verticality_data_from_angular = None
-            if angular_measurements and (angular_measurements.get('x') or angular_measurements.get('y')):
+            if angular_measurements and (
+                angular_measurements.get('x')
+                or angular_measurements.get('y')
+                or angular_measurements.get('sections')
+            ):
                 try:
                     verticality_data_from_angular = EnhancedReportGenerator._aggregate_angular_measurements_by_sections(angular_measurements)
                 except Exception as e:
