@@ -1,6 +1,6 @@
 """
-Виджет для отображения прямолинейности ствола башни
-Расчет стрелы прогиба пояса ствола
+Р’РёРґР¶РµС‚ РґР»СЏ РѕС‚РѕР±СЂР°Р¶РµРЅРёСЏ РїСЂСЏРјРѕР»РёРЅРµР№РЅРѕСЃС‚Рё СЃС‚РІРѕР»Р° Р±Р°С€РЅРё
+Р Р°СЃС‡РµС‚ СЃС‚СЂРµР»С‹ РїСЂРѕРіРёР±Р° РїРѕСЏСЃР° СЃС‚РІРѕР»Р°
 """
 
 import json
@@ -25,13 +25,13 @@ logger = logging.getLogger(__name__)
 
 
 class StraightnessWidget(QWidget):
-    """Виджет для отображения графика прямолинейности ствола башни"""
+    """Р’РёРґР¶РµС‚ РґР»СЏ РѕС‚РѕР±СЂР°Р¶РµРЅРёСЏ РіСЂР°С„РёРєР° РїСЂСЏРјРѕР»РёРЅРµР№РЅРѕСЃС‚Рё СЃС‚РІРѕР»Р° Р±Р°С€РЅРё"""
     
     def __init__(self, parent=None):
         super().__init__(parent)
         self.data = None
         self.processed_data = None
-        self.editor_3d = None  # Ссылка на 3D редактор
+        self.editor_3d = None  # РЎСЃС‹Р»РєР° РЅР° 3D СЂРµРґР°РєС‚РѕСЂ
         self.init_ui()
     
     def _decode_part_memberships(self, value) -> list[int]:
@@ -161,17 +161,72 @@ class StraightnessWidget(QWidget):
 
         return [float(point_map.get(int(idx), 0.0)) for idx in belt_sorted.index]
         
+    def _cluster_display_heights(self, heights: list[float], tolerance: float = 0.25) -> tuple[list[float], dict[float, float]]:
+        if not heights:
+            return [], {}
+
+        processed_levels: list[float] = []
+        if isinstance(self.processed_data, dict):
+            centers = self.processed_data.get('centers')
+            if centers is not None:
+                try:
+                    centers_df = centers.copy() if isinstance(centers, pd.DataFrame) else pd.DataFrame(centers)
+                except Exception:
+                    centers_df = pd.DataFrame()
+                if not centers_df.empty:
+                    height_col = next((candidate for candidate in ('z', 'height', 'belt_height') if candidate in centers_df.columns), None)
+                    if height_col is not None:
+                        processed_levels = sorted({
+                            round(float(value), 1)
+                            for value in centers_df[height_col].dropna().tolist()
+                        })
+
+        mapping: dict[float, float] = {}
+        if processed_levels:
+            for raw_height in heights:
+                raw_value = float(raw_height)
+                nearest_level = min(processed_levels, key=lambda value: abs(value - raw_value))
+                mapping[round(raw_value, 6)] = float(nearest_level if abs(nearest_level - raw_value) <= tolerance else round(raw_value, 1))
+            all_levels = sorted({*processed_levels, *mapping.values()})
+            return [float(level) for level in all_levels], mapping
+
+        sorted_heights = sorted(float(height) for height in heights)
+        clusters: list[list[float]] = []
+        for height in sorted_heights:
+            if not clusters:
+                clusters.append([height])
+                continue
+            current_cluster = clusters[-1]
+            current_mean = sum(current_cluster) / len(current_cluster)
+            if abs(height - current_mean) <= tolerance:
+                current_cluster.append(height)
+            else:
+                clusters.append([height])
+
+        display_levels: list[float] = []
+        for cluster in clusters:
+            display_level = float(round(sum(cluster) / len(cluster), 1))
+            display_levels.append(display_level)
+            for raw_height in cluster:
+                mapping[round(float(raw_height), 6)] = display_level
+
+        return display_levels, mapping
+
+    @staticmethod
+    def _display_height(height: float, mapping: dict[float, float]) -> float:
+        return float(mapping.get(round(float(height), 6), round(float(height), 1)))
+
     def init_ui(self):
-        """Инициализация интерфейса"""
+        """РРЅРёС†РёР°Р»РёР·Р°С†РёСЏ РёРЅС‚РµСЂС„РµР№СЃР°"""
         main_layout = QVBoxLayout()
         main_layout.setContentsMargins(5, 5, 5, 5)
         main_layout.setSpacing(5)
         self.setLayout(main_layout)
         
-        # Splitter для графика и таблицы
+        # Splitter РґР»СЏ РіСЂР°С„РёРєР° Рё С‚Р°Р±Р»РёС†С‹
         splitter = QSplitter(Qt.Orientation.Horizontal)
         
-        # Левая часть - графики
+        # Р›РµРІР°СЏ С‡Р°СЃС‚СЊ - РіСЂР°С„РёРєРё
         graph_widget = QWidget()
         graph_layout = QVBoxLayout()
         graph_layout.setContentsMargins(0, 0, 0, 0)
@@ -186,39 +241,39 @@ class StraightnessWidget(QWidget):
         self._rendered_graph_parts = set()
         splitter.addWidget(graph_widget)
         
-        # Правая часть - таблица
+        # РџСЂР°РІР°СЏ С‡Р°СЃС‚СЊ - С‚Р°Р±Р»РёС†Р°
         table_widget = QWidget()
         table_layout = QVBoxLayout()
         table_layout.setContentsMargins(0, 0, 0, 0)
         table_widget.setLayout(table_layout)
         
-        # Заголовок таблицы
-        table_title = QLabel('Стрелы прогиба по всем поясам')
+        # Р—Р°РіРѕР»РѕРІРѕРє С‚Р°Р±Р»РёС†С‹
+        table_title = QLabel('Отклонения прогиба по поясам')
         table_title.setAlignment(Qt.AlignmentFlag.AlignCenter)
         table_title.setStyleSheet('font-weight: bold; padding: 5px;')
         table_layout.addWidget(table_title)
         
-        # Таблица - столбцы для каждого пояса
+        # РўР°Р±Р»РёС†Р° - СЃС‚РѕР»Р±С†С‹ РґР»СЏ РєР°Р¶РґРѕРіРѕ РїРѕСЏСЃР°
         self.deviation_table = QTableWidget()
-        # Столбцы будут добавлены динамически при заполнении данных
+        # РЎС‚РѕР»Р±С†С‹ Р±СѓРґСѓС‚ РґРѕР±Р°РІР»РµРЅС‹ РґРёРЅР°РјРёС‡РµСЃРєРё РїСЂРё Р·Р°РїРѕР»РЅРµРЅРёРё РґР°РЅРЅС‹С…
         self.deviation_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
         self.deviation_table.setAlternatingRowColors(True)
         table_layout.addWidget(self.deviation_table)
 
-        # Вкладки для таблиц частей составной башни
+        # Р’РєР»Р°РґРєРё РґР»СЏ С‚Р°Р±Р»РёС† С‡Р°СЃС‚РµР№ СЃРѕСЃС‚Р°РІРЅРѕР№ Р±Р°С€РЅРё
         self.parts_table_tabs = QTabWidget()
         self.parts_table_tabs.hide()
         table_layout.addWidget(self.parts_table_tabs)
         self.part_tables = {}
         splitter.addWidget(table_widget)
         
-        # Пропорции splitter - графики занимают больше места
+        # РџСЂРѕРїРѕСЂС†РёРё splitter - РіСЂР°С„РёРєРё Р·Р°РЅРёРјР°СЋС‚ Р±РѕР»СЊС€Рµ РјРµСЃС‚Р°
         splitter.setStretchFactor(0, 70)
         splitter.setStretchFactor(1, 30)
         
         main_layout.addWidget(splitter, stretch=1)
         
-        # Информационная метка
+        # РРЅС„РѕСЂРјР°С†РёРѕРЅРЅР°СЏ РјРµС‚РєР°
         self.info_label = QLabel('Загрузите данные для отображения графиков прямолинейности')
         self.info_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.info_label.setStyleSheet('padding: 5px; color: #333; background-color: #f0f0f0; border-radius: 3px;')
@@ -227,24 +282,24 @@ class StraightnessWidget(QWidget):
         main_layout.addWidget(self.info_label)
         
     def set_data(self, data: pd.DataFrame, processed_data: dict = None):
-        """Установить данные для построения графика
+        """РЈСЃС‚Р°РЅРѕРІРёС‚СЊ РґР°РЅРЅС‹Рµ РґР»СЏ РїРѕСЃС‚СЂРѕРµРЅРёСЏ РіСЂР°С„РёРєР°
         
         Args:
-            data: DataFrame с точками
-            processed_data: Обработанные данные с расчетами (опционально)
+            data: DataFrame СЃ С‚РѕС‡РєР°РјРё
+            processed_data: РћР±СЂР°Р±РѕС‚Р°РЅРЅС‹Рµ РґР°РЅРЅС‹Рµ СЃ СЂР°СЃС‡РµС‚Р°РјРё (РѕРїС†РёРѕРЅР°Р»СЊРЅРѕ)
         """
-        # Защита от зацикливания: проверяем, не выполняется ли уже обновление
+        # Р—Р°С‰РёС‚Р° РѕС‚ Р·Р°С†РёРєР»РёРІР°РЅРёСЏ: РїСЂРѕРІРµСЂСЏРµРј, РЅРµ РІС‹РїРѕР»РЅСЏРµС‚СЃСЏ Р»Рё СѓР¶Рµ РѕР±РЅРѕРІР»РµРЅРёРµ
         if not hasattr(self, '_updating_plots'):
             self._updating_plots = False
         
         if self._updating_plots:
-            logger.debug("Пропуск set_data - уже выполняется обновление")
+            logger.debug("РџСЂРѕРїСѓСЃРє set_data - СѓР¶Рµ РІС‹РїРѕР»РЅСЏРµС‚СЃСЏ РѕР±РЅРѕРІР»РµРЅРёРµ")
             return
         
-        # Проверяем, изменились ли данные (чтобы избежать лишних обновлений)
+        # РџСЂРѕРІРµСЂСЏРµРј, РёР·РјРµРЅРёР»РёСЃСЊ Р»Рё РґР°РЅРЅС‹Рµ (С‡С‚РѕР±С‹ РёР·Р±РµР¶Р°С‚СЊ Р»РёС€РЅРёС… РѕР±РЅРѕРІР»РµРЅРёР№)
         data_changed = self.data is None or not self.data.equals(data) if data is not None else True
         
-        # Безопасное сравнение processed_data (может быть dict, DataFrame или None)
+        # Р‘РµР·РѕРїР°СЃРЅРѕРµ СЃСЂР°РІРЅРµРЅРёРµ processed_data (РјРѕР¶РµС‚ Р±С‹С‚СЊ dict, DataFrame РёР»Рё None)
         processed_changed = True
         if self.processed_data is None:
             processed_changed = processed_data is not None
@@ -253,13 +308,13 @@ class StraightnessWidget(QWidget):
         elif isinstance(self.processed_data, pd.DataFrame) and isinstance(processed_data, pd.DataFrame):
             processed_changed = not self.processed_data.equals(processed_data)
         elif isinstance(self.processed_data, dict) and isinstance(processed_data, dict):
-            # Простое сравнение словарей (для глубокого сравнения нужна более сложная логика)
+            # РџСЂРѕСЃС‚РѕРµ СЃСЂР°РІРЅРµРЅРёРµ СЃР»РѕРІР°СЂРµР№ (РґР»СЏ РіР»СѓР±РѕРєРѕРіРѕ СЃСЂР°РІРЅРµРЅРёСЏ РЅСѓР¶РЅР° Р±РѕР»РµРµ СЃР»РѕР¶РЅР°СЏ Р»РѕРіРёРєР°)
             processed_changed = self.processed_data is not processed_data
         else:
             processed_changed = self.processed_data is not processed_data
         
         if not data_changed and not processed_changed:
-            logger.debug("Данные не изменились, пропуск обновления")
+            logger.debug("Р”Р°РЅРЅС‹Рµ РЅРµ РёР·РјРµРЅРёР»РёСЃСЊ, РїСЂРѕРїСѓСЃРє РѕР±РЅРѕРІР»РµРЅРёСЏ")
             return
         
         self.data = data
@@ -267,37 +322,37 @@ class StraightnessWidget(QWidget):
         self.update_plots()
         
     def update_plots(self):
-        """Обновить все графики прямолинейности по поясам на одной вкладке"""
-        # Защита от зацикливания
+        """РћР±РЅРѕРІРёС‚СЊ РІСЃРµ РіСЂР°С„РёРєРё РїСЂСЏРјРѕР»РёРЅРµР№РЅРѕСЃС‚Рё РїРѕ РїРѕСЏСЃР°Рј РЅР° РѕРґРЅРѕР№ РІРєР»Р°РґРєРµ"""
+        # Р—Р°С‰РёС‚Р° РѕС‚ Р·Р°С†РёРєР»РёРІР°РЅРёСЏ
         if not hasattr(self, '_updating_plots'):
             self._updating_plots = False
         
         if self._updating_plots:
-            logger.debug("Пропуск update_plots - уже выполняется")
+            logger.debug("РџСЂРѕРїСѓСЃРє update_plots - СѓР¶Рµ РІС‹РїРѕР»РЅСЏРµС‚СЃСЏ")
             return
         
         self._updating_plots = True
         try:
             if self.data is None or self.data.empty:
-                self.info_label.setText('⚠ Нет данных для отображения')
+                self.info_label.setText('Нет данных для отображения')
                 self._clear_graphs()
                 self.deviation_table.setRowCount(0)
                 return
-            # Проверяем наличие поясов
+            # РџСЂРѕРІРµСЂСЏРµРј РЅР°Р»РёС‡РёРµ РїРѕСЏСЃРѕРІ
             if 'belt' not in self.data.columns:
-                self.info_label.setText('⚠ Данные должны содержать информацию о поясах')
+                self.info_label.setText('Исходные данные должны содержать информацию о поясах')
                 self._clear_graphs()
                 self.deviation_table.setRowCount(0)
                 return
             
-            # Очищаем существующие графики и таблицу
+            # РћС‡РёС‰Р°РµРј СЃСѓС‰РµСЃС‚РІСѓСЋС‰РёРµ РіСЂР°С„РёРєРё Рё С‚Р°Р±Р»РёС†Сѓ
             self._clear_graphs()
             self.deviation_table.setRowCount(0)
             
-            # Исключаем точки standing
+            # РСЃРєР»СЋС‡Р°РµРј С‚РѕС‡РєРё standing
             data_without_station = self._get_working_data()
             
-            # Проверяем, является ли башня составной
+            # РџСЂРѕРІРµСЂСЏРµРј, СЏРІР»СЏРµС‚СЃСЏ Р»Рё Р±Р°С€РЅСЏ СЃРѕСЃС‚Р°РІРЅРѕР№
             has_memberships = 'tower_part_memberships' in data_without_station.columns and data_without_station['tower_part_memberships'].notna().any()
             has_numeric_parts = 'tower_part' in data_without_station.columns and data_without_station['tower_part'].notna().any()
             is_composite = has_memberships or has_numeric_parts
@@ -308,35 +363,35 @@ class StraightnessWidget(QWidget):
                     unique_parts = sorted(data_without_station['tower_part'].dropna().unique())
                 if not unique_parts:
                     unique_parts = [1]
-                logger.info(f"Обнаружена составная башня с частями: {unique_parts}")
+                logger.info(f"РћР±РЅР°СЂСѓР¶РµРЅР° СЃРѕСЃС‚Р°РІРЅР°СЏ Р±Р°С€РЅСЏ СЃ С‡Р°СЃС‚СЏРјРё: {unique_parts}")
             else:
                 unique_parts = [1]
             
-            # Получаем список поясов
+            # РџРѕР»СѓС‡Р°РµРј СЃРїРёСЃРѕРє РїРѕСЏСЃРѕРІ
             belts = sorted(data_without_station['belt'].dropna().unique())
             
             if len(belts) == 0:
-                self.info_label.setText('⚠ Нет данных о поясах')
+                self.info_label.setText('Нет поясов в данных')
                 return
             
-            logger.info(f"Построение графиков прямолинейности для {len(belts)} поясов")
+            logger.info(f"РџРѕСЃС‚СЂРѕРµРЅРёРµ РіСЂР°С„РёРєРѕРІ РїСЂСЏРјРѕР»РёРЅРµР№РЅРѕСЃС‚Рё РґР»СЏ {len(belts)} РїРѕСЏСЃРѕРІ")
             
-            # Собираем данные для таблиц (по частям) и подготавливаем графики
+            # РЎРѕР±РёСЂР°РµРј РґР°РЅРЅС‹Рµ РґР»СЏ С‚Р°Р±Р»РёС† (РїРѕ С‡Р°СЃС‚СЏРј) Рё РїРѕРґРіРѕС‚Р°РІР»РёРІР°РµРј РіСЂР°С„РёРєРё
             belt_data_by_part: dict[int, dict[int, dict]] = {}
             graph_entries_by_part: dict[int, list] = {}
             
-            # Группируем пояса по частям для составной башни
+            # Р“СЂСѓРїРїРёСЂСѓРµРј РїРѕСЏСЃР° РїРѕ С‡Р°СЃС‚СЏРј РґР»СЏ СЃРѕСЃС‚Р°РІРЅРѕР№ Р±Р°С€РЅРё
             if is_composite:
-                # Добавляем заголовки для частей
+                # Р”РѕР±Р°РІР»СЏРµРј Р·Р°РіРѕР»РѕРІРєРё РґР»СЏ С‡Р°СЃС‚РµР№
                 for part_num in unique_parts:
-                    # Получаем пояса этой части
+                    # РџРѕР»СѓС‡Р°РµРј РїРѕСЏСЃР° СЌС‚РѕР№ С‡Р°СЃС‚Рё
                     part_mask = data_without_station.apply(lambda row: self._row_has_part(row, part_num), axis=1)
                     part_data = data_without_station[part_mask].copy()
                     part_belts = sorted(part_data['belt'].dropna().unique())
                     
-                    logger.info(f"Часть {int(part_num)}: {len(part_belts)} поясов")
+                    logger.info(f"Р§Р°СЃС‚СЊ {int(part_num)}: {len(part_belts)} РїРѕСЏСЃРѕРІ")
                     
-                    # Находим минимальную и максимальную высоту для этой части
+                    # РќР°С…РѕРґРёРј РјРёРЅРёРјР°Р»СЊРЅСѓСЋ Рё РјР°РєСЃРёРјР°Р»СЊРЅСѓСЋ РІС‹СЃРѕС‚Сѓ РґР»СЏ СЌС‚РѕР№ С‡Р°СЃС‚Рё
                     part_min_height = part_data['z'].min()
                     part_max_height = part_data['z'].max()
                     part_height = part_max_height - part_min_height
@@ -345,20 +400,20 @@ class StraightnessWidget(QWidget):
                         belt_points = part_data[part_data['belt'] == belt_num]
                         
                         if len(belt_points) < 2:
-                            logger.warning(f"На поясе {belt_num} части {int(part_num)} недостаточно точек для расчета")
+                            logger.warning(f"РќР° РїРѕСЏСЃРµ {belt_num} С‡Р°СЃС‚Рё {int(part_num)} РЅРµРґРѕСЃС‚Р°С‚РѕС‡РЅРѕ С‚РѕС‡РµРє РґР»СЏ СЂР°СЃС‡РµС‚Р°")
                             continue
                         
-                        # Собираем данные для таблицы
+                        # РЎРѕР±РёСЂР°РµРј РґР°РЅРЅС‹Рµ РґР»СЏ С‚Р°Р±Р»РёС†С‹
                         belt_sorted = belt_points.sort_values('z')
                         deflections = self._calculate_belt_deflections(belt_sorted, part_num=int(part_num),
                                                                       part_min_height=part_min_height,
                                                                       part_max_height=part_max_height)
-                        belt_length = part_height  # Используем высоту части, а не пояса
+                        belt_length = part_height  # РСЃРїРѕР»СЊР·СѓРµРј РІС‹СЃРѕС‚Сѓ С‡Р°СЃС‚Рё, Р° РЅРµ РїРѕСЏСЃР°
                         from core.normatives import get_straightness_tolerance
                         max_allowed_deflection_m = get_straightness_tolerance(belt_length)
-                        max_allowed_deflection_mm = max_allowed_deflection_m * 1000  # в мм
+                        max_allowed_deflection_mm = max_allowed_deflection_m * 1000  # РІ РјРј
                         
-                        # Сохраняем данные по этому поясу
+                        # РЎРѕС…СЂР°РЅСЏРµРј РґР°РЅРЅС‹Рµ РїРѕ СЌС‚РѕРјСѓ РїРѕСЏСЃСѓ
                         part_id = int(part_num)
                         part_tables = belt_data_by_part.setdefault(part_id, {})
                         graph_entries_by_part.setdefault(part_id, [])
@@ -372,22 +427,22 @@ class StraightnessWidget(QWidget):
                         
                         for i, (idx, point) in enumerate(belt_sorted.iterrows()):
                             deflection = deflections[i] if i < len(deflections) else 0.0
-                            # Используем абсолютную высоту (как в графике)
+                            # РСЃРїРѕР»СЊР·СѓРµРј Р°Р±СЃРѕР»СЋС‚РЅСѓСЋ РІС‹СЃРѕС‚Сѓ (РєР°Рє РІ РіСЂР°С„РёРєРµ)
                             absolute_height = point['z']
                             part_tables[int(belt_num)]['points'].append({
-                                'height': absolute_height,  # Абсолютная высота
+                                'height': absolute_height,  # РђР±СЃРѕР»СЋС‚РЅР°СЏ РІС‹СЃРѕС‚Р°
                                 'deflection': deflection
                             })
-                        logger.debug(f"Часть {part_num}, Пояс {belt_num}: высота части={part_height:.2f}м, "
-                                   f"точек={len(belt_sorted)}, первая высота={belt_sorted.iloc[0]['z']:.2f}м, "
-                                   f"последняя={belt_sorted.iloc[-1]['z']:.2f}м")
-                        # Сохраняем данные для графика с информацией о границах части
+                        logger.debug(f"Р§Р°СЃС‚СЊ {part_num}, РџРѕСЏСЃ {belt_num}: РІС‹СЃРѕС‚Р° С‡Р°СЃС‚Рё={part_height:.2f}Рј, "
+                                   f"С‚РѕС‡РµРє={len(belt_sorted)}, РїРµСЂРІР°СЏ РІС‹СЃРѕС‚Р°={belt_sorted.iloc[0]['z']:.2f}Рј, "
+                                   f"РїРѕСЃР»РµРґРЅСЏСЏ={belt_sorted.iloc[-1]['z']:.2f}Рј")
+                        # РЎРѕС…СЂР°РЅСЏРµРј РґР°РЅРЅС‹Рµ РґР»СЏ РіСЂР°С„РёРєР° СЃ РёРЅС„РѕСЂРјР°С†РёРµР№ Рѕ РіСЂР°РЅРёС†Р°С… С‡Р°СЃС‚Рё
                         graph_entries_by_part[part_id].append(
                             (int(belt_num), belt_points.copy(), part_id, part_min_height, part_max_height)
                         )
             else:
-                # Обычная башня - обрабатываем все пояса
-                # Находим минимальную и максимальную высоту для всей башни
+                # РћР±С‹С‡РЅР°СЏ Р±Р°С€РЅСЏ - РѕР±СЂР°Р±Р°С‚С‹РІР°РµРј РІСЃРµ РїРѕСЏСЃР°
+                # РќР°С…РѕРґРёРј РјРёРЅРёРјР°Р»СЊРЅСѓСЋ Рё РјР°РєСЃРёРјР°Р»СЊРЅСѓСЋ РІС‹СЃРѕС‚Сѓ РґР»СЏ РІСЃРµР№ Р±Р°С€РЅРё
                 tower_min_height = data_without_station['z'].min()
                 tower_max_height = data_without_station['z'].max()
                 tower_height = tower_max_height - tower_min_height
@@ -396,18 +451,18 @@ class StraightnessWidget(QWidget):
                     belt_points = data_without_station[data_without_station['belt'] == belt_num]
                     
                     if len(belt_points) < 2:
-                        logger.warning(f"На поясе {belt_num} недостаточно точек для расчета")
+                        logger.warning(f"РќР° РїРѕСЏСЃРµ {belt_num} РЅРµРґРѕСЃС‚Р°С‚РѕС‡РЅРѕ С‚РѕС‡РµРє РґР»СЏ СЂР°СЃС‡РµС‚Р°")
                         continue
                     
-                    # Собираем данные для таблицы
+                    # РЎРѕР±РёСЂР°РµРј РґР°РЅРЅС‹Рµ РґР»СЏ С‚Р°Р±Р»РёС†С‹
                     belt_sorted = belt_points.sort_values('z')
                     deflections = self._calculate_belt_deflections(belt_sorted)
-                    belt_length = tower_height  # Используем высоту всей башни
+                    belt_length = tower_height  # РСЃРїРѕР»СЊР·СѓРµРј РІС‹СЃРѕС‚Сѓ РІСЃРµР№ Р±Р°С€РЅРё
                     from core.normatives import get_straightness_tolerance
                     max_allowed_deflection_m = get_straightness_tolerance(belt_length)
-                    max_allowed_deflection_mm = max_allowed_deflection_m * 1000  # в мм
+                    max_allowed_deflection_mm = max_allowed_deflection_m * 1000  # РІ РјРј
                     
-                    # Сохраняем данные по этому поясу
+                    # РЎРѕС…СЂР°РЅСЏРµРј РґР°РЅРЅС‹Рµ РїРѕ СЌС‚РѕРјСѓ РїРѕСЏСЃСѓ
                     part_id = 1
                     part_tables = belt_data_by_part.setdefault(part_id, {})
                     graph_entries_by_part.setdefault(part_id, [])
@@ -421,18 +476,18 @@ class StraightnessWidget(QWidget):
                     
                     for i, (idx, point) in enumerate(belt_sorted.iterrows()):
                         deflection = deflections[i] if i < len(deflections) else 0.0
-                        # Используем абсолютную высоту (как в графике)
+                        # РСЃРїРѕР»СЊР·СѓРµРј Р°Р±СЃРѕР»СЋС‚РЅСѓСЋ РІС‹СЃРѕС‚Сѓ (РєР°Рє РІ РіСЂР°С„РёРєРµ)
                         absolute_height = point['z']
                         part_tables[int(belt_num)]['points'].append({
-                            'height': absolute_height,  # Абсолютная высота
+                            'height': absolute_height,  # РђР±СЃРѕР»СЋС‚РЅР°СЏ РІС‹СЃРѕС‚Р°
                             'deflection': deflection
                         })
-                    # Сохраняем данные для графика с информацией о границах башни
+                    # РЎРѕС…СЂР°РЅСЏРµРј РґР°РЅРЅС‹Рµ РґР»СЏ РіСЂР°С„РёРєР° СЃ РёРЅС„РѕСЂРјР°С†РёРµР№ Рѕ РіСЂР°РЅРёС†Р°С… Р±Р°С€РЅРё
                     graph_entries_by_part[part_id].append(
                         (int(belt_num), belt_points.copy(), part_id, tower_min_height, tower_max_height)
                     )
             
-            # Заполняем таблицы (по одной для каждой части)
+            # Р—Р°РїРѕР»РЅСЏРµРј С‚Р°Р±Р»РёС†С‹ (РїРѕ РѕРґРЅРѕР№ РґР»СЏ РєР°Р¶РґРѕР№ С‡Р°СЃС‚Рё)
             is_multi_part = is_composite and len(belt_data_by_part) > 1
             self._fill_pivot_table(belt_data_by_part, is_multi_part)
             self._graph_entries_by_part = graph_entries_by_part
@@ -442,21 +497,21 @@ class StraightnessWidget(QWidget):
             if graph_part_keys:
                 self._setup_graph_tabs(graph_part_keys, is_multi_part)
             else:
-                self._show_graph_placeholder('Нет данных для графиков прямолинейности')
+                self._show_graph_placeholder('Нет данных для построения графиков прямолинейности')
             
             parts_count = len(belt_data_by_part) if is_composite else 1
             parts_text = f" ({parts_count} частей)" if is_composite and parts_count > 1 else ""
-            self.info_label.setText(f'✓ Графики построены для {len(belts)} поясов{parts_text}')
-            logger.info(f"Графики прямолинейности построены для {len(belts)} поясов{parts_text}")
+            self.info_label.setText(f'Графики построены для {len(belts)} поясов{parts_text}')
+            logger.info(f"Р“СЂР°С„РёРєРё РїСЂСЏРјРѕР»РёРЅРµР№РЅРѕСЃС‚Рё РїРѕСЃС‚СЂРѕРµРЅС‹ РґР»СЏ {len(belts)} РїРѕСЏСЃРѕРІ{parts_text}")
             
         except Exception as e:
-            logger.error(f"Ошибка при построении графиков прямолинейности: {e}", exc_info=True)
-            self.info_label.setText(f'❌ Ошибка: {str(e)}')
+            logger.error(f"РћС€РёР±РєР° РїСЂРё РїРѕСЃС‚СЂРѕРµРЅРёРё РіСЂР°С„РёРєРѕРІ РїСЂСЏРјРѕР»РёРЅРµР№РЅРѕСЃС‚Рё: {e}", exc_info=True)
+            self.info_label.setText(f'Ошибка: {str(e)}')
         finally:
             self._updating_plots = False
     
     def _clear_graphs(self):
-        """Очистить все графики"""
+        """РћС‡РёСЃС‚РёС‚СЊ РІСЃРµ РіСЂР°С„РёРєРё"""
         self.graph_tabs.clear()
         self.graph_tab_layouts = {}
         self._graph_entries_by_part = {}
@@ -543,7 +598,7 @@ class StraightnessWidget(QWidget):
             if len(entry) >= 5:
                 belt_num, belt_points, part_label, part_min_height, part_max_height = entry
             else:
-                # Обратная совместимость со старым форматом
+                # РћР±СЂР°С‚РЅР°СЏ СЃРѕРІРјРµСЃС‚РёРјРѕСЃС‚СЊ СЃРѕ СЃС‚Р°СЂС‹Рј С„РѕСЂРјР°С‚РѕРј
                 belt_num, belt_points, part_label = entry[:3]
                 part_min_height = None
                 part_max_height = None
@@ -575,143 +630,123 @@ class StraightnessWidget(QWidget):
         part_max_height: Optional[float] = None,
         target_layout: Optional[QHBoxLayout] = None
     ):
-        """Создать график для одного пояса и добавить в контейнер
-        
-        Args:
-            belt_num: Номер пояса
-            belt_points: Точки пояса
-            part_num: Номер части башни (опционально, для составной башни)
-            target_layout: Layout вкладки, куда добавляется график
-        """
+        """Создает компактный график для одного пояса башни."""
         if target_layout is None:
             return
-        # Создаем виджет для графика, который будет растягиваться по высоте
+
         graph_item_widget = QWidget()
         graph_item_layout = QVBoxLayout()
         graph_item_layout.setContentsMargins(5, 5, 5, 5)
         graph_item_layout.setSpacing(3)
         graph_item_widget.setLayout(graph_item_layout)
-        
-        # Заголовок графика (компактный)
+
         if part_num is not None:
-            graph_title = QLabel(f'Пояс {int(belt_num)} [Ч{int(part_num)}]')
+            graph_title = QLabel(f'Пояс {int(belt_num)} [Часть {int(part_num)}]')
         else:
             graph_title = QLabel(f'Пояс {int(belt_num)}')
         graph_title.setAlignment(Qt.AlignmentFlag.AlignCenter)
         graph_title.setStyleSheet('font-weight: bold; padding: 2px; font-size: 9pt;')
         graph_title.setMaximumHeight(25)
         graph_item_layout.addWidget(graph_title)
-        
-        # Создаем Figure для matplotlib (высота увеличена для растяжения)
+
         figure = Figure(figsize=(4, 8), dpi=100)
         canvas = FigureCanvas(figure)
-        graph_item_layout.addWidget(canvas, stretch=1)  # Растягиваем график
-        
-        # Построение графика
-        self._plot_belt_straightness(figure, belt_num, belt_points, part_num=part_num, 
-                                     part_min_height=part_min_height, part_max_height=part_max_height)
-        
-        # Добавляем в контейнер с растяжением по высоте
+        graph_item_layout.addWidget(canvas, stretch=1)
+
+        self._plot_belt_straightness(
+            figure,
+            belt_num,
+            belt_points,
+            part_num=part_num,
+            part_min_height=part_min_height,
+            part_max_height=part_max_height,
+        )
+
         target_layout.addWidget(graph_item_widget, stretch=1)
-    
+
     def _populate_part_table(self, table: QTableWidget, belt_data_dict: dict, part_num: Optional[int] = None):
-        """Заполнить таблицу с поворотом: строки = высоты, столбцы = пояса
-        
-        Args:
-            belt_data_dict: Словарь {belt_num: {'points': [...], 'tolerance': float}}
-        """
+        """Заполняет сводную таблицу по поясам: строки = высоты секций, столбцы = пояса."""
         try:
             part_suffix = f" (часть {part_num})" if part_num is not None else ""
             logger.info(f"Заполнение сводной таблицы для {len(belt_data_dict)} поясов{part_suffix}")
             table.setRowCount(0)
             table.setColumnCount(0)
-            
+
             if not belt_data_dict:
                 logger.warning("Нет данных для таблицы")
                 return
-            
-            # Собираем все уникальные высоты и округляем до 0.1 м
-            # Используем абсолютные высоты (как в графике)
-            all_heights = set()
-            for belt_data in belt_data_dict.values():
-                for point in belt_data['points']:
-                    height_rounded = round(point['height'], 1)  # Округление до 0.1 м
-                    all_heights.add(height_rounded)
-            
-            sorted_heights = sorted(all_heights)
+
+            raw_heights = [
+                float(point['height'])
+                for belt_data in belt_data_dict.values()
+                for point in belt_data['points']
+            ]
+            sorted_heights, display_height_map = self._cluster_display_heights(raw_heights)
             sorted_belts = sorted(belt_data_dict.keys())
-            
-            # Находим максимальное допустимое значение среди всех поясов
+
             max_tolerance = max(belt_data['tolerance'] for belt_data in belt_data_dict.values())
-            max_tolerance_rounded = round(max_tolerance, 1)  # Округление до 0.1 мм
-            
-            # Настраиваем таблицу: столбцы = пояса + допустимое значение (+ первый столбец для высоты)
+            max_tolerance_rounded = round(max_tolerance, 1)
+
             table.setColumnCount(len(sorted_belts) + 2)
             headers = ['Высота, м'] + [f'Пояс {belt}' for belt in sorted_belts] + ['Допустимое, мм']
             table.setHorizontalHeaderLabels(headers)
             table.setRowCount(len(sorted_heights))
-            
-            # Создаем словарь для быстрого доступа: (belt_num, height_rounded) -> deflection
+
             belt_height_deflection = {}
             for belt_num, belt_data in belt_data_dict.items():
                 for point in belt_data['points']:
-                    height_rounded = round(point['height'], 1)
-                    deflection_rounded = round(point['deflection'], 1)  # Округление до 0.1 мм
-                    belt_height_deflection[(belt_num, height_rounded)] = {
-                        'deflection': deflection_rounded,
-                        'tolerance': belt_data['tolerance']
+                    display_height = self._display_height(point['height'], display_height_map)
+                    belt_height_deflection[(belt_num, display_height)] = {
+                        'deflection': round(point['deflection'], 1),
+                        'tolerance': float(belt_data['tolerance']),
                     }
-            
-            # Заполняем таблицу
-            tolerance_col_idx = len(sorted_belts) + 1  # Индекс столбца с допустимым значением
-            
+
+            tolerance_col_idx = len(sorted_belts) + 1
             for row_idx, height in enumerate(sorted_heights):
-                # Столбец с высотой
                 height_item = QTableWidgetItem(f"{height:.1f}")
                 height_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
                 table.setItem(row_idx, 0, height_item)
-                
-                # Столбцы с прогибами по поясам
+
                 for col_idx, belt_num in enumerate(sorted_belts, start=1):
-                    key = (belt_num, height)
-                    if key in belt_height_deflection:
-                        data = belt_height_deflection[key]
-                        deflection = data['deflection']
-                        tolerance = data['tolerance']
-                        
-                        # Создаем ячейку с прогибом
-                        deflection_item = QTableWidgetItem(f"{deflection:+.1f}")
-                        deflection_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-                        
-                        # Цветовая индикация (используем максимальное допустимое значение)
-                        if abs(deflection) > max_tolerance_rounded:
-                            deflection_item.setForeground(QColor(220, 50, 50))  # Красный - превышение
-                        else:
-                            deflection_item.setForeground(QColor(50, 150, 50))  # Зеленый - норма
-                        
-                        # Tooltip с допустимым значением для конкретного пояса
-                        deflection_item.setToolTip(f"Допустимое для пояса {belt_num}: ±{tolerance:.1f} мм\nМаксимальное допустимое: ±{max_tolerance_rounded:.1f} мм\nИнструкция Минсвязи СССР, 1980: δ_допуск = L / 750")
-                        
-                        table.setItem(row_idx, col_idx, deflection_item)
-                    else:
-                        # Нет данных для этой высоты и пояса
+                    payload = belt_height_deflection.get((belt_num, height))
+                    if payload is None:
                         empty_item = QTableWidgetItem('-')
                         empty_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
                         table.setItem(row_idx, col_idx, empty_item)
-                
-                # Столбец с допустимым значением (максимальным)
+                        continue
+
+                    deflection = float(payload['deflection'])
+                    tolerance = float(payload['tolerance'])
+                    deflection_item = QTableWidgetItem(f"{deflection:+.1f}")
+                    deflection_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+                    if abs(deflection) > max_tolerance_rounded:
+                        deflection_item.setForeground(QColor(220, 50, 50))
+                    else:
+                        deflection_item.setForeground(QColor(50, 150, 50))
+                    deflection_item.setToolTip(
+                        f"Допустимое для пояса {belt_num}: ±{tolerance:.1f} мм\n"
+                        f"Максимальное допустимое: ±{max_tolerance_rounded:.1f} мм\n"
+                        "Инструкция Минсвязи СССР, 1980: δ_допуск = L / 750"
+                    )
+                    table.setItem(row_idx, col_idx, deflection_item)
+
                 tolerance_item = QTableWidgetItem(f"±{max_tolerance_rounded:.1f}")
                 tolerance_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-                tolerance_item.setToolTip(f"Максимальное допустимое значение среди всех поясов\nИнструкция Минсвязи СССР, 1980: δ_допуск = L / 750")
+                tolerance_item.setToolTip(
+                    "Максимальное допустимое значение среди всех поясов\n"
+                    "Инструкция Минсвязи СССР, 1980: δ_допуск = L / 750"
+                )
                 table.setItem(row_idx, tolerance_col_idx, tolerance_item)
-            
-            logger.info(f"Сводная таблица заполнена: {len(sorted_heights)} строк (высот), {len(sorted_belts)} столбцов (пояса){part_suffix}")
-            
+
+            logger.info(
+                f"Сводная таблица заполнена: {len(sorted_heights)} высотных уровней, "
+                f"{len(sorted_belts)} поясов{part_suffix}"
+            )
         except Exception as e:
             logger.error(f"Ошибка при заполнении сводной таблицы: {e}", exc_info=True)
 
     def _fill_pivot_table(self, belt_data_by_part: dict[int, dict], is_multi_part: bool):
-        """Создает одну или несколько таблиц прогибов в зависимости от числа частей."""
+        """РЎРѕР·РґР°РµС‚ РѕРґРЅСѓ РёР»Рё РЅРµСЃРєРѕР»СЊРєРѕ С‚Р°Р±Р»РёС† РїСЂРѕРіРёР±РѕРІ РІ Р·Р°РІРёСЃРёРјРѕСЃС‚Рё РѕС‚ С‡РёСЃР»Р° С‡Р°СЃС‚РµР№."""
         if not belt_data_by_part:
             self.deviation_table.setRowCount(0)
             self.deviation_table.setColumnCount(0)
@@ -745,15 +780,15 @@ class StraightnessWidget(QWidget):
                                 part_num: Optional[int] = None,
                                 part_min_height: Optional[float] = None,
                                 part_max_height: Optional[float] = None):
-        """Построить график стрел прогиба для пояса
+        """РџРѕСЃС‚СЂРѕРёС‚СЊ РіСЂР°С„РёРє СЃС‚СЂРµР» РїСЂРѕРіРёР±Р° РґР»СЏ РїРѕСЏСЃР°
         
         Args:
             figure: Figure matplotlib
-            belt_num: Номер пояса
-            belt_points: Точки пояса
-            part_num: Номер части башни (опционально, для нормализации высот)
-            part_min_height: Минимальная высота части (для нормализации)
-            part_max_height: Максимальная высота части (для нормализации)
+            belt_num: РќРѕРјРµСЂ РїРѕСЏСЃР°
+            belt_points: РўРѕС‡РєРё РїРѕСЏСЃР°
+            part_num: РќРѕРјРµСЂ С‡Р°СЃС‚Рё Р±Р°С€РЅРё (РѕРїС†РёРѕРЅР°Р»СЊРЅРѕ, РґР»СЏ РЅРѕСЂРјР°Р»РёР·Р°С†РёРё РІС‹СЃРѕС‚)
+            part_min_height: РњРёРЅРёРјР°Р»СЊРЅР°СЏ РІС‹СЃРѕС‚Р° С‡Р°СЃС‚Рё (РґР»СЏ РЅРѕСЂРјР°Р»РёР·Р°С†РёРё)
+            part_max_height: РњР°РєСЃРёРјР°Р»СЊРЅР°СЏ РІС‹СЃРѕС‚Р° С‡Р°СЃС‚Рё (РґР»СЏ РЅРѕСЂРјР°Р»РёР·Р°С†РёРё)
         """
         try:
             figure.clear()
@@ -763,59 +798,59 @@ class StraightnessWidget(QWidget):
             if rendered:
                 figure.tight_layout(rect=[0.12, 0.12, 0.97, 0.95], pad=2.0, h_pad=2.5, w_pad=3.0)
         except Exception as e:
-            logger.error(f"Ошибка при построении графика для пояса {belt_num}: {e}", exc_info=True)
+            logger.error(f"РћС€РёР±РєР° РїСЂРё РїРѕСЃС‚СЂРѕРµРЅРёРё РіСЂР°С„РёРєР° РґР»СЏ РїРѕСЏСЃР° {belt_num}: {e}", exc_info=True)
     
     def _render_straightness_plot(self, ax, belt_num: int, belt_points: pd.DataFrame, 
                                   part_num: Optional[int] = None,
                                   part_min_height: Optional[float] = None,
                                   part_max_height: Optional[float] = None) -> bool:
-        """Нарисовать график прямолинейности в переданных осях.
+        """РќР°СЂРёСЃРѕРІР°С‚СЊ РіСЂР°С„РёРє РїСЂСЏРјРѕР»РёРЅРµР№РЅРѕСЃС‚Рё РІ РїРµСЂРµРґР°РЅРЅС‹С… РѕСЃСЏС….
         
         Args:
-            ax: Оси matplotlib для отрисовки
-            belt_num: Номер пояса
-            belt_points: Точки пояса
-            part_num: Номер части башни (опционально, для расчета допуска)
-            part_min_height: Минимальная высота части (для расчета допуска, если None - вычисляется из пояса)
-            part_max_height: Максимальная высота части (для расчета допуска, если None - вычисляется из пояса)
+            ax: РћСЃРё matplotlib РґР»СЏ РѕС‚СЂРёСЃРѕРІРєРё
+            belt_num: РќРѕРјРµСЂ РїРѕСЏСЃР°
+            belt_points: РўРѕС‡РєРё РїРѕСЏСЃР°
+            part_num: РќРѕРјРµСЂ С‡Р°СЃС‚Рё Р±Р°С€РЅРё (РѕРїС†РёРѕРЅР°Р»СЊРЅРѕ, РґР»СЏ СЂР°СЃС‡РµС‚Р° РґРѕРїСѓСЃРєР°)
+            part_min_height: РњРёРЅРёРјР°Р»СЊРЅР°СЏ РІС‹СЃРѕС‚Р° С‡Р°СЃС‚Рё (РґР»СЏ СЂР°СЃС‡РµС‚Р° РґРѕРїСѓСЃРєР°, РµСЃР»Рё None - РІС‹С‡РёСЃР»СЏРµС‚СЃСЏ РёР· РїРѕСЏСЃР°)
+            part_max_height: РњР°РєСЃРёРјР°Р»СЊРЅР°СЏ РІС‹СЃРѕС‚Р° С‡Р°СЃС‚Рё (РґР»СЏ СЂР°СЃС‡РµС‚Р° РґРѕРїСѓСЃРєР°, РµСЃР»Рё None - РІС‹С‡РёСЃР»СЏРµС‚СЃСЏ РёР· РїРѕСЏСЃР°)
         """
         belt_sorted = belt_points.sort_values('z')
         absolute_heights = belt_sorted['z'].values
 
         if len(absolute_heights) < 2:
-            logger.warning("Недостаточно точек на поясе %s для построения графика", belt_num)
+            logger.warning("РќРµРґРѕСЃС‚Р°С‚РѕС‡РЅРѕ С‚РѕС‡РµРє РЅР° РїРѕСЏСЃРµ %s РґР»СЏ РїРѕСЃС‚СЂРѕРµРЅРёСЏ РіСЂР°С„РёРєР°", belt_num)
             ax.axis('off')
-            ax.text(0.5, 0.5, 'Недостаточно данных', transform=ax.transAxes,
+            ax.text(0.5, 0.5, "\u041d\u0435\u0434\u043e\u0441\u0442\u0430\u0442\u043e\u0447\u043d\u043e \u0434\u0430\u043d\u043d\u044b\u0445", transform=ax.transAxes,
                     ha='center', va='center', fontsize=9, color='gray')
             return False
 
-        # Определяем границы части для расчета допуска
-        # Используем границы части, если они переданы, иначе - границы пояса
+        # РћРїСЂРµРґРµР»СЏРµРј РіСЂР°РЅРёС†С‹ С‡Р°СЃС‚Рё РґР»СЏ СЂР°СЃС‡РµС‚Р° РґРѕРїСѓСЃРєР°
+        # РСЃРїРѕР»СЊР·СѓРµРј РіСЂР°РЅРёС†С‹ С‡Р°СЃС‚Рё, РµСЃР»Рё РѕРЅРё РїРµСЂРµРґР°РЅС‹, РёРЅР°С‡Рµ - РіСЂР°РЅРёС†С‹ РїРѕСЏСЃР°
         if part_min_height is not None and part_max_height is not None:
             min_height = part_min_height
             max_height = part_max_height
-            logger.debug(f"График пояса {belt_num}, часть {part_num}: используем границы части "
-                        f"({min_height:.2f}м - {max_height:.2f}м)")
+            logger.debug(f"Р“СЂР°С„РёРє РїРѕСЏСЃР° {belt_num}, С‡Р°СЃС‚СЊ {part_num}: РёСЃРїРѕР»СЊР·СѓРµРј РіСЂР°РЅРёС†С‹ С‡Р°СЃС‚Рё "
+                        f"({min_height:.2f}Рј - {max_height:.2f}Рј)")
         else:
             min_height = absolute_heights.min()
             max_height = absolute_heights.max()
-            logger.debug(f"График пояса {belt_num}: используем границы пояса "
-                        f"({min_height:.2f}м - {max_height:.2f}м)")
+            logger.debug(f"Р“СЂР°С„РёРє РїРѕСЏСЃР° {belt_num}: РёСЃРїРѕР»СЊР·СѓРµРј РіСЂР°РЅРёС†С‹ РїРѕСЏСЃР° "
+                        f"({min_height:.2f}Рј - {max_height:.2f}Рј)")
         part_height = max_height - min_height
-        logger.debug(f"График пояса {belt_num}: высота части={part_height:.2f}м, "
-                    f"абсолютные высоты от {absolute_heights.min():.2f}м до {absolute_heights.max():.2f}м")
+        logger.debug(f"Р“СЂР°С„РёРє РїРѕСЏСЃР° {belt_num}: РІС‹СЃРѕС‚Р° С‡Р°СЃС‚Рё={part_height:.2f}Рј, "
+                    f"Р°Р±СЃРѕР»СЋС‚РЅС‹Рµ РІС‹СЃРѕС‚С‹ РѕС‚ {absolute_heights.min():.2f}Рј РґРѕ {absolute_heights.max():.2f}Рј")
 
         deflections = self._calculate_belt_deflections(belt_sorted, part_num=part_num,
                                                        part_min_height=part_min_height,
                                                        part_max_height=part_max_height)
-        belt_length = part_height  # Используем высоту части/башни для расчета допуска
+        belt_length = part_height  # РСЃРїРѕР»СЊР·СѓРµРј РІС‹СЃРѕС‚Сѓ С‡Р°СЃС‚Рё/Р±Р°С€РЅРё РґР»СЏ СЂР°СЃС‡РµС‚Р° РґРѕРїСѓСЃРєР°
         from core.normatives import get_straightness_tolerance
         max_allowed_deflection_m = get_straightness_tolerance(belt_length)
         max_allowed_deflection_mm = max_allowed_deflection_m * 1000
 
-        ax.set_xlabel('Стрела прогиба, мм', fontsize=10)
-        ax.set_ylabel('Высота, м', fontsize=10)
-        ax.set_title(f'Пояс {int(belt_num)}', fontsize=10, fontweight='bold')
+        ax.set_xlabel("\u0421\u0442\u0440\u0435\u043b\u0430 \u043f\u0440\u043e\u0433\u0438\u0431\u0430, \u043c\u043c", fontsize=10)
+        ax.set_ylabel("\u0412\u044b\u0441\u043e\u0442\u0430, \u043c", fontsize=10)
+        ax.set_title(f"\u041f\u043e\u044f\u0441 {int(belt_num)}", fontsize=10, fontweight='bold')
         ax.tick_params(axis='both', labelsize=9)
         ax.xaxis.set_major_locator(ticker.MaxNLocator(6))
         ax.yaxis.set_major_locator(ticker.MaxNLocator(integer=True, nbins=8))
@@ -825,7 +860,7 @@ class StraightnessWidget(QWidget):
         x_max = max(max_deflection_abs * 1.2, max_allowed_deflection_mm * 1.5)
         ax.set_xlim(x_min, x_max)
 
-        # Используем абсолютные высоты для графика (как в таблице прямолинейности)
+        # РСЃРїРѕР»СЊР·СѓРµРј Р°Р±СЃРѕР»СЋС‚РЅС‹Рµ РІС‹СЃРѕС‚С‹ РґР»СЏ РіСЂР°С„РёРєР° (РєР°Рє РІ С‚Р°Р±Р»РёС†Рµ РїСЂСЏРјРѕР»РёРЅРµР№РЅРѕСЃС‚Рё)
         height_range = absolute_heights.max() - absolute_heights.min()
         y_min = absolute_heights.min() - height_range * 0.05
         y_max = absolute_heights.max() + height_range * 0.05
@@ -833,19 +868,19 @@ class StraightnessWidget(QWidget):
 
         ax.axvline(x=0, color='black', linewidth=1.0, linestyle='-', zorder=1)
         ax.axvline(x=-max_allowed_deflection_mm, color='gray', linewidth=1.5, linestyle='--',
-                   zorder=2, alpha=0.7, label=f'Допуск ±{max_allowed_deflection_mm:.1f} мм')
+                   zorder=2, alpha=0.7, label=f"\u0414\u043e\u043f\u0443\u0441\u043a \u00b1{max_allowed_deflection_mm:.1f} \u043c\u043c")
         ax.axvline(x=max_allowed_deflection_mm, color='gray', linewidth=1.5, linestyle='--',
                    zorder=2, alpha=0.7)
 
         ax.grid(True, axis='x', linestyle=':', linewidth=0.5, alpha=0.5, color='gray', zorder=0)
         ax.grid(True, axis='y', linestyle=':', linewidth=0.5, alpha=0.3, color='gray', zorder=0)
 
-        # Используем абсолютные высоты для графика (как в таблице прямолинейности)
+        # РСЃРїРѕР»СЊР·СѓРµРј Р°Р±СЃРѕР»СЋС‚РЅС‹Рµ РІС‹СЃРѕС‚С‹ РґР»СЏ РіСЂР°С„РёРєР° (РєР°Рє РІ С‚Р°Р±Р»РёС†Рµ РїСЂСЏРјРѕР»РёРЅРµР№РЅРѕСЃС‚Рё)
         ax.plot(deflections, absolute_heights,
                 color='red', linewidth=1.5, linestyle='-',
                 marker='o', markersize=4, markerfacecolor='red',
                 markeredgecolor='white', markeredgewidth=0.5,
-                label='Фактический прогиб', zorder=5)
+                label="\u0424\u0430\u043a\u0442\u0438\u0447\u0435\u0441\u043a\u0438\u0439 \u043f\u0440\u043e\u0433\u0438\u0431", zorder=5)
 
         ax.legend(loc='best', fontsize=8, framealpha=0.9, frameon=True)
         ax.spines['top'].set_linewidth(0.5)
@@ -858,28 +893,28 @@ class StraightnessWidget(QWidget):
     def _calculate_belt_deflections(self, belt_points: pd.DataFrame, part_num: Optional[int] = None,
                                    part_min_height: Optional[float] = None,
                                    part_max_height: Optional[float] = None):
-        """Рассчитать стрелы прогиба для пояса
+        """Р Р°СЃСЃС‡РёС‚Р°С‚СЊ СЃС‚СЂРµР»С‹ РїСЂРѕРіРёР±Р° РґР»СЏ РїРѕСЏСЃР°
         
-        Согласно нормативам (Инструкция Минсвязи СССР, 1980):
-        - Базовая линия строится через нижнюю и верхнюю точки пояса **в пределах части**
-        - Стрела прогиба - расстояние от каждой точки пояса до этой прямой
-        - Допустимая стрела прогиба: δ_допуск = L / 750, где L - длина пояса (высота части)
-        - Первая (нижняя) и последняя (верхняя) точка пояса в части всегда имеют отклонение 0,
-          так как они являются опорными точками для построения базовой линии
+        РЎРѕРіР»Р°СЃРЅРѕ РЅРѕСЂРјР°С‚РёРІР°Рј (РРЅСЃС‚СЂСѓРєС†РёСЏ РњРёРЅСЃРІСЏР·Рё РЎРЎРЎР , 1980):
+        - Р‘Р°Р·РѕРІР°СЏ Р»РёРЅРёСЏ СЃС‚СЂРѕРёС‚СЃСЏ С‡РµСЂРµР· РЅРёР¶РЅСЋСЋ Рё РІРµСЂС…РЅСЋСЋ С‚РѕС‡РєРё РїРѕСЏСЃР° **РІ РїСЂРµРґРµР»Р°С… С‡Р°СЃС‚Рё**
+        - РЎС‚СЂРµР»Р° РїСЂРѕРіРёР±Р° - СЂР°СЃСЃС‚РѕСЏРЅРёРµ РѕС‚ РєР°Р¶РґРѕР№ С‚РѕС‡РєРё РїРѕСЏСЃР° РґРѕ СЌС‚РѕР№ РїСЂСЏРјРѕР№
+        - Р”РѕРїСѓСЃС‚РёРјР°СЏ СЃС‚СЂРµР»Р° РїСЂРѕРіРёР±Р°: Оґ_РґРѕРїСѓСЃРє = L / 750, РіРґРµ L - РґР»РёРЅР° РїРѕСЏСЃР° (РІС‹СЃРѕС‚Р° С‡Р°СЃС‚Рё)
+        - РџРµСЂРІР°СЏ (РЅРёР¶РЅСЏСЏ) Рё РїРѕСЃР»РµРґРЅСЏСЏ (РІРµСЂС…РЅСЏСЏ) С‚РѕС‡РєР° РїРѕСЏСЃР° РІ С‡Р°СЃС‚Рё РІСЃРµРіРґР° РёРјРµСЋС‚ РѕС‚РєР»РѕРЅРµРЅРёРµ 0,
+          С‚Р°Рє РєР°Рє РѕРЅРё СЏРІР»СЏСЋС‚СЃСЏ РѕРїРѕСЂРЅС‹РјРё С‚РѕС‡РєР°РјРё РґР»СЏ РїРѕСЃС‚СЂРѕРµРЅРёСЏ Р±Р°Р·РѕРІРѕР№ Р»РёРЅРёРё
         
-        Для составной башни расчет выполняется только для точек этой части.
-        Опорные точки определяются как точки на минимальной и максимальной высоте части.
+        Р”Р»СЏ СЃРѕСЃС‚Р°РІРЅРѕР№ Р±Р°С€РЅРё СЂР°СЃС‡РµС‚ РІС‹РїРѕР»РЅСЏРµС‚СЃСЏ С‚РѕР»СЊРєРѕ РґР»СЏ С‚РѕС‡РµРє СЌС‚РѕР№ С‡Р°СЃС‚Рё.
+        РћРїРѕСЂРЅС‹Рµ С‚РѕС‡РєРё РѕРїСЂРµРґРµР»СЏСЋС‚СЃСЏ РєР°Рє С‚РѕС‡РєРё РЅР° РјРёРЅРёРјР°Р»СЊРЅРѕР№ Рё РјР°РєСЃРёРјР°Р»СЊРЅРѕР№ РІС‹СЃРѕС‚Рµ С‡Р°СЃС‚Рё.
         
         Args:
-            belt_points: Точки пояса (уже отфильтрованные по части, если это составная башня)
-            part_num: Номер части башни (опционально, для составной башни)
-            part_min_height: Минимальная высота части (для определения опорной точки)
-            part_max_height: Максимальная высота части (для определения опорной точки)
+            belt_points: РўРѕС‡РєРё РїРѕСЏСЃР° (СѓР¶Рµ РѕС‚С„РёР»СЊС‚СЂРѕРІР°РЅРЅС‹Рµ РїРѕ С‡Р°СЃС‚Рё, РµСЃР»Рё СЌС‚Рѕ СЃРѕСЃС‚Р°РІРЅР°СЏ Р±Р°С€РЅСЏ)
+            part_num: РќРѕРјРµСЂ С‡Р°СЃС‚Рё Р±Р°С€РЅРё (РѕРїС†РёРѕРЅР°Р»СЊРЅРѕ, РґР»СЏ СЃРѕСЃС‚Р°РІРЅРѕР№ Р±Р°С€РЅРё)
+            part_min_height: РњРёРЅРёРјР°Р»СЊРЅР°СЏ РІС‹СЃРѕС‚Р° С‡Р°СЃС‚Рё (РґР»СЏ РѕРїСЂРµРґРµР»РµРЅРёСЏ РѕРїРѕСЂРЅРѕР№ С‚РѕС‡РєРё)
+            part_max_height: РњР°РєСЃРёРјР°Р»СЊРЅР°СЏ РІС‹СЃРѕС‚Р° С‡Р°СЃС‚Рё (РґР»СЏ РѕРїСЂРµРґРµР»РµРЅРёСЏ РѕРїРѕСЂРЅРѕР№ С‚РѕС‡РєРё)
             
         Returns:
-            List[float]: Список стрел прогиба (в мм) для каждой точки
+            List[float]: РЎРїРёСЃРѕРє СЃС‚СЂРµР» РїСЂРѕРіРёР±Р° (РІ РјРј) РґР»СЏ РєР°Р¶РґРѕР№ С‚РѕС‡РєРё
         """
-        # Сортируем по высоте
+        # РЎРѕСЂС‚РёСЂСѓРµРј РїРѕ РІС‹СЃРѕС‚Рµ
         belt_sorted = belt_points.sort_values('z').copy()
         
         if len(belt_sorted) < 2:
@@ -894,119 +929,18 @@ class StraightnessWidget(QWidget):
             if profile_deflections is not None:
                 return profile_deflections
         return [float(value) for value in calculate_canonical_belt_deflections(belt_sorted)]
-        
-        # Для составной башни используем границы части для определения опорных точек
-        # Если границы части переданы, используем их для поиска опорных точек
-        if part_min_height is not None and part_max_height is not None:
-            height_tolerance = 0.1
-            # Находим точки на нижней и верхней границе части
-            bottom_points = belt_sorted[np.abs(belt_sorted['z'] - part_min_height) <= height_tolerance]
-            top_points = belt_sorted[np.abs(belt_sorted['z'] - part_max_height) <= height_tolerance]
-            
-            if len(bottom_points) > 0 and len(top_points) > 0:
-                # Используем средние точки на границах как опорные
-                first_point = {
-                    'x': bottom_points['x'].mean(),
-                    'y': bottom_points['y'].mean(),
-                    'z': bottom_points['z'].mean()
-                }
-                last_point = {
-                    'x': top_points['x'].mean(),
-                    'y': top_points['y'].mean(),
-                    'z': top_points['z'].mean()
-                }
-            else:
-                # Fallback: используем первую и последнюю точку по высоте
-                first_point = belt_sorted.iloc[0]
-                last_point = belt_sorted.iloc[-1]
-        else:
-            # Обычная башня - используем первую и последнюю точку по высоте
-            first_point = belt_sorted.iloc[0]
-            last_point = belt_sorted.iloc[-1]
-        
-        # Координаты опорных точек
-        if isinstance(first_point, pd.Series):
-            p1 = np.array([first_point['x'], first_point['y'], first_point['z']])
-        else:
-            p1 = np.array([first_point['x'], first_point['y'], first_point['z']])
-            
-        if isinstance(last_point, pd.Series):
-            p2 = np.array([last_point['x'], last_point['y'], last_point['z']])
-        else:
-            p2 = np.array([last_point['x'], last_point['y'], last_point['z']])
-        
-        # Направляющий вектор прямой через опорные точки
-        line_direction = p2 - p1
-        line_length = np.linalg.norm(line_direction)
-        
-        # Если точки на одной высоте или очень близко - возвращаем нули
-        if abs(p1[2] - p2[2]) < 1e-6 or line_length < 1e-6:
-            return [0.0] * len(belt_sorted)
-        
-        # Нормализуем направляющий вектор
-        line_direction = line_direction / line_length
-        
-        # Рассчитываем отклонения для каждой точки
-        deflections = []
-        
-        for idx, (point_idx, point) in enumerate(belt_sorted.iterrows()):
-            point_3d = np.array([point['x'], point['y'], point['z']])
-            
-            # Проверяем, является ли точка опорной (на нижней или верхней границе части)
-            is_bottom_support = False
-            is_top_support = False
-            
-            if part_min_height is not None and part_max_height is not None:
-                height_tolerance = 0.1
-                is_bottom_support = np.abs(point['z'] - part_min_height) <= height_tolerance
-                is_top_support = np.abs(point['z'] - part_max_height) <= height_tolerance
-            else:
-                # Для обычной башни первая и последняя точка - опорные
-                is_bottom_support = (idx == 0)
-                is_top_support = (idx == len(belt_sorted) - 1)
-            
-            # Опорные точки всегда имеют отклонение 0
-            if is_bottom_support or is_top_support:
-                deflections.append(0.0)
-                continue
-            
-            # Вектор от опорной точки до текущей точки
-            v = point_3d - p1
-            
-            # Проекция v на направление прямой
-            proj = np.dot(v, line_direction) * line_direction
-            
-            # Перпендикулярная составляющая (отклонение от прямой)
-            perp = v - proj
-            
-            # Расстояние от точки до прямой (стрела прогиба)
-            deflection_m = np.linalg.norm(perp)
-            
-            # Определяем знак отклонения для визуализации
-            # Используем проекцию на нормаль к прямой в горизонтальной плоскости
-            # Для простоты используем знак отклонения по X
-            sign = 1.0 if perp[0] >= 0 else -1.0
-            
-            deflection_mm = sign * deflection_m * 1000  # в мм с учетом знака
-            
-            deflections.append(deflection_mm)
-        
-        logger.debug(f"Расчет стрел прогиба для пояса (часть {part_num if part_num else 'вся'}): {len(belt_sorted)} точек, "
-                     f"опорные точки ({p1[0]:.3f}, {p1[1]:.3f}, {p1[2]:.3f}) и "
-                     f"({p2[0]:.3f}, {p2[1]:.3f}, {p2[2]:.3f})")
-        
-        return deflections
+
     
     def _calculate_belt_angle(self, belt_points: pd.DataFrame):
-        """Рассчитать угол наклона пояса относительно вертикали
+        """Р Р°СЃСЃС‡РёС‚Р°С‚СЊ СѓРіРѕР» РЅР°РєР»РѕРЅР° РїРѕСЏСЃР° РѕС‚РЅРѕСЃРёС‚РµР»СЊРЅРѕ РІРµСЂС‚РёРєР°Р»Рё
         
         Args:
-            belt_points: Точки пояса
+            belt_points: РўРѕС‡РєРё РїРѕСЏСЃР°
             
         Returns:
-            float: Угол в радианах
+            float: РЈРіРѕР» РІ СЂР°РґРёР°РЅР°С…
         """
-        # Находим первую и последнюю точки по высоте
+        # РќР°С…РѕРґРёРј РїРµСЂРІСѓСЋ Рё РїРѕСЃР»РµРґРЅСЋСЋ С‚РѕС‡РєРё РїРѕ РІС‹СЃРѕС‚Рµ
         belt_sorted = belt_points.sort_values('z')
         
         if len(belt_sorted) < 2:
@@ -1015,100 +949,100 @@ class StraightnessWidget(QWidget):
         first_point = belt_sorted.iloc[0]
         last_point = belt_sorted.iloc[-1]
         
-        # Вектор пояса
+        # Р’РµРєС‚РѕСЂ РїРѕСЏСЃР°
         belt_vec = np.array([
             last_point['x'] - first_point['x'],
             last_point['y'] - first_point['y'],
             last_point['z'] - first_point['z']
         ])
         
-        # Вертикальный вектор [0, 0, 1]
+        # Р’РµСЂС‚РёРєР°Р»СЊРЅС‹Р№ РІРµРєС‚РѕСЂ [0, 0, 1]
         vertical_vec = np.array([0.0, 0.0, 1.0])
         
-        # Угол между векторами
+        # РЈРіРѕР» РјРµР¶РґСѓ РІРµРєС‚РѕСЂР°РјРё
         cos_angle = np.dot(belt_vec, vertical_vec) / (np.linalg.norm(belt_vec) * np.linalg.norm(vertical_vec))
         cos_angle = np.clip(cos_angle, -1.0, 1.0)
         angle = np.arccos(cos_angle)
         
-        # Угол отклонения от вертикали
+        # РЈРіРѕР» РѕС‚РєР»РѕРЅРµРЅРёСЏ РѕС‚ РІРµСЂС‚РёРєР°Р»Рё
         deviation_angle = np.pi / 2 - angle if angle < np.pi / 2 else angle - np.pi / 2
         
         return deviation_angle
     
     def _fill_belt_table(self, table, belt_num: int, belt_points: pd.DataFrame):
-        """Заполнить таблицу стрел прогиба для пояса
+        """Р—Р°РїРѕР»РЅРёС‚СЊ С‚Р°Р±Р»РёС†Сѓ СЃС‚СЂРµР» РїСЂРѕРіРёР±Р° РґР»СЏ РїРѕСЏСЃР°
         
         Args:
             table: QTableWidget
-            belt_num: Номер пояса
-            belt_points: Точки пояса
+            belt_num: РќРѕРјРµСЂ РїРѕСЏСЃР°
+            belt_points: РўРѕС‡РєРё РїРѕСЏСЃР°
         """
         try:
-            logger.info(f"Заполнение таблицы для пояса {belt_num}: {len(belt_points)} точек")
-            table.setRowCount(0)  # Очищаем таблицу
+            logger.info(f"Р—Р°РїРѕР»РЅРµРЅРёРµ С‚Р°Р±Р»РёС†С‹ РґР»СЏ РїРѕСЏСЃР° {belt_num}: {len(belt_points)} С‚РѕС‡РµРє")
+            table.setRowCount(0)  # РћС‡РёС‰Р°РµРј С‚Р°Р±Р»РёС†Сѓ
             
-            # Сортируем по высоте
+            # РЎРѕСЂС‚РёСЂСѓРµРј РїРѕ РІС‹СЃРѕС‚Рµ
             belt_sorted = belt_points.sort_values('z')
             deflections = self._calculate_belt_deflections(belt_sorted)
             
             if not deflections:
-                logger.warning("Нет данных о прогибах для таблицы")
+                logger.warning("РќРµС‚ РґР°РЅРЅС‹С… Рѕ РїСЂРѕРіРёР±Р°С… РґР»СЏ С‚Р°Р±Р»РёС†С‹")
                 return
             
-            # Рассчитываем длину пояса для норматива (высота пояса)
+            # Р Р°СЃСЃС‡РёС‚С‹РІР°РµРј РґР»РёРЅСѓ РїРѕСЏСЃР° РґР»СЏ РЅРѕСЂРјР°С‚РёРІР° (РІС‹СЃРѕС‚Р° РїРѕСЏСЃР°)
             belt_length = belt_sorted['z'].max() - belt_sorted['z'].min()
             from core.normatives import get_straightness_tolerance
             max_allowed_deflection_m = get_straightness_tolerance(belt_length)
-            max_allowed_deflection_mm = max_allowed_deflection_m * 1000  # в мм
+            max_allowed_deflection_mm = max_allowed_deflection_m * 1000  # РІ РјРј
             
             for i, (idx, point) in enumerate(belt_sorted.iterrows()):
                 row = table.rowCount()
                 table.insertRow(row)
                 
-                # Высота
+                # Р’С‹СЃРѕС‚Р°
                 height_item = QTableWidgetItem(f"{point['z']:.2f}")
                 height_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
                 table.setItem(row, 0, height_item)
                 
-                # Стрела прогиба
+                # РЎС‚СЂРµР»Р° РїСЂРѕРіРёР±Р°
                 deflection = deflections[i] if i < len(deflections) else 0.0
                 deflection_item = QTableWidgetItem(f"{deflection:+.2f}")
                 deflection_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
                 
-                # Цветовая индикация
+                # Р¦РІРµС‚РѕРІР°СЏ РёРЅРґРёРєР°С†РёСЏ
                 if abs(deflection) > max_allowed_deflection_mm:
-                    # Превышение норматива
-                    deflection_item.setForeground(QColor(220, 50, 50))  # Красный
+                    # РџСЂРµРІС‹С€РµРЅРёРµ РЅРѕСЂРјР°С‚РёРІР°
+                    deflection_item.setForeground(QColor(220, 50, 50))  # РљСЂР°СЃРЅС‹Р№
                 else:
-                    # В норме
-                    deflection_item.setForeground(QColor(50, 150, 50))  # Зеленый
+                    # Р’ РЅРѕСЂРјРµ
+                    deflection_item.setForeground(QColor(50, 150, 50))  # Р—РµР»РµРЅС‹Р№
                 
                 table.setItem(row, 1, deflection_item)
                 
-                # Допустимое отклонение (норматив L/750)
+                # Р”РѕРїСѓСЃС‚РёРјРѕРµ РѕС‚РєР»РѕРЅРµРЅРёРµ (РЅРѕСЂРјР°С‚РёРІ L/750)
                 tolerance_item = QTableWidgetItem(f"{max_allowed_deflection_mm:.2f}")
                 tolerance_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-                tolerance_item.setToolTip(f"Инструкция Минсвязи СССР, 1980: δ_допуск = L / 750 = {max_allowed_deflection_mm:.2f} мм\nгде L = {belt_length:.3f} м - длина пояса (высота)")
+                tolerance_item.setToolTip(f"РРЅСЃС‚СЂСѓРєС†РёСЏ РњРёРЅСЃРІСЏР·Рё РЎРЎРЎР , 1980: Оґ_РґРѕРїСѓСЃРє = L / 750 = {max_allowed_deflection_mm:.2f} РјРј\nРіРґРµ L = {belt_length:.3f} Рј - РґР»РёРЅР° РїРѕСЏСЃР° (РІС‹СЃРѕС‚Р°)")
                 table.setItem(row, 2, tolerance_item)
                 
-                logger.debug(f"Строка {row}: H={point['z']:.2f}м, Def={deflection:+.2f}мм, "
-                            f"Допуск={max_allowed_deflection_mm:.2f}мм")
+                logger.debug(f"РЎС‚СЂРѕРєР° {row}: H={point['z']:.2f}Рј, Def={deflection:+.2f}РјРј, "
+                            f"Р”РѕРїСѓСЃРє={max_allowed_deflection_mm:.2f}РјРј")
             
-            logger.info(f"Таблица заполнена {table.rowCount()} строками для пояса {belt_num}")
+            logger.info(f"РўР°Р±Р»РёС†Р° Р·Р°РїРѕР»РЅРµРЅР° {table.rowCount()} СЃС‚СЂРѕРєР°РјРё РґР»СЏ РїРѕСЏСЃР° {belt_num}")
             
         except Exception as e:
-            logger.error(f"Ошибка при заполнении таблицы для пояса {belt_num}: {e}", exc_info=True)
+            logger.error(f"РћС€РёР±РєР° РїСЂРё Р·Р°РїРѕР»РЅРµРЅРёРё С‚Р°Р±Р»РёС†С‹ РґР»СЏ РїРѕСЏСЃР° {belt_num}: {e}", exc_info=True)
     
     def get_all_belts_data(self):
-        """Получить данные стрел прогиба для всех поясов, сгруппированные по частям башни
+        """РџРѕР»СѓС‡РёС‚СЊ РґР°РЅРЅС‹Рµ СЃС‚СЂРµР» РїСЂРѕРіРёР±Р° РґР»СЏ РІСЃРµС… РїРѕСЏСЃРѕРІ, СЃРіСЂСѓРїРїРёСЂРѕРІР°РЅРЅС‹Рµ РїРѕ С‡Р°СЃС‚СЏРј Р±Р°С€РЅРё
         
         Returns:
-            Dict[int, Dict]: Словарь с ключами - номерами частей, значениями - словарями:
+            Dict[int, Dict]: РЎР»РѕРІР°СЂСЊ СЃ РєР»СЋС‡Р°РјРё - РЅРѕРјРµСЂР°РјРё С‡Р°СЃС‚РµР№, Р·РЅР°С‡РµРЅРёСЏРјРё - СЃР»РѕРІР°СЂСЏРјРё:
             {
                 part_num: {
-                    'min_height': float,  # Минимальная высота части
-                    'max_height': float,  # Максимальная высота части
-                    'belts': Dict[int, List[Dict]]  # Данные по поясам (номер пояса -> список данных)
+                    'min_height': float,  # РњРёРЅРёРјР°Р»СЊРЅР°СЏ РІС‹СЃРѕС‚Р° С‡Р°СЃС‚Рё
+                    'max_height': float,  # РњР°РєСЃРёРјР°Р»СЊРЅР°СЏ РІС‹СЃРѕС‚Р° С‡Р°СЃС‚Рё
+                    'belts': Dict[int, List[Dict]]  # Р”Р°РЅРЅС‹Рµ РїРѕ РїРѕСЏСЃР°Рј (РЅРѕРјРµСЂ РїРѕСЏСЃР° -> СЃРїРёСЃРѕРє РґР°РЅРЅС‹С…)
                 }
             }
         """
@@ -1117,10 +1051,10 @@ class StraightnessWidget(QWidget):
         if self.data is None or self.data.empty or 'belt' not in self.data.columns:
             return all_data_by_parts
         
-        # Исключаем точки standing
+        # РСЃРєР»СЋС‡Р°РµРј С‚РѕС‡РєРё standing
         data_without_station = self._get_working_data()
         
-        # Проверяем, является ли башня составной
+        # РџСЂРѕРІРµСЂСЏРµРј, СЏРІР»СЏРµС‚СЃСЏ Р»Рё Р±Р°С€РЅСЏ СЃРѕСЃС‚Р°РІРЅРѕР№
         profiles = self.processed_data.get('straightness_profiles') if isinstance(self.processed_data, dict) else None
         if isinstance(profiles, list) and profiles:
             for profile in profiles:
@@ -1160,20 +1094,20 @@ class StraightnessWidget(QWidget):
         
         from core.normatives import get_straightness_tolerance
         
-        # Группируем пояса по частям для составной башни
+        # Р“СЂСѓРїРїРёСЂСѓРµРј РїРѕСЏСЃР° РїРѕ С‡Р°СЃС‚СЏРј РґР»СЏ СЃРѕСЃС‚Р°РІРЅРѕР№ Р±Р°С€РЅРё
         if is_composite:
             for part_num in unique_parts:
-                # Получаем пояса этой части
+                # РџРѕР»СѓС‡Р°РµРј РїРѕСЏСЃР° СЌС‚РѕР№ С‡Р°СЃС‚Рё
                 part_mask = data_without_station.apply(lambda row: self._row_has_part(row, part_num), axis=1)
                 part_data = data_without_station[part_mask].copy()
                 part_belts = sorted(part_data['belt'].dropna().unique())
                 
-                # Находим минимальную и максимальную высоту для этой части
+                # РќР°С…РѕРґРёРј РјРёРЅРёРјР°Р»СЊРЅСѓСЋ Рё РјР°РєСЃРёРјР°Р»СЊРЅСѓСЋ РІС‹СЃРѕС‚Сѓ РґР»СЏ СЌС‚РѕР№ С‡Р°СЃС‚Рё
                 part_min_height = float(part_data['z'].min())
                 part_max_height = float(part_data['z'].max())
                 part_height = part_max_height - part_min_height
                 
-                # Рассчитываем допустимое значение для части
+                # Р Р°СЃСЃС‡РёС‚С‹РІР°РµРј РґРѕРїСѓСЃС‚РёРјРѕРµ Р·РЅР°С‡РµРЅРёРµ РґР»СЏ С‡Р°СЃС‚Рё
                 max_allowed_deflection_m = get_straightness_tolerance(part_height)
                 max_allowed_deflection_mm = max_allowed_deflection_m * 1000
                 
@@ -1192,14 +1126,14 @@ class StraightnessWidget(QWidget):
                     belt_data = []
                     for i, (idx, point) in enumerate(belt_sorted.iterrows()):
                         belt_data.append({
-                            'height': float(point['z']),  # Абсолютная высота
+                            'height': float(point['z']),  # РђР±СЃРѕР»СЋС‚РЅР°СЏ РІС‹СЃРѕС‚Р°
                             'deflection': float(deflections[i] if i < len(deflections) else 0),
                             'tolerance': max_allowed_deflection_mm
                         })
                     
                     belts_data[int(belt_num)] = belt_data
                 
-                if belts_data:  # Добавляем только если есть данные
+                if belts_data:  # Р”РѕР±Р°РІР»СЏРµРј С‚РѕР»СЊРєРѕ РµСЃР»Рё РµСЃС‚СЊ РґР°РЅРЅС‹Рµ
                     part_id = int(part_num)
                     all_data_by_parts[part_id] = {
                         'min_height': part_min_height,
@@ -1207,7 +1141,7 @@ class StraightnessWidget(QWidget):
                         'belts': belts_data
                     }
         else:
-            # Обычная башня - обрабатываем все пояса как одну часть
+            # РћР±С‹С‡РЅР°СЏ Р±Р°С€РЅСЏ - РѕР±СЂР°Р±Р°С‚С‹РІР°РµРј РІСЃРµ РїРѕСЏСЃР° РєР°Рє РѕРґРЅСѓ С‡Р°СЃС‚СЊ
             belts = sorted(data_without_station['belt'].dropna().unique())
             tower_min_height = float(data_without_station['z'].min())
             tower_max_height = float(data_without_station['z'].max())
@@ -1246,10 +1180,10 @@ class StraightnessWidget(QWidget):
         return all_data_by_parts
     
     def get_all_figures_for_pdf(self):
-        """Получить все figure объекты для сохранения в PDF
+        """РџРѕР»СѓС‡РёС‚СЊ РІСЃРµ figure РѕР±СЉРµРєС‚С‹ РґР»СЏ СЃРѕС…СЂР°РЅРµРЅРёСЏ РІ PDF
         
         Returns:
-            List[Tuple[int, Figure]]: Список кортежей (номер_пояса, figure)
+            List[Tuple[int, Figure]]: РЎРїРёСЃРѕРє РєРѕСЂС‚РµР¶РµР№ (РЅРѕРјРµСЂ_РїРѕСЏСЃР°, figure)
         """
         figures = []
         
@@ -1265,7 +1199,7 @@ class StraightnessWidget(QWidget):
             if len(belt_points) < 2:
                 continue
             
-            # Создаем figure для этого пояса
+            # РЎРѕР·РґР°РµРј figure РґР»СЏ СЌС‚РѕРіРѕ РїРѕСЏСЃР°
             figure = Figure(figsize=(8, 6), dpi=100)
             self._plot_belt_straightness(figure, belt_num, belt_points, part_num=None)
             figures.append((int(belt_num), figure))
@@ -1273,10 +1207,10 @@ class StraightnessWidget(QWidget):
         return figures
     
     def get_combined_figure_for_pdf(self):
-        """Создать объединенный график всех поясов для PDF
+        """РЎРѕР·РґР°С‚СЊ РѕР±СЉРµРґРёРЅРµРЅРЅС‹Р№ РіСЂР°С„РёРє РІСЃРµС… РїРѕСЏСЃРѕРІ РґР»СЏ PDF
         
         Returns:
-            Figure: Matplotlib figure с субплотами для всех поясов
+            Figure: Matplotlib figure СЃ СЃСѓР±РїР»РѕС‚Р°РјРё РґР»СЏ РІСЃРµС… РїРѕСЏСЃРѕРІ
         """
         working_data = self._get_working_data()
         if working_data.empty or 'belt' not in working_data.columns:
@@ -1287,14 +1221,14 @@ class StraightnessWidget(QWidget):
         if len(belts) == 0:
             return None
         
-        # Определяем размер сетки
+        # РћРїСЂРµРґРµР»СЏРµРј СЂР°Р·РјРµСЂ СЃРµС‚РєРё
         num_belts = len(belts)
         
-        # Создаем сетку графиков: 2 колонки, столько строк, сколько нужно
+        # РЎРѕР·РґР°РµРј СЃРµС‚РєСѓ РіСЂР°С„РёРєРѕРІ: 2 РєРѕР»РѕРЅРєРё, СЃС‚РѕР»СЊРєРѕ СЃС‚СЂРѕРє, СЃРєРѕР»СЊРєРѕ РЅСѓР¶РЅРѕ
         cols = 2
-        rows = (num_belts + cols - 1) // cols  # Округляем вверх
+        rows = (num_belts + cols - 1) // cols  # РћРєСЂСѓРіР»СЏРµРј РІРІРµСЂС…
         
-        # Создаем figure с субплотами
+        # РЎРѕР·РґР°РµРј figure СЃ СЃСѓР±РїР»РѕС‚Р°РјРё
         figure = Figure(figsize=(12, max(6, 4.5 * rows)), dpi=120)
         subplot_pos = 1
 
@@ -1318,7 +1252,7 @@ class StraightnessWidget(QWidget):
         return figure
 
     def get_grouped_figures_for_pdf(self, group_size: int = 2):
-        """Получить фигуры с графиками, сгруппированными по несколько поясов."""
+        """РџРѕР»СѓС‡РёС‚СЊ С„РёРіСѓСЂС‹ СЃ РіСЂР°С„РёРєР°РјРё, СЃРіСЂСѓРїРїРёСЂРѕРІР°РЅРЅС‹РјРё РїРѕ РЅРµСЃРєРѕР»СЊРєРѕ РїРѕСЏСЃРѕРІ."""
         working_data = self._get_working_data()
         if working_data.empty or 'belt' not in working_data.columns:
             return []
@@ -1361,14 +1295,14 @@ class StraightnessWidget(QWidget):
         return grouped_figures
     
     def get_part_figures_for_pdf(self, part_num: int, group_size: int = 2):
-        """Получить фигуры с графиками для конкретной части башни.
+        """РџРѕР»СѓС‡РёС‚СЊ С„РёРіСѓСЂС‹ СЃ РіСЂР°С„РёРєР°РјРё РґР»СЏ РєРѕРЅРєСЂРµС‚РЅРѕР№ С‡Р°СЃС‚Рё Р±Р°С€РЅРё.
         
         Args:
-            part_num: Номер части башни
-            group_size: Количество поясов на одном графике
+            part_num: РќРѕРјРµСЂ С‡Р°СЃС‚Рё Р±Р°С€РЅРё
+            group_size: РљРѕР»РёС‡РµСЃС‚РІРѕ РїРѕСЏСЃРѕРІ РЅР° РѕРґРЅРѕРј РіСЂР°С„РёРєРµ
             
         Returns:
-            List[Tuple[Tuple[int, ...], Figure]]: Список кортежей (группа_поясов, figure)
+            List[Tuple[Tuple[int, ...], Figure]]: РЎРїРёСЃРѕРє РєРѕСЂС‚РµР¶РµР№ (РіСЂСѓРїРїР°_РїРѕСЏСЃРѕРІ, figure)
         """
         if not hasattr(self, '_graph_entries_by_part') or not self._graph_entries_by_part:
             return []
@@ -1377,7 +1311,7 @@ class StraightnessWidget(QWidget):
         if not entries:
             return []
         
-        # Получаем список поясов для этой части
+        # РџРѕР»СѓС‡Р°РµРј СЃРїРёСЃРѕРє РїРѕСЏСЃРѕРІ РґР»СЏ СЌС‚РѕР№ С‡Р°СЃС‚Рё
         part_belts = sorted([entry[0] for entry in entries])
         if not part_belts:
             return []
@@ -1392,7 +1326,7 @@ class StraightnessWidget(QWidget):
             subplot_pos = 1
             plotted_belts: list[int] = []
             
-            # Создаем словарь для быстрого поиска записей по номеру пояса
+            # РЎРѕР·РґР°РµРј СЃР»РѕРІР°СЂСЊ РґР»СЏ Р±С‹СЃС‚СЂРѕРіРѕ РїРѕРёСЃРєР° Р·Р°РїРёСЃРµР№ РїРѕ РЅРѕРјРµСЂСѓ РїРѕСЏСЃР°
             belt_to_entry = {entry[0]: entry for entry in entries}
             
             for belt_num in belt_group:

@@ -25,6 +25,7 @@ from core.calculations import (
 )
 from core.normatives import NormativeChecker, get_vertical_tolerance
 from core.point_utils import (
+    build_flag_mask,
     build_is_station_mask,
     build_working_tower_mask,
     normalize_tower_point_flags,
@@ -500,12 +501,7 @@ class DataTableWidget(QWidget):
             if 'is_part_boundary' not in work_data.columns:
                 work_data['is_part_boundary'] = False
             else:
-                boundary_series = work_data['is_part_boundary']
-                try:
-                    boundary_series = boundary_series.fillna(False).astype(bool)
-                except Exception:
-                    boundary_series = boundary_series.fillna(False).map(lambda v: bool(v))
-                work_data['is_part_boundary'] = boundary_series
+                work_data['is_part_boundary'] = build_flag_mask(work_data, 'is_part_boundary')
             if 'station_role' not in work_data.columns:
                 work_data['station_role'] = None
             
@@ -587,55 +583,68 @@ class DataTableWidget(QWidget):
                 f"is_station колонка присутствует: {'is_station' in self.original_data.columns}, "
                 f"значения is_station: {self.original_data['is_station'].value_counts().to_dict() if 'is_station' in self.original_data.columns else 'N/A'}"
             )
-            self.set_active_station_btn.setEnabled(False)
-            return
-        
-        for i, (idx, row) in enumerate(station_data.iterrows()):
-            # №
-            point_index_value = row.get('point_index')
-            point_index_text = ''
-            if pd.notna(point_index_value):
+            self._current_station_data = pd.DataFrame()
+            self.active_station_id = None
+            if hasattr(self.editor_3d, 'set_active_station_index'):
                 try:
-                    point_index_text = str(int(point_index_value))
-                except (ValueError, TypeError):
-                    point_index_text = str(point_index_value)
-            if not point_index_text:
-                point_index_text = str(i + 1)
-            item = QTableWidgetItem(point_index_text)
-            # КРИТИЧЕСКИ ВАЖНО: сохраняем point_index в UserRole для стабильной идентификации
-            # Если point_index отсутствует в данных, создаем его на основе позиции + 1 (1-based)
-            # Это гарантирует, что UserRole всегда содержит point_index, а не позицию
-            if pd.notna(point_index_value):
-                # point_index есть в данных - используем его
-                stored_point_index = int(point_index_value)
-            else:
-                # point_index отсутствует - создаем его на основе позиции (1-based)
-                # КРИТИЧЕСКИ ВАЖНО: используем i+1, а не i, так как point_index начинается с 1
-                stored_point_index = i + 1
-                logger.debug(
-                    f"set_data (station_table): point_index отсутствует для строки {i}, "
-                    f"создаем stored_point_index={stored_point_index} на основе позиции"
-                )
-            item.setData(Qt.ItemDataRole.UserRole, stored_point_index)
-            item.setFlags(Qt.ItemFlag.ItemIsEnabled)
-            self.station_table.setItem(i, 0, item)
+                    self.editor_3d.set_active_station_index(None)
+                except Exception:
+                    pass
+            self.set_active_station_btn.setEnabled(False)
+        else:
+            for i, (idx, row) in enumerate(station_data.iterrows()):
+                # №
+                point_index_value = row.get('point_index')
+                parsed_point_index = None
+                point_index_text = ''
+                if pd.notna(point_index_value):
+                    raw_point_index = str(point_index_value).strip()
+                    if raw_point_index:
+                        try:
+                            parsed_point_index = int(float(raw_point_index))
+                        except (ValueError, TypeError):
+                            point_index_text = raw_point_index
+                        else:
+                            point_index_text = str(parsed_point_index)
+                if not point_index_text:
+                    point_index_text = str(i + 1)
+                item = QTableWidgetItem(point_index_text)
+                # КРИТИЧЕСКИ ВАЖНО: сохраняем point_index в UserRole для стабильной идентификации
+                # Если point_index отсутствует в данных, создаем его на основе позиции + 1 (1-based)
+                # Это гарантирует, что UserRole всегда содержит point_index, а не позицию
+                if pd.notna(point_index_value):
+                    # point_index есть в данных - используем его
+                    stored_point_index = parsed_point_index
+                else:
+                    # point_index отсутствует - создаем его на основе позиции (1-based)
+                    # КРИТИЧЕСКИ ВАЖНО: используем i+1, а не i, так как point_index начинается с 1
+                    stored_point_index = i + 1
+                    logger.debug(
+                        f"set_data (station_table): point_index отсутствует для строки {i}, "
+                        f"создаем stored_point_index={stored_point_index} на основе позиции"
+                    )
+                if stored_point_index is None:
+                    stored_point_index = i + 1
+                item.setData(Qt.ItemDataRole.UserRole, stored_point_index)
+                item.setFlags(Qt.ItemFlag.ItemIsEnabled)
+                self.station_table.setItem(i, 0, item)
+                
+                # Название
+                name = row.get('name', f'Точка {i+1}')
+                item = QTableWidgetItem(str(name))
+                self.station_table.setItem(i, 1, item)
+                
+                # X, Y, Z
+                for j, col in enumerate(['x', 'y', 'z'], start=2):
+                    item = QTableWidgetItem(f"{row[col]:.6f}" if j < 4 else f"{row[col]:.3f}")
+                    self.station_table.setItem(i, j, item)
             
-            # Название
-            name = row.get('name', f'Точка {i+1}')
-            item = QTableWidgetItem(str(name))
-            self.station_table.setItem(i, 1, item)
+                active_item = QTableWidgetItem('✓' if self.active_station_id == idx else '')
+                active_item.setFlags(Qt.ItemFlag.ItemIsEnabled)
+                active_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+                self.station_table.setItem(i, 5, active_item)
             
-            # X, Y, Z
-            for j, col in enumerate(['x', 'y', 'z'], start=2):
-                item = QTableWidgetItem(f"{row[col]:.6f}" if j < 4 else f"{row[col]:.3f}")
-                self.station_table.setItem(i, j, item)
-        
-            active_item = QTableWidgetItem('✓' if self.active_station_id == idx else '')
-            active_item.setFlags(Qt.ItemFlag.ItemIsEnabled)
-            active_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-            self.station_table.setItem(i, 5, active_item)
-        
-        self._current_station_data = station_data.copy()
+            self._current_station_data = station_data.copy()
         # НЕ сортируем tower_data, чтобы порядок соответствовал 3D редактору
         # Сортировка может вызывать несоответствие порядка точек между таблицей и 3D видом
         self._current_tower_data = tower_data.copy()
@@ -1414,7 +1423,10 @@ class DataTableWidget(QWidget):
 
         station_sections: List[Dict[str, Any]] = []
         if has_required_stations:
-            station_sections = self._build_sections_from_axis_payload(axis_sections)
+            station_sections = self._build_sections_from_axis_payload(
+                axis_sections,
+                authoritative=has_authoritative_stations,
+            )
             if has_authoritative_stations:
                 merged_sections = self._merge_station_sections_with_fallback(station_sections, fallback_sections)
             else:
@@ -1738,6 +1750,7 @@ class DataTableWidget(QWidget):
         center_rows: List[Dict[str, Any]],
         *,
         source: str,
+        reference_mode: str = 'best_fit',
     ) -> List[Dict[str, Any]]:
         if not center_rows:
             return []
@@ -1771,20 +1784,11 @@ class DataTableWidget(QWidget):
                 'z': float(primary_station[2]),
             }
 
-        axis = approximate_tower_axis(centers_df)
         local_cs = calculate_local_coordinate_system(centers_df, standing_point, None)
-        centers_with_vertical = calculate_vertical_deviation_with_local_cs(
-            centers_df,
-            axis,
-            local_cs,
-            standing_point,
-        )
-        by_key = {
-            row.get('section_key'): row
-            for _, row in centers_with_vertical.iterrows()
-        }
+        x_axis = np.array(local_cs.get('x_axis', (1.0, 0.0, 0.0)), dtype=float)
+        y_axis = np.array(local_cs.get('y_axis', (0.0, 1.0, 0.0)), dtype=float)
 
-        result: List[Dict[str, Any]] = []
+        baseline_by_part: Dict[int, Dict[str, Any]] = {}
         for row in sorted(
             center_rows,
             key=lambda item: (
@@ -1792,32 +1796,88 @@ class DataTableWidget(QWidget):
                 self._safe_int(item.get('section_num'), 10**9),
             ),
         ):
-            vertical_row = by_key.get(row.get('section_key'))
-            if vertical_row is None:
+            center_xy = row.get('center_xy')
+            if center_xy is None:
+                continue
+            part_key = int(row['part_num']) if row.get('part_num') is not None else 0
+            baseline_by_part.setdefault(part_key, row)
+
+        basis_complete = reference_mode == 'baseline_by_part'
+        allow_station_component_override = source == 'stations' and basis_complete
+        result: List[Dict[str, Any]] = []
+
+        for row in sorted(
+            center_rows,
+            key=lambda item: (
+                float(item.get('height', 0.0) or 0.0),
+                self._safe_int(item.get('section_num'), 10**9),
+            ),
+        ):
+            center_xy = row.get('center_xy')
+            if center_xy is None:
                 continue
 
             height = float(row.get('height', 0.0) or 0.0)
-            z_diff = height - float(axis.get('z0', 0.0) or 0.0)
+            part_key = int(row['part_num']) if row.get('part_num') is not None else 0
+            baseline_row = baseline_by_part.get(part_key)
+            baseline_center_xy = baseline_row.get('center_xy') if baseline_row is not None else None
+            if baseline_center_xy is None:
+                baseline_center_xy = center_xy
+
             axis_point_xy = (
-                float(axis.get('x0', 0.0) or 0.0) + float(axis.get('dx', 0.0) or 0.0) * z_diff,
-                float(axis.get('y0', 0.0) or 0.0) + float(axis.get('dy', 0.0) or 0.0) * z_diff,
+                float(baseline_center_xy[0]),
+                float(baseline_center_xy[1]),
             )
-            deviation_x_mm = float(vertical_row.get('deviation_x', 0.0) or 0.0) * 1000.0
-            deviation_y_mm = float(vertical_row.get('deviation_y', 0.0) or 0.0) * 1000.0
-            total_deviation_mm = float(vertical_row.get('deviation', 0.0) or 0.0) * 1000.0
+            current_center_xy = np.array(
+                [float(center_xy[0]), float(center_xy[1]), 0.0],
+                dtype=float,
+            )
+            baseline_center_xyz = np.array(
+                [float(baseline_center_xy[0]), float(baseline_center_xy[1]), 0.0],
+                dtype=float,
+            )
+
+            shift_vector = current_center_xy - baseline_center_xyz
+            resolved_shift_xy_mm = row.get('resolved_shift_xy_mm')
+            if isinstance(resolved_shift_xy_mm, (list, tuple)) and len(resolved_shift_xy_mm) >= 2:
+                try:
+                    shift_vector = np.array(
+                        [
+                            float(resolved_shift_xy_mm[0]) / 1000.0,
+                            float(resolved_shift_xy_mm[1]) / 1000.0,
+                            0.0,
+                        ],
+                        dtype=float,
+                    )
+                except (TypeError, ValueError):
+                    pass
+
+            local_deviation_x_mm = float(np.dot(shift_vector, x_axis) * 1000.0)
+            local_deviation_y_mm = float(np.dot(shift_vector, y_axis) * 1000.0)
+            total_deviation_mm = float(np.linalg.norm(shift_vector[:2]) * 1000.0)
+
+            deviation_x_mm = local_deviation_x_mm
+            deviation_y_mm = local_deviation_y_mm
+            if allow_station_component_override:
+                station_deviation_x = row.get('station_deviation_x')
+                station_deviation_y = row.get('station_deviation_y')
+                if station_deviation_x is not None:
+                    deviation_x_mm = float(station_deviation_x)
+                if station_deviation_y is not None:
+                    deviation_y_mm = float(station_deviation_y)
 
             merged_row = dict(row)
             merged_row.update({
                 'axis_point_xy': axis_point_xy,
-                'local_deviation_x': deviation_x_mm,
-                'local_deviation_y': deviation_y_mm,
+                'local_deviation_x': local_deviation_x_mm,
+                'local_deviation_y': local_deviation_y_mm,
                 'deviation_x': deviation_x_mm,
                 'deviation_y': deviation_y_mm,
                 'total_deviation': total_deviation_mm,
                 'deviation': total_deviation_mm,
                 'tolerance': float(get_vertical_tolerance(height) * 1000.0),
                 'source': source,
-                'basis_complete': True,
+                'basis_complete': basis_complete,
             })
             result.append(merged_row)
 
@@ -1838,33 +1898,26 @@ class DataTableWidget(QWidget):
             try:
                 centers_df = pd.DataFrame(centers)
             except Exception:
-                logger.exception("Не удалось преобразовать centers в DataFrame для fallback-вертикальности")
+                logger.exception("?? ??????? ????????????? centers ? DataFrame ??? fallback-??????????????")
                 return []
 
         if centers_df.empty:
             return []
 
         height_col = next((candidate for candidate in ('z', 'height', 'belt_height') if candidate in centers_df.columns), None)
-        if height_col is None:
+        if height_col is None or 'x' not in centers_df.columns or 'y' not in centers_df.columns:
             return []
 
-        axis = None
-        if all(column in centers_df.columns for column in ('x', 'y', height_col)):
-            axis_input = centers_df.rename(columns={height_col: 'z'})[['x', 'y', 'z']].copy()
-            axis = approximate_tower_axis(axis_input)
-
-        scale_total = self._infer_mm_scale(centers_df['deviation']) if 'deviation' in centers_df.columns else 1.0
-        scale_x = self._infer_mm_scale(centers_df['deviation_x']) if 'deviation_x' in centers_df.columns else scale_total
-        scale_y = self._infer_mm_scale(centers_df['deviation_y']) if 'deviation_y' in centers_df.columns else scale_total
         tolerance = self._section_height_tolerance(section_entries)
         existing_nums = [self._safe_int(entry.get('section_num')) for entry in section_entries]
         existing_nums = [num for num in existing_nums if num is not None]
         next_section_num = (max(existing_nums) + 1) if existing_nums else 0
-        processed_sections: List[Dict[str, Any]] = []
+        center_rows: List[Dict[str, Any]] = []
 
         for _, row in centers_df.sort_values(height_col).iterrows():
             try:
                 height = float(row[height_col])
+                center_xy = (float(row.get('x', 0.0) or 0.0), float(row.get('y', 0.0) or 0.0))
             except (TypeError, ValueError):
                 continue
 
@@ -1877,52 +1930,25 @@ class DataTableWidget(QWidget):
             else:
                 section_num = next_section_num
                 section_label = str(section_num)
-                part_num = None
-                part_memberships = []
+                part_memberships = self._extract_part_memberships(row)
+                part_num = part_memberships[0] if part_memberships else self._safe_int(row.get('tower_part'))
                 next_section_num += 1
 
-            deviation_x_mm = float(row.get('deviation_x', 0.0) or 0.0) * scale_x
-            deviation_y_mm = float(row.get('deviation_y', 0.0) or 0.0) * scale_y
-            if 'deviation' in row.index:
-                total_deviation_mm = float(row.get('deviation', 0.0) or 0.0) * scale_total
-            else:
-                total_deviation_mm = float(np.hypot(deviation_x_mm, deviation_y_mm))
-
-            center_xy = None
-            axis_point_xy = None
-            if 'x' in row.index and 'y' in row.index:
-                try:
-                    center_xy = (float(row.get('x', 0.0) or 0.0), float(row.get('y', 0.0) or 0.0))
-                except (TypeError, ValueError):
-                    center_xy = None
-            if axis and axis.get('valid'):
-                z_diff = height - float(axis.get('z0', 0.0) or 0.0)
-                axis_point_xy = (
-                    float(axis.get('x0', 0.0) or 0.0) + float(axis.get('dx', 0.0) or 0.0) * z_diff,
-                    float(axis.get('y0', 0.0) or 0.0) + float(axis.get('dy', 0.0) or 0.0) * z_diff,
-                )
-
-            processed_sections.append({
+            center_rows.append({
                 'section_key': self._make_section_key(section_num, height),
                 'section_num': section_num,
                 'section_label': section_label,
                 'height': height,
                 'center_xy': center_xy,
-                'axis_point_xy': axis_point_xy,
-                'local_deviation_x': float(deviation_x_mm),
-                'local_deviation_y': float(deviation_y_mm),
-                'deviation_x': float(deviation_x_mm),
-                'deviation_y': float(deviation_y_mm),
-                'total_deviation': float(total_deviation_mm),
-                'deviation': float(total_deviation_mm),
                 'part_num': part_num,
                 'part_memberships': list(part_memberships),
-                'tolerance': float(get_vertical_tolerance(height) * 1000.0),
-                'source': 'processed',
-                'basis_complete': False,
             })
 
-        return processed_sections
+        return self._build_axis_based_sections_from_centers(
+            center_rows,
+            source='processed',
+            reference_mode='best_fit',
+        )
 
     def _finalize_axis_rows(
         self,
@@ -2117,6 +2143,8 @@ class DataTableWidget(QWidget):
     def _build_sections_from_axis_payload(
         self,
         axis_sections: Dict[str, Dict[str, Dict[str, Any]]],
+        *,
+        authoritative: bool = True,
     ) -> List[Dict[str, Any]]:
         sections_x = axis_sections.get('x', {})
         sections_y = axis_sections.get('y', {})
@@ -2180,7 +2208,11 @@ class DataTableWidget(QWidget):
                 'resolved_shift_xy_mm': [float(shift_xy[0] * 1000.0), float(shift_xy[1] * 1000.0)] if shift_xy is not None else None,
             })
 
-        return self._build_axis_based_sections_from_centers(result, source='stations')
+        return self._build_axis_based_sections_from_centers(
+            result,
+            source='stations',
+            reference_mode='baseline_by_part' if authoritative else 'best_fit',
+        )
 
     def _merge_station_sections_with_fallback(
         self,

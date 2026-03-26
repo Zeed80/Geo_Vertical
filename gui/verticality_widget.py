@@ -772,20 +772,16 @@ class VerticalityWidget(QWidget):
         heights = [d['height'] for d in section_data_sorted]
         raw_dev_x = [float(d.get('deviation_x', 0.0) or 0.0) for d in section_data_sorted]
         raw_dev_y = [float(d.get('deviation_y', 0.0) or 0.0) for d in section_data_sorted]
-        baseline_x = raw_dev_x[0] if raw_dev_x else 0.0
-        baseline_y = raw_dev_y[0] if raw_dev_y else 0.0
-        display_dev_x = [value - baseline_x for value in raw_dev_x]
-        display_dev_y = [value - baseline_y for value in raw_dev_y]
         if component == 'x':
-            deviations = display_dev_x
+            deviations = raw_dev_x
             component_label = 'X'
             color = '#E74C3C'
-            paired_deviations = display_dev_y
+            paired_deviations = raw_dev_y
         else:
-            deviations = display_dev_y
+            deviations = raw_dev_y
             component_label = 'Y'
             color = '#3498DB'
-            paired_deviations = display_dev_x
+            paired_deviations = raw_dev_x
 
         # Применяем делитель подгонки
         if divisor and divisor > 0:

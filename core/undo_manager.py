@@ -396,7 +396,9 @@ class DataChangeCommand(Command):
         data_setter: Callable[[pd.DataFrame], None],
         old_data: pd.DataFrame,
         new_data: pd.DataFrame,
-        description: str = "Изменение данных"
+        description: str = "Изменение данных",
+        post_execute: Callable[[], None] | None = None,
+        post_undo: Callable[[], None] | None = None
     ):
         """
         Инициализация команды изменения данных
@@ -413,11 +415,15 @@ class DataChangeCommand(Command):
         self.old_data = old_data.copy()
         self.new_data = new_data.copy()
         self.description = description
+        self.post_execute = post_execute
+        self.post_undo = post_undo
 
     def execute(self) -> bool:
         """Применяет изменение данных"""
         try:
             self.data_setter(self.new_data)
+            if self.post_execute is not None:
+                self.post_execute()
             return True
         except Exception as e:
             logger.error(f"Ошибка выполнения команды изменения данных: {e}", exc_info=True)
@@ -427,6 +433,8 @@ class DataChangeCommand(Command):
         """Отменяет изменение данных"""
         try:
             self.data_setter(self.old_data)
+            if self.post_undo is not None:
+                self.post_undo()
             return True
         except Exception as e:
             logger.error(f"Ошибка отмены команды изменения данных: {e}", exc_info=True)

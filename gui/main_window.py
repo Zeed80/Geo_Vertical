@@ -12,6 +12,7 @@ from contextlib import contextmanager
 
 from PyQt6.QtCore import Qt, pyqtSignal, QSettings, QRect, QTimer
 from PyQt6.QtGui import QIcon, QAction, QPalette, QColor, QGuiApplication
+import copy
 import pandas as pd
 import numpy as np
 from typing import Optional, Dict, Any
@@ -145,6 +146,41 @@ class MainWindow(QMainWindow):
             yield
         finally:
             self._suspend_data_sync = previous_state
+
+    @staticmethod
+    def _clone_section_data(section_data):
+        return copy.deepcopy(section_data) if section_data else []
+
+    @staticmethod
+    def _clone_dataframe(dataframe: Optional[pd.DataFrame]) -> Optional[pd.DataFrame]:
+        return dataframe.copy(deep=True) if isinstance(dataframe, pd.DataFrame) else None
+
+    def _set_editor_section_data(self, section_data) -> None:
+        if self.editor_3d is None:
+            return
+        if hasattr(self.editor_3d, 'set_section_lines'):
+            self.editor_3d.set_section_lines(self._clone_section_data(section_data))
+        else:
+            self.editor_3d.section_data = self._clone_section_data(section_data)
+
+    def _rebuild_active_sections_from_raw_data(self) -> None:
+        if self.editor_3d is None:
+            return
+
+        current_sections = getattr(self.editor_3d, 'section_data', []) or []
+        if not current_sections:
+            return
+
+        if self.raw_data is None or self.raw_data.empty:
+            self._set_editor_section_data([])
+            return
+
+        section_levels = find_section_levels(self.raw_data, height_tolerance=0.3)
+        rebuilt_sections = (
+            get_section_lines(self.raw_data, section_levels, height_tolerance=0.3)
+            if section_levels else []
+        )
+        self._set_editor_section_data(rebuilt_sections)
 
     def init_ui(self):
         """Инициализация интерфейса"""
@@ -875,10 +911,12 @@ class MainWindow(QMainWindow):
         
         try:
             self.statusBar.showMessage('Создание секций...')
-            
-            # Сохраняем оригинальные данные перед созданием секций
-            self.original_data_before_sections = self.raw_data.copy()
-            
+
+            old_section_data = self._clone_section_data(
+                getattr(self.editor_3d, 'section_data', []) if self.editor_3d is not None else []
+            )
+            old_snapshot = self._clone_dataframe(self.original_data_before_sections)
+             
             # 1. Находим уровни секций
             section_levels = find_section_levels(self.raw_data, height_tolerance=0.3)
             
@@ -893,29 +931,38 @@ class MainWindow(QMainWindow):
                 self.raw_data, section_levels, height_tolerance=0.3
             )
             added_count = len(data_with_sections) - initial_count
-            
+            section_lines = get_section_lines(data_with_sections, section_levels, height_tolerance=0.3)
+             
             # 3. Обновляем данные через команду
             from core.undo_manager import DataChangeCommand
-            
+             
             old_data = self.raw_data.copy(deep=True) if self.raw_data is not None else pd.DataFrame()
             new_data = data_with_sections.copy(deep=True)
-            
+            new_snapshot = old_data.copy(deep=True)
+             
             def data_getter():
                 return self.raw_data if self.raw_data is not None else pd.DataFrame()
-            
+             
             def data_setter(data):
                 self.raw_data = data
-                if hasattr(self, 'data_table'):
-                    self.data_table.set_data(data)
-                if hasattr(self, 'editor_3d'):
-                    self.editor_3d.set_data(data)
-            
+                with self._suspend_data_change_handlers():
+                    if hasattr(self, 'data_table'):
+                        self.data_table.set_data(data)
+                    if hasattr(self, 'editor_3d'):
+                        self.editor_3d.set_data(data)
+
+            def apply_section_state(section_state, snapshot_state):
+                self._set_editor_section_data(section_state)
+                self.original_data_before_sections = self._clone_dataframe(snapshot_state)
+             
             create_sections_command = DataChangeCommand(
                 data_getter,
                 data_setter,
                 old_data,
                 new_data,
-                f"Создание секций ({len(section_levels)} секций, добавлено {added_count} точек)"
+                f"Создание секций ({len(section_levels)} секций, добавлено {added_count} точек)",
+                post_execute=lambda: apply_section_state(section_lines, new_snapshot),
+                post_undo=lambda: apply_section_state(old_section_data, old_snapshot),
             )
             
             # Выполняем команду через undo_manager
@@ -924,13 +971,6 @@ class MainWindow(QMainWindow):
             self.has_unsaved_changes = True  # Отмечаем изменения
             
             # Метод удаления секций доступен через 3D редактор
-            
-            # 4. Получаем линии секций для визуализации
-            section_lines = get_section_lines(data_with_sections, section_levels, height_tolerance=0.3)
-            
-            # 5. Передаем линии секций в 3D редактор для отрисовки
-            if hasattr(self.editor_3d, 'set_section_lines'):
-                self.editor_3d.set_section_lines(section_lines)
             
             # Активируем кнопки в 3D редакторе
             if hasattr(self.editor_3d, 'create_sections_action'):
@@ -958,59 +998,80 @@ class MainWindow(QMainWindow):
             self.statusBar.showMessage('Ошибка создания секций')
     
     def remove_sections(self):
-        """Удалить все добавленные точки секций, вернуть оригинальные данные"""
-        if self.original_data_before_sections is None:
-            QMessageBox.warning(self, 'Предупреждение', 
-                              'Нет сохраненных оригинальных данных')
+        """Удалить добавленные точки секций без отката остальных правок."""
+        current_sections = self._clone_section_data(
+            getattr(self.editor_3d, 'section_data', []) if self.editor_3d is not None else []
+        )
+        old_snapshot = self._clone_dataframe(self.original_data_before_sections)
+
+        old_data = self.raw_data.copy(deep=True) if self.raw_data is not None else pd.DataFrame()
+        if old_data.empty:
+            QMessageBox.warning(self, 'Предупреждение', 'Нет данных для удаления секций')
             return
-        
+
         try:
-            # Восстанавливаем оригинальные данные через команду
+            section_generated_mask = pd.Series(False, index=old_data.index)
+            if 'is_section_generated' in old_data.columns:
+                section_generated_mask = (
+                    old_data['is_section_generated']
+                    .map(lambda value: bool(value) if pd.notna(value) else False)
+                    .astype(bool)
+                )
+
+            if not section_generated_mask.any() and 'name' in old_data.columns:
+                legacy_mask = old_data['name'].fillna('').astype(str).str.match(
+                    r'^S\d+(?:_P\d+)?_B\d+$',
+                    na=False,
+                )
+                section_generated_mask = legacy_mask.astype(bool)
+
+            if not current_sections and not section_generated_mask.any() and old_snapshot is None:
+                QMessageBox.warning(self, 'Предупреждение', 'Нет активных секций для удаления')
+                return
+
             from core.undo_manager import DataChangeCommand
-            
-            old_data = self.raw_data.copy(deep=True) if self.raw_data is not None else pd.DataFrame()
-            new_data = self.original_data_before_sections.copy(deep=True)
-            
+
+            removed_points_count = int(section_generated_mask.sum())
+            new_data = old_data.loc[~section_generated_mask].copy(deep=True).reset_index(drop=True)
+
             def data_getter():
                 return self.raw_data if self.raw_data is not None else pd.DataFrame()
-            
+
             def data_setter(data):
                 self.raw_data = data
-                if hasattr(self, 'data_table'):
-                    self.data_table.set_data(data)
-                if hasattr(self, 'editor_3d'):
-                    self.editor_3d.set_data(data)
-            
+                with self._suspend_data_change_handlers():
+                    if hasattr(self, 'data_table'):
+                        self.data_table.set_data(data)
+                    if hasattr(self, 'editor_3d'):
+                        self.editor_3d.set_data(data)
+
+            def apply_section_state(section_state, snapshot_state):
+                self._set_editor_section_data(section_state)
+                self.original_data_before_sections = self._clone_dataframe(snapshot_state)
+
             remove_sections_command = DataChangeCommand(
                 data_getter,
                 data_setter,
                 old_data,
                 new_data,
-                "Удаление секций"
+                f"Удаление секций ({removed_points_count} точек)",
+                post_execute=lambda: apply_section_state([], None),
+                post_undo=lambda: apply_section_state(current_sections, old_snapshot),
             )
-            
-            # Выполняем команду через undo_manager
+
             self.undo_manager.execute_command(remove_sections_command)
             self._update_undo_redo_actions()
-            self.has_unsaved_changes = True  # Отмечаем изменения
-            
-            # Очищаем линии секций
-            if hasattr(self.editor_3d, 'set_section_lines'):
-                self.editor_3d.set_section_lines([])
-            
-            # Деактивируем кнопки в 3D редакторе
+            self.has_unsaved_changes = True
+
             if hasattr(self.editor_3d, 'remove_sections_action'):
                 self.editor_3d.remove_sections_action.setEnabled(False)
             if hasattr(self.editor_3d, 'build_central_axis_action'):
                 self.editor_3d.build_central_axis_action.setEnabled(False)
-            
-            # Очищаем сохраненные данные
-            self.original_data_before_sections = None
-            
-            self.statusBar.showMessage('Секции удалены, данные восстановлены')
-            logger.info("Секции удалены, восстановлены оригинальные данные")
-            
-        except (CalculationError, AttributeError, KeyError) as e:
+
+            self.statusBar.showMessage(f'Секции удалены, удалено {removed_points_count} точек')
+            logger.info("Секции удалены, удалено %s точек секций", removed_points_count)
+
+        except (CalculationError, AttributeError, KeyError, ValueError) as e:
             logger.error(f"Ошибка при удалении секций: {e}", exc_info=True)
             QMessageBox.critical(self, 'Ошибка', 
                                f'Ошибка при удалении секций:\n{str(e)}')
@@ -2715,6 +2776,7 @@ class MainWindow(QMainWindow):
             with self._suspend_data_change_handlers():
                 self.data_table.set_data(data)
             self.raw_data = data
+            self._rebuild_active_sections_from_raw_data()
         self.processed_data = None
         self.update_analysis_widgets()
         self.statusBar.showMessage('Данные изменены в 3D. Требуется пересчет.')
@@ -2739,6 +2801,7 @@ class MainWindow(QMainWindow):
         # Обновляем editor_3d без генерации обратных сигналов
         with self._suspend_data_change_handlers():
             self.editor_3d.set_data(data)
+        self._rebuild_active_sections_from_raw_data()
 
         # Сбрасываем результаты расчетов
         self.processed_data = None

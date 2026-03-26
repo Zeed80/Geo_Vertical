@@ -3178,6 +3178,12 @@ class PointEditor3DWidget(QWidget):
         # Форма для ввода параметров
         form_layout = QFormLayout()
         form_layout.setSpacing(10)
+
+        placement_combo = QComboBox()
+        placement_combo.addItem('Сверху', 'top')
+        placement_combo.addItem('Снизу', 'bottom')
+        placement_combo.addItem('По абсолютной высоте', 'absolute')
+        form_layout.addRow('Добавлять:', placement_combo)
         
         # Выбор части башни
         part_combo = QComboBox()
@@ -3191,7 +3197,6 @@ class PointEditor3DWidget(QWidget):
         height_spin = QDoubleSpinBox()
         height_spin.setMinimum(0.0)
         height_spin.setMaximum(1000.0)
-        height_spin.setValue((min_section_height + max_section_height) / 2.0)
         height_spin.setDecimals(3)
         height_spin.setSingleStep(0.1)
         height_spin.setSuffix(' м')
@@ -3219,33 +3224,35 @@ class PointEditor3DWidget(QWidget):
         layout.addLayout(button_layout)
         
         dialog.setLayout(layout)
+
+        def refresh_height_suggestion():
+            suggested_height = self._suggest_new_section_height(
+                section_heights,
+                placement_combo.currentData(),
+            )
+            height_spin.blockSignals(True)
+            height_spin.setValue(suggested_height)
+            height_spin.blockSignals(False)
         
         # Функция валидации высоты (определяем после создания ok_button)
         def validate_height():
-            height = height_spin.value()
-            height_tolerance = 0.3
-            
-            # Проверка на дубликаты
-            for section in self.section_data:
-                if abs(section['height'] - height) < height_tolerance:
-                    validation_label.setText(f'⚠ Секция на высоте {section["height"]:.2f}м уже существует')
-                    validation_label.setStyleSheet('color: #d32f2f; font-size: 9pt; padding: 2px;')
-                    ok_button.setEnabled(False)
-                    return False
-            
-            # Проверка диапазона
-            if height < 0 or height > 1000:
-                validation_label.setText('⚠ Высота должна быть в диапазоне 0-1000 м')
+            is_valid, message = self._validate_new_section_height(
+                self.section_data,
+                float(height_spin.value()),
+                placement=placement_combo.currentData(),
+            )
+            validation_label.setText(message)
+            if is_valid:
+                validation_label.setStyleSheet('color: #2e7d32; font-size: 9pt; padding: 2px;')
+            else:
                 validation_label.setStyleSheet('color: #d32f2f; font-size: 9pt; padding: 2px;')
-                ok_button.setEnabled(False)
-                return False
-            
-            validation_label.setText('✓ Высота валидна')
-            validation_label.setStyleSheet('color: #2e7d32; font-size: 9pt; padding: 2px;')
-            ok_button.setEnabled(True)
-            return True
+            ok_button.setEnabled(is_valid)
+            return is_valid
         
         # Подключаем валидацию
+        refresh_height_suggestion()
+        placement_combo.currentIndexChanged.connect(refresh_height_suggestion)
+        placement_combo.currentIndexChanged.connect(lambda _: validate_height())
         height_spin.valueChanged.connect(validate_height)
         validate_height()  # Первоначальная валидация
         
@@ -3261,19 +3268,87 @@ class PointEditor3DWidget(QWidget):
         if dialog.exec() == QDialog.DialogCode.Accepted:
             section_height = height_spin.value()
             selected_part = part_combo.currentData()
+            placement = placement_combo.currentData()
             
-            logger.info(f"Добавление новой промежуточной секции на высоте {section_height:.3f}м, часть: {selected_part}")
+            logger.info(
+                "Добавление новой секции на высоте %.3fм, часть: %s, placement=%s",
+                section_height,
+                selected_part,
+                placement,
+            )
             
             # Добавляем новую секцию
-            self.add_section(section_height, tower_part=selected_part)
+            self.add_section(section_height, tower_part=selected_part, placement=placement)
     
-    def add_section(self, section_height: float, tower_part: Optional[int] = None):
+    @staticmethod
+    def _estimate_section_step(section_heights: List[float]) -> float:
+        valid_heights = sorted(float(height) for height in section_heights if height is not None)
+        if len(valid_heights) < 2:
+            return 2.0
+
+        deltas = [
+            next_height - current_height
+            for current_height, next_height in zip(valid_heights, valid_heights[1:])
+            if next_height - current_height > 1e-6
+        ]
+        if not deltas:
+            return 2.0
+        return max(float(np.median(deltas)), 0.1)
+
+    @classmethod
+    def _suggest_new_section_height(cls, section_heights: List[float], placement: Optional[str]) -> float:
+        valid_heights = sorted(float(height) for height in section_heights if height is not None)
+        if not valid_heights:
+            return 0.0
+
+        placement_mode = (placement or 'absolute').lower()
+        step = cls._estimate_section_step(valid_heights)
+        if placement_mode == 'top':
+            return valid_heights[-1] + step
+        if placement_mode == 'bottom':
+            return max(0.0, valid_heights[0] - step)
+        return (valid_heights[0] + valid_heights[-1]) / 2.0
+
+    @staticmethod
+    def _validate_new_section_height(
+        section_data: List[Dict],
+        height: float,
+        *,
+        placement: Optional[str] = 'absolute',
+        height_tolerance: float = 0.3,
+    ) -> Tuple[bool, str]:
+        if height < 0 or height > 1000:
+            return False, '⚠ Высота должна быть в диапазоне 0-1000 м'
+
+        heights = [
+            float(section.get('height'))
+            for section in section_data or []
+            if section.get('height') is not None
+        ]
+        for existing_height in heights:
+            if abs(existing_height - height) < height_tolerance:
+                return False, f'⚠ Секция на высоте {existing_height:.2f} м уже существует'
+
+        if heights:
+            placement_mode = (placement or 'absolute').lower()
+            min_height = min(heights)
+            max_height = max(heights)
+            if placement_mode == 'top' and height <= max_height + height_tolerance:
+                return False, f'⚠ Для режима "сверху" высота должна быть выше {max_height:.2f} м'
+            if placement_mode == 'bottom' and height >= min_height - height_tolerance:
+                return False, f'⚠ Для режима "снизу" высота должна быть ниже {min_height:.2f} м'
+
+        return True, '✓ Высота валидна'
+
+    def add_section(self, section_height: float, tower_part: Optional[int] = None, placement: Optional[str] = 'absolute'):
         """Добавляет новую секцию на заданной высоте с точками на всех поясах
         
         Args:
             section_height: Высота новой секции (метры)
             tower_part: Номер части башни (опционально, если не указан - определяется автоматически)
         """
+        return self._add_section_impl(section_height, tower_part=tower_part, placement=placement)
+
         try:
             height_tolerance = 0.3
             
@@ -3467,6 +3542,195 @@ class PointEditor3DWidget(QWidget):
             
             logger.info(f"Добавлена секция на высоте {section_height:.3f}м: {added_count} точек")
             
+        except Exception as e:
+            logger.error(f"Ошибка при добавлении секции: {e}", exc_info=True)
+            self.info_label.setText(f'❌ Ошибка: {str(e)}')
+
+    def _add_section_impl(
+        self,
+        section_height: float,
+        *,
+        tower_part: Optional[int] = None,
+        placement: Optional[str] = 'absolute',
+    ):
+        """Canonical section insertion path used by the dialog and tests."""
+        try:
+            height_tolerance = 0.3
+            is_valid, validation_message = self._validate_new_section_height(
+                self.section_data,
+                float(section_height),
+                placement=placement,
+                height_tolerance=height_tolerance,
+            )
+            if not is_valid:
+                self.info_label.setText(validation_message)
+                return
+
+            placement_mode = (placement or 'absolute').lower()
+            description = f'Добавить секцию Z={section_height:.3f} м'
+            with self.undo_transaction(description) as tx:
+                data_without_station = self.data.copy()
+                if 'is_station' in self.data.columns:
+                    station_mask = self._build_is_station_mask(data_without_station['is_station'])
+                    data_without_station['is_station'] = station_mask
+                    data_without_station = data_without_station[~station_mask]
+
+                available_belts = sorted(data_without_station['belt'].dropna().unique())
+                if not available_belts:
+                    self.info_label.setText('⚠ Нет поясов для добавления секции')
+                    return
+
+                self._ensure_point_indices()
+                added_count = 0
+                section_part = tower_part
+                section_segment = tower_part
+
+                if section_part is None:
+                    height_mask = self.data['z'].between(section_height - height_tolerance, section_height + height_tolerance)
+                    section_points = self.data[height_mask]
+                    if not section_points.empty:
+                        if 'tower_part' in section_points.columns and section_points['tower_part'].notna().any():
+                            part_counts = section_points['tower_part'].value_counts()
+                            if not part_counts.empty:
+                                section_part = int(part_counts.index[0])
+                                section_segment = section_part
+                        elif 'segment' in section_points.columns and section_points['segment'].notna().any():
+                            segment_counts = section_points['segment'].value_counts()
+                            if not segment_counts.empty:
+                                section_segment = int(segment_counts.index[0])
+                                section_part = section_segment
+                    else:
+                        points_below = self.data[self.data['z'] < section_height]
+                        points_above = self.data[self.data['z'] > section_height]
+                        if placement_mode == 'top':
+                            reference_points = points_below if not points_below.empty else points_above
+                        elif placement_mode == 'bottom':
+                            reference_points = points_above if not points_above.empty else points_below
+                        else:
+                            reference_points = points_below if not points_below.empty else points_above
+
+                        if not reference_points.empty:
+                            if 'tower_part' in reference_points.columns and reference_points['tower_part'].notna().any():
+                                part_counts = reference_points['tower_part'].value_counts()
+                                if not part_counts.empty:
+                                    section_part = int(part_counts.index[0])
+                                    section_segment = section_part
+                            elif 'segment' in reference_points.columns and reference_points['segment'].notna().any():
+                                segment_counts = reference_points['segment'].value_counts()
+                                if not segment_counts.empty:
+                                    section_segment = int(segment_counts.index[0])
+                                    section_part = section_segment
+
+                if 'tower_part' not in self.data.columns:
+                    self.data['tower_part'] = None
+                if 'segment' not in self.data.columns:
+                    self.data['segment'] = None
+                if 'tower_part_memberships' not in self.data.columns:
+                    self.data['tower_part_memberships'] = None
+                if 'is_part_boundary' not in self.data.columns:
+                    self.data['is_part_boundary'] = False
+
+                for belt_value in available_belts:
+                    belt_num = int(belt_value)
+                    belt_points = data_without_station[data_without_station['belt'] == belt_num]
+                    if len(belt_points) < 2:
+                        logger.warning("На поясе %s недостаточно точек для интерполяции", belt_num)
+                        continue
+
+                    belt_points_sorted = belt_points.sort_values('z')
+                    points_below = belt_points_sorted[belt_points_sorted['z'] < section_height]
+                    points_above = belt_points_sorted[belt_points_sorted['z'] > section_height]
+
+                    if points_below.empty:
+                        p1 = belt_points_sorted.iloc[0]
+                        p2 = belt_points_sorted.iloc[1]
+                    elif points_above.empty:
+                        p1 = belt_points_sorted.iloc[-2]
+                        p2 = belt_points_sorted.iloc[-1]
+                    else:
+                        p1 = points_below.iloc[-1]
+                        p2 = points_above.iloc[0]
+
+                    if abs(float(p2['z']) - float(p1['z'])) < 1e-6:
+                        new_x = (float(p1['x']) + float(p2['x'])) / 2.0
+                        new_y = (float(p1['y']) + float(p2['y'])) / 2.0
+                    else:
+                        ratio = (float(section_height) - float(p1['z'])) / (float(p2['z']) - float(p1['z']))
+                        new_x = float(p1['x']) + ratio * (float(p2['x']) - float(p1['x']))
+                        new_y = float(p1['y']) + ratio * (float(p2['y']) - float(p1['y']))
+
+                    new_point = dict(p1.to_dict())
+                    new_point['name'] = f"S{int(round(section_height))}_B{belt_num}"
+                    new_point['x'] = float(new_x)
+                    new_point['y'] = float(new_y)
+                    new_point['z'] = float(section_height)
+                    new_point['belt'] = belt_num
+                    new_point['point_index'] = self._get_next_point_index()
+                    new_point['is_section_generated'] = True
+
+                    if 'is_station' in self.data.columns:
+                        new_point['is_station'] = False
+                    if 'is_auxiliary' in self.data.columns:
+                        new_point['is_auxiliary'] = False
+                    if 'is_control' in self.data.columns:
+                        new_point['is_control'] = False
+                    if 'station_role' in self.data.columns:
+                        new_point['station_role'] = None
+                    if section_part is not None:
+                        new_point['tower_part'] = section_part
+                    if section_segment is not None:
+                        new_point['segment'] = section_segment
+                    if 'is_part_boundary' in self.data.columns:
+                        new_point['is_part_boundary'] = False
+                    if 'tower_part_memberships' in self.data.columns:
+                        new_point['tower_part_memberships'] = (
+                            json.dumps([int(section_part)], ensure_ascii=False)
+                            if section_part is not None else None
+                        )
+                    if 'part_belt' in self.data.columns:
+                        new_point['part_belt'] = belt_num
+                    if 'part_belt_assignments' in self.data.columns:
+                        new_point['part_belt_assignments'] = (
+                            json.dumps({str(int(section_part)): belt_num}, ensure_ascii=False)
+                            if section_part is not None else None
+                        )
+
+                    self.data = pd.concat([self.data, pd.DataFrame([new_point])], ignore_index=True)
+                    added_count += 1
+
+                if added_count == 0:
+                    self.info_label.setText('⚠ Не удалось добавить точки секции')
+                    return
+
+                self._ensure_point_indices()
+                requested_heights = sorted(
+                    [
+                        float(section.get('height'))
+                        for section in self.section_data
+                        if section.get('height') is not None
+                    ] + [float(section_height)]
+                )
+                self.section_data = get_section_lines(self.data, requested_heights, height_tolerance=height_tolerance)
+
+                self.index_manager.set_data(self.data)
+                self.update_3d_view()
+                self.update_section_lines()
+
+                has_sections = bool(self.section_data)
+                if hasattr(self, 'build_central_axis_btn'):
+                    self.build_central_axis_btn.setEnabled(has_sections)
+                if self.show_central_axis:
+                    self.update_central_axis()
+
+                self.data_changed.emit()
+                self.update_all_indices()
+                tx.commit()
+
+                self.info_label.setText(
+                    f'✓ Секция добавлена! Z={section_height:.3f} м, добавлено точек: {added_count}'
+                )
+                logger.info("Добавлена секция на высоте %.3f м: %s точек", section_height, added_count)
+
         except Exception as e:
             logger.error(f"Ошибка при добавлении секции: {e}", exc_info=True)
             self.info_label.setText(f'❌ Ошибка: {str(e)}')

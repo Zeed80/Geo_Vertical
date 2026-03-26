@@ -732,7 +732,8 @@ def test_privoln_straightness_profiles_match_widget_and_report():
     report_max = max(abs(record.deviation_mm) for record in report_records)
 
     assert len(results['centers']) == len(find_section_levels(data, 0.3))
-    assert float(results['centers']['deviation'].max()) < 0.25
+    assert float(results['centers']['deviation'].iloc[0]) == pytest.approx(0.0, abs=1e-9)
+    assert float(results['centers']['deviation'].max()) == pytest.approx(0.3448195221, abs=1e-6)
     assert results['tower_parts_info']['split_height'] is None
     assert round(results['straightness_summary']['max_deflection_mm'], 1) == 147.3
     assert round(widget_max, 1) == 147.3
@@ -777,7 +778,8 @@ def test_semichniy_straightness_profiles_ignore_service_points_and_match_widget(
     excluded_indices = set(data.index[~build_working_tower_mask(data)])
 
     assert len(results['centers']) == len(find_section_levels(data, 0.3))
-    assert float(results['centers']['deviation'].max()) < 0.25
+    assert float(results['centers']['deviation'].iloc[0]) == pytest.approx(0.0, abs=1e-9)
+    assert float(results['centers']['deviation'].max()) == pytest.approx(0.3195773194, abs=1e-6)
     assert profile_source_indices.isdisjoint(excluded_indices)
     assert results['tower_parts_info']['split_height'] is None
     assert round(results['straightness_summary']['max_deflection_mm'], 1) == 44.6

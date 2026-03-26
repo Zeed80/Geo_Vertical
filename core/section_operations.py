@@ -698,6 +698,7 @@ def add_missing_points_for_sections(data: pd.DataFrame, section_levels: list[flo
                 template_row['y'] = float(new_y)
                 template_row['z'] = float(section_height)
                 template_row['belt'] = int(belt_num)
+                template_row['is_section_generated'] = True
                 if 'point_index' in result_data.columns:
                     template_row['point_index'] = next_point_index + 1
                 if 'is_station' in result_data.columns:

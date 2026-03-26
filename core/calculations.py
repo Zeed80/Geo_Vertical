@@ -1,5 +1,5 @@
 """
-Модуль математических расчетов для анализа вертикальности и прямолинейности мачт
+РњРѕРґСѓР»СЊ РјР°С‚РµРјР°С‚РёС‡РµСЃРєРёС… СЂР°СЃС‡РµС‚РѕРІ РґР»СЏ Р°РЅР°Р»РёР·Р° РІРµСЂС‚РёРєР°Р»СЊРЅРѕСЃС‚Рё Рё РїСЂСЏРјРѕР»РёРЅРµР№РЅРѕСЃС‚Рё РјР°С‡С‚
 """
 
 import hashlib
@@ -28,10 +28,10 @@ from core.straightness_calculations import build_straightness_profiles
 
 logger = logging.getLogger(__name__)
 
-# Кэш для результатов расчетов (ограничен по размеру)
+# РљСЌС€ РґР»СЏ СЂРµР·СѓР»СЊС‚Р°С‚РѕРІ СЂР°СЃС‡РµС‚РѕРІ (РѕРіСЂР°РЅРёС‡РµРЅ РїРѕ СЂР°Р·РјРµСЂСѓ)
 _calculation_cache: dict[str, Any] = {}
-_cache_access_order: list[str] = []  # Порядок доступа для LRU
-_cache_max_size = 50  # Максимум 50 записей в кэше (увеличено для лучшей производительности)
+_cache_access_order: list[str] = []  # РџРѕСЂСЏРґРѕРє РґРѕСЃС‚СѓРїР° РґР»СЏ LRU
+_cache_max_size = 50  # РњР°РєСЃРёРјСѓРј 50 Р·Р°РїРёСЃРµР№ РІ РєСЌС€Рµ (СѓРІРµР»РёС‡РµРЅРѕ РґР»СЏ Р»СѓС‡С€РµР№ РїСЂРѕРёР·РІРѕРґРёС‚РµР»СЊРЅРѕСЃС‚Рё)
 
 SECTION_GROUPING_HEIGHT_LEVELS = 'height_levels'
 SECTION_GROUPING_ASSIGNED_SECTIONS = 'assigned_sections'
@@ -44,13 +44,13 @@ _SECTION_GROUPING_MODES = {
 
 def invalidate_cache():
     """
-    Инвалидирует весь кэш расчетов
-    Полезно при изменении данных или параметров
+    РРЅРІР°Р»РёРґРёСЂСѓРµС‚ РІРµСЃСЊ РєСЌС€ СЂР°СЃС‡РµС‚РѕРІ
+    РџРѕР»РµР·РЅРѕ РїСЂРё РёР·РјРµРЅРµРЅРёРё РґР°РЅРЅС‹С… РёР»Рё РїР°СЂР°РјРµС‚СЂРѕРІ
     """
     global _calculation_cache, _cache_access_order
     _calculation_cache.clear()
     _cache_access_order.clear()
-    logger.debug("Кэш расчетов очищен")
+    logger.debug("РљСЌС€ СЂР°СЃС‡РµС‚РѕРІ РѕС‡РёС‰РµРЅ")
 
 
 def _normalize_cache_value(value: Any) -> Any:
@@ -120,105 +120,6 @@ def _make_calculation_cache_key(
     return f"{data_hash}_{params_str}"
 
 
-def _get_cache_key(points: pd.DataFrame, height_tolerance: float, center_method: str, use_assigned_belts: bool) -> str:
-    """Создает ключ кэша на основе параметров и данных"""
-    # Пустые/неполные наборы данных тоже должны давать стабильный ключ и не падать.
-    required_cols = {'x', 'y', 'z'}
-    if points is None or not required_cols.issubset(points.columns):
-        data_hash = hashlib.md5(
-            f"{0 if points is None else len(points)}_{sorted(points.columns.tolist()) if points is not None else []}".encode()
-        ).hexdigest()
-        params_str = f"{height_tolerance}_{center_method}_{use_assigned_belts}"
-        return f"{data_hash}_{params_str}"
-
-    # Используем хеш данных и параметров для создания ключа
-    try:
-        data_hash = hashlib.md5(
-            pd.util.hash_pandas_object(points[['x', 'y', 'z']]).values.tobytes()
-        ).hexdigest()
-    except Exception:
-        # Fallback: используем простой хеш размера и суммы
-        x_sum = points['x'].sum() if 'x' in points.columns else 0
-        y_sum = points['y'].sum() if 'y' in points.columns else 0
-        z_sum = points['z'].sum() if 'z' in points.columns else 0
-        data_hash = hashlib.md5(
-            f"{len(points)}_{x_sum}_{y_sum}_{z_sum}".encode()
-        ).hexdigest()
-    params_str = f"{height_tolerance}_{center_method}_{use_assigned_belts}"
-    return f"{data_hash}_{params_str}"
-
-
-def group_points_by_height(
-    points: pd.DataFrame,
-    tolerance: float = 0.1,
-    use_assigned_belts: bool = False
-) -> dict[float, pd.DataFrame]:
-    """
-    Группирует точки по поясам на основе высоты или назначенных поясов
-
-    Args:
-        points: DataFrame с колонками ['x', 'y', 'z'], опционально ['belt']
-        tolerance: Допуск группировки по высоте (метры)
-        use_assigned_belts: Использовать назначенные пояса вместо автогруппировки
-
-    Returns:
-        Словарь {средняя_высота: точки_пояса}
-    """
-    if points.empty:
-        return {}
-
-    working_mask = _build_working_tower_mask(points)
-    working_points = points[working_mask]
-    if len(working_points) != len(points):
-        logger.info("Из группировки по поясам исключены нерабочие точки мачты")
-
-    # Если есть назначенные пояса и нужно их использовать (оптимизировано)
-    if use_assigned_belts and 'belt' in working_points.columns and working_points['belt'].notna().any():
-        groups = {}
-        # Используем groupby для более эффективной группировки
-        for belt_num, belt_points in working_points.groupby('belt'):
-            if pd.notna(belt_num):
-                avg_height = belt_points['z'].mean()
-                groups[avg_height] = belt_points  # Не копируем, используем view
-        return groups
-
-    # Иначе автоматическая группировка по высоте (оптимизировано)
-    # Используем numpy для векторных операций вместо итераций
-    z_values = working_points['z'].values
-    sorted_indices = np.argsort(z_values)
-    sorted_z = z_values[sorted_indices]
-
-    # Векторная группировка по высоте
-    groups = {}
-    current_group_indices = []
-    current_height = None
-
-    for i, idx in enumerate(sorted_indices):
-        z_val = sorted_z[i]
-        if current_height is None:
-            current_height = z_val
-            current_group_indices = [idx]
-        elif abs(z_val - current_height) <= tolerance:
-            current_group_indices.append(idx)
-        else:
-            # Сохраняем текущую группу (без копирования, используем view)
-            group_points = working_points.loc[current_group_indices]
-            avg_height = group_points['z'].mean()
-            groups[avg_height] = group_points  # Не копируем, используем view
-
-            # Начинаем новую группу
-            current_height = z_val
-            current_group_indices = [idx]
-
-    # Сохраняем последнюю группу
-    if current_group_indices:
-        group_points = working_points.loc[current_group_indices]
-        avg_height = group_points['z'].mean()
-        groups[avg_height] = group_points
-
-    return groups
-
-
 def resolve_section_grouping_mode(
     section_grouping_mode: str | None = SECTION_GROUPING_HEIGHT_LEVELS,
     use_assigned_belts: bool | None = None,
@@ -241,37 +142,6 @@ def resolve_section_grouping_mode(
     if use_assigned_belts is False and section_grouping_mode is None:
         return SECTION_GROUPING_HEIGHT_LEVELS
     return resolved  # type: ignore[return-value]
-
-
-def _get_cache_key(
-    points: pd.DataFrame,
-    height_tolerance: float,
-    center_method: str,
-    section_grouping_mode: SectionGroupingMode,
-) -> str:
-    """Create a stable cache key that also includes the section grouping mode."""
-    required_cols = {'x', 'y', 'z'}
-    if points is None or not required_cols.issubset(points.columns):
-        data_hash = hashlib.md5(
-            f"{0 if points is None else len(points)}_{sorted(points.columns.tolist()) if points is not None else []}".encode()
-        ).hexdigest()
-        params_str = f"{height_tolerance}_{center_method}_{section_grouping_mode}"
-        return f"{data_hash}_{params_str}"
-
-    try:
-        data_hash = hashlib.md5(
-            pd.util.hash_pandas_object(points[['x', 'y', 'z']]).values.tobytes()
-        ).hexdigest()
-    except Exception:
-        x_sum = points['x'].sum() if 'x' in points.columns else 0
-        y_sum = points['y'].sum() if 'y' in points.columns else 0
-        z_sum = points['z'].sum() if 'z' in points.columns else 0
-        data_hash = hashlib.md5(
-            f"{len(points)}_{x_sum}_{y_sum}_{z_sum}".encode()
-        ).hexdigest()
-
-    params_str = f"{height_tolerance}_{center_method}_{section_grouping_mode}"
-    return f"{data_hash}_{params_str}"
 
 
 def _get_cache_key(
@@ -379,7 +249,7 @@ def group_points_by_height(
     resolved_mode = resolve_section_grouping_mode(section_grouping_mode, use_assigned_belts)
     working_points = points[_build_working_tower_mask(points)]
     if len(working_points) != len(points):
-        logger.info("РР· РіСЂСѓРїРїРёСЂРѕРІРєРё РїРѕ СЃРµРєС†РёСЏРј РёСЃРєР»СЋС‡РµРЅС‹ РЅРµСЂР°Р±РѕС‡РёРµ С‚РѕС‡РєРё РјР°С‡С‚С‹")
+        logger.info("Р ВР В· Р С–РЎР‚РЎС“Р С—Р С—Р С‘РЎР‚Р С•Р Р†Р С”Р С‘ Р С—Р С• РЎРѓР ВµР С”РЎвЂ Р С‘РЎРЏР С Р С‘РЎРѓР С”Р В»РЎР‹РЎвЂЎР ВµР Р…РЎвЂ№ Р Р…Р ВµРЎР‚Р В°Р В±Р С•РЎвЂЎР С‘Р Вµ РЎвЂљР С•РЎвЂЎР С”Р С‘ Р СР В°РЎвЂЎРЎвЂљРЎвЂ№")
 
     if (
         resolved_mode == SECTION_GROUPING_ASSIGNED_SECTIONS
@@ -411,14 +281,14 @@ def group_points_by_height(
 
 def calculate_belt_center(points: pd.DataFrame, method: str = 'mean') -> tuple[float, float, float]:
     """
-    Вычисляет центр пояса
+    Р’С‹С‡РёСЃР»СЏРµС‚ С†РµРЅС‚СЂ РїРѕСЏСЃР°
 
     Args:
-        points: DataFrame с точками пояса
-        method: Метод расчета ('mean' - среднее, 'lsq' - МНК)
+        points: DataFrame СЃ С‚РѕС‡РєР°РјРё РїРѕСЏСЃР°
+        method: РњРµС‚РѕРґ СЂР°СЃС‡РµС‚Р° ('mean' - СЃСЂРµРґРЅРµРµ, 'lsq' - РњРќРљ)
 
     Returns:
-        Кортеж (x_центр, y_центр, z_средняя)
+        РљРѕСЂС‚РµР¶ (x_С†РµРЅС‚СЂ, y_С†РµРЅС‚СЂ, z_СЃСЂРµРґРЅСЏСЏ)
     """
     if points.empty:
         return (0.0, 0.0, 0.0)
@@ -428,7 +298,7 @@ def calculate_belt_center(points: pd.DataFrame, method: str = 'mean') -> tuple[f
         y_center = points['y'].mean()
         z_avg = points['z'].mean()
     elif method == 'lsq':
-        # Для круглых поясов - аппроксимация окружностью
+        # Р”Р»СЏ РєСЂСѓРіР»С‹С… РїРѕСЏСЃРѕРІ - Р°РїРїСЂРѕРєСЃРёРјР°С†РёСЏ РѕРєСЂСѓР¶РЅРѕСЃС‚СЊСЋ
         x_center = points['x'].median()
         y_center = points['y'].median()
         z_avg = points['z'].mean()
@@ -440,16 +310,16 @@ def calculate_belt_center(points: pd.DataFrame, method: str = 'mean') -> tuple[f
 
 def approximate_tower_axis(centers: pd.DataFrame) -> dict[str, Union[float, bool]]:
     """
-    Строит линейную аппроксимацию оси башни через центры поясов
+    РЎС‚СЂРѕРёС‚ Р»РёРЅРµР№РЅСѓСЋ Р°РїРїСЂРѕРєСЃРёРјР°С†РёСЋ РѕСЃРё Р±Р°С€РЅРё С‡РµСЂРµР· С†РµРЅС‚СЂС‹ РїРѕСЏСЃРѕРІ
 
-    Ось представляется как прямая в 3D: (x, y) = (x0, y0) + t*(dx, dy)
-    где t пропорционален высоте z
+    РћСЃСЊ РїСЂРµРґСЃС‚Р°РІР»СЏРµС‚СЃСЏ РєР°Рє РїСЂСЏРјР°СЏ РІ 3D: (x, y) = (x0, y0) + t*(dx, dy)
+    РіРґРµ t РїСЂРѕРїРѕСЂС†РёРѕРЅР°Р»РµРЅ РІС‹СЃРѕС‚Рµ z
 
     Args:
-        centers: DataFrame с центрами поясов (x, y, z)
+        centers: DataFrame СЃ С†РµРЅС‚СЂР°РјРё РїРѕСЏСЃРѕРІ (x, y, z)
 
     Returns:
-        Словарь с параметрами оси
+        РЎР»РѕРІР°СЂСЊ СЃ РїР°СЂР°РјРµС‚СЂР°РјРё РѕСЃРё
     """
     if len(centers) < 2:
         return {
@@ -458,31 +328,31 @@ def approximate_tower_axis(centers: pd.DataFrame) -> dict[str, Union[float, bool
             'valid': False
         }
 
-    # Линейная регрессия x(z) и y(z)
+    # Р›РёРЅРµР№РЅР°СЏ СЂРµРіСЂРµСЃСЃРёСЏ x(z) Рё y(z)
     z = centers['z'].values
     x = centers['x'].values
     y = centers['y'].values
 
-    # Регрессия для x
+    # Р РµРіСЂРµСЃСЃРёСЏ РґР»СЏ x
     slope_x, intercept_x, r_x, p_x, se_x = stats.linregress(z, x)
 
-    # Регрессия для y
+    # Р РµРіСЂРµСЃСЃРёСЏ РґР»СЏ y
     slope_y, intercept_y, r_y, p_y, se_y = stats.linregress(z, y)
 
-    # z0 - минимальная высота (основание)
+    # z0 - РјРёРЅРёРјР°Р»СЊРЅР°СЏ РІС‹СЃРѕС‚Р° (РѕСЃРЅРѕРІР°РЅРёРµ)
     z0 = z.min()
     x0 = intercept_x + slope_x * z0
     y0 = intercept_y + slope_y * z0
 
     return {
-        'x0': x0,           # Координата X в основании
-        'y0': y0,           # Координата Y в основании
-        'z0': z0,           # Высота основания
-        'dx': slope_x,      # Наклон оси по X
-        'dy': slope_y,      # Наклон оси по Y
-        'dz': 1.0,          # Направление по Z
-        'r_x': r_x,         # Коэффициент корреляции X
-        'r_y': r_y,         # Коэффициент корреляции Y
+        'x0': x0,           # РљРѕРѕСЂРґРёРЅР°С‚Р° X РІ РѕСЃРЅРѕРІР°РЅРёРё
+        'y0': y0,           # РљРѕРѕСЂРґРёРЅР°С‚Р° Y РІ РѕСЃРЅРѕРІР°РЅРёРё
+        'z0': z0,           # Р’С‹СЃРѕС‚Р° РѕСЃРЅРѕРІР°РЅРёСЏ
+        'dx': slope_x,      # РќР°РєР»РѕРЅ РѕСЃРё РїРѕ X
+        'dy': slope_y,      # РќР°РєР»РѕРЅ РѕСЃРё РїРѕ Y
+        'dz': 1.0,          # РќР°РїСЂР°РІР»РµРЅРёРµ РїРѕ Z
+        'r_x': r_x,         # РљРѕСЌС„С„РёС†РёРµРЅС‚ РєРѕСЂСЂРµР»СЏС†РёРё X
+        'r_y': r_y,         # РљРѕСЌС„С„РёС†РёРµРЅС‚ РєРѕСЂСЂРµР»СЏС†РёРё Y
         'valid': True
     }
 
@@ -493,36 +363,36 @@ def calculate_local_coordinate_system(
     lower_belt_points: pd.DataFrame | None = None
 ) -> dict[str, Union[tuple[float, float, float], bool]]:
     """
-    Вычисляет универсальную локальную систему координат для расчета вертикальности
+    Р’С‹С‡РёСЃР»СЏРµС‚ СѓРЅРёРІРµСЂСЃР°Р»СЊРЅСѓСЋ Р»РѕРєР°Р»СЊРЅСѓСЋ СЃРёСЃС‚РµРјСѓ РєРѕРѕСЂРґРёРЅР°С‚ РґР»СЏ СЂР°СЃС‡РµС‚Р° РІРµСЂС‚РёРєР°Р»СЊРЅРѕСЃС‚Рё
 
-    Алгоритм универсален для любой формы башни (3-гранная, 4-гранная, n-гранная,
-    усеченная призма, призма и т.п.) и не зависит от количества граней.
-    Использует только центры секций для определения ориентации.
+    РђР»РіРѕСЂРёС‚Рј СѓРЅРёРІРµСЂСЃР°Р»РµРЅ РґР»СЏ Р»СЋР±РѕР№ С„РѕСЂРјС‹ Р±Р°С€РЅРё (3-РіСЂР°РЅРЅР°СЏ, 4-РіСЂР°РЅРЅР°СЏ, n-РіСЂР°РЅРЅР°СЏ,
+    СѓСЃРµС‡РµРЅРЅР°СЏ РїСЂРёР·РјР°, РїСЂРёР·РјР° Рё С‚.Рї.) Рё РЅРµ Р·Р°РІРёСЃРёС‚ РѕС‚ РєРѕР»РёС‡РµСЃС‚РІР° РіСЂР°РЅРµР№.
+    РСЃРїРѕР»СЊР·СѓРµС‚ С‚РѕР»СЊРєРѕ С†РµРЅС‚СЂС‹ СЃРµРєС†РёР№ РґР»СЏ РѕРїСЂРµРґРµР»РµРЅРёСЏ РѕСЂРёРµРЅС‚Р°С†РёРё.
 
-    Логика (приоритеты):
-    1. Если есть точки нижнего пояса (>= 3 точек) - используем главные оси инерции
-       для определения ориентации X, Y на основе геометрии сечения башни
-    2. Если нет точек пояса, но есть точка standing - используем направление
-       от standing к центру нижней секции
-    3. Если ничего нет - используем стандартную ориентацию (глобальные оси X, Y)
+    Р›РѕРіРёРєР° (РїСЂРёРѕСЂРёС‚РµС‚С‹):
+    1. Р•СЃР»Рё РµСЃС‚СЊ С‚РѕС‡РєРё РЅРёР¶РЅРµРіРѕ РїРѕСЏСЃР° (>= 3 С‚РѕС‡РµРє) - РёСЃРїРѕР»СЊР·СѓРµРј РіР»Р°РІРЅС‹Рµ РѕСЃРё РёРЅРµСЂС†РёРё
+       РґР»СЏ РѕРїСЂРµРґРµР»РµРЅРёСЏ РѕСЂРёРµРЅС‚Р°С†РёРё X, Y РЅР° РѕСЃРЅРѕРІРµ РіРµРѕРјРµС‚СЂРёРё СЃРµС‡РµРЅРёСЏ Р±Р°С€РЅРё
+    2. Р•СЃР»Рё РЅРµС‚ С‚РѕС‡РµРє РїРѕСЏСЃР°, РЅРѕ РµСЃС‚СЊ С‚РѕС‡РєР° standing - РёСЃРїРѕР»СЊР·СѓРµРј РЅР°РїСЂР°РІР»РµРЅРёРµ
+       РѕС‚ standing Рє С†РµРЅС‚СЂСѓ РЅРёР¶РЅРµР№ СЃРµРєС†РёРё
+    3. Р•СЃР»Рё РЅРёС‡РµРіРѕ РЅРµС‚ - РёСЃРїРѕР»СЊР·СѓРµРј СЃС‚Р°РЅРґР°СЂС‚РЅСѓСЋ РѕСЂРёРµРЅС‚Р°С†РёСЋ (РіР»РѕР±Р°Р»СЊРЅС‹Рµ РѕСЃРё X, Y)
 
-    Преимущества:
-    - Универсален для любой формы и количества граней (3, 4, n)
-    - Не требует знания количества граней
-    - Устойчив к отсутствию точки standing
-    - Использует геометрию башни для оптимальной ориентации
+    РџСЂРµРёРјСѓС‰РµСЃС‚РІР°:
+    - РЈРЅРёРІРµСЂСЃР°Р»РµРЅ РґР»СЏ Р»СЋР±РѕР№ С„РѕСЂРјС‹ Рё РєРѕР»РёС‡РµСЃС‚РІР° РіСЂР°РЅРµР№ (3, 4, n)
+    - РќРµ С‚СЂРµР±СѓРµС‚ Р·РЅР°РЅРёСЏ РєРѕР»РёС‡РµСЃС‚РІР° РіСЂР°РЅРµР№
+    - РЈСЃС‚РѕР№С‡РёРІ Рє РѕС‚СЃСѓС‚СЃС‚РІРёСЋ С‚РѕС‡РєРё standing
+    - РСЃРїРѕР»СЊР·СѓРµС‚ РіРµРѕРјРµС‚СЂРёСЋ Р±Р°С€РЅРё РґР»СЏ РѕРїС‚РёРјР°Р»СЊРЅРѕР№ РѕСЂРёРµРЅС‚Р°С†РёРё
 
     Args:
-        centers: DataFrame с центрами секций (x, y, z)
-        standing_point: Словарь с координатами точки standing (используется как fallback)
-        lower_belt_points: DataFrame с точками нижнего пояса для определения ориентации (опционально)
+        centers: DataFrame СЃ С†РµРЅС‚СЂР°РјРё СЃРµРєС†РёР№ (x, y, z)
+        standing_point: РЎР»РѕРІР°СЂСЊ СЃ РєРѕРѕСЂРґРёРЅР°С‚Р°РјРё С‚РѕС‡РєРё standing (РёСЃРїРѕР»СЊР·СѓРµС‚СЃСЏ РєР°Рє fallback)
+        lower_belt_points: DataFrame СЃ С‚РѕС‡РєР°РјРё РЅРёР¶РЅРµРіРѕ РїРѕСЏСЃР° РґР»СЏ РѕРїСЂРµРґРµР»РµРЅРёСЏ РѕСЂРёРµРЅС‚Р°С†РёРё (РѕРїС†РёРѕРЅР°Р»СЊРЅРѕ)
 
     Returns:
-        Словарь с параметрами локальной системы координат:
+        РЎР»РѕРІР°СЂСЊ СЃ РїР°СЂР°РјРµС‚СЂР°РјРё Р»РѕРєР°Р»СЊРЅРѕР№ СЃРёСЃС‚РµРјС‹ РєРѕРѕСЂРґРёРЅР°С‚:
         {
-            'origin': (x, y, z),  # Центр нижней секции
-            'x_axis': (x, y, 0),  # Единичный вектор оси X
-            'y_axis': (x, y, 0),  # Единичный вектор оси Y
+            'origin': (x, y, z),  # Р¦РµРЅС‚СЂ РЅРёР¶РЅРµР№ СЃРµРєС†РёРё
+            'x_axis': (x, y, 0),  # Р•РґРёРЅРёС‡РЅС‹Р№ РІРµРєС‚РѕСЂ РѕСЃРё X
+            'y_axis': (x, y, 0),  # Р•РґРёРЅРёС‡РЅС‹Р№ РІРµРєС‚РѕСЂ РѕСЃРё Y
             'valid': bool
         }
     """
@@ -534,12 +404,12 @@ def calculate_local_coordinate_system(
             'valid': False
         }
 
-    # Находим центр нижней секции (минимальная Z)
+    # РќР°С…РѕРґРёРј С†РµРЅС‚СЂ РЅРёР¶РЅРµР№ СЃРµРєС†РёРё (РјРёРЅРёРјР°Р»СЊРЅР°СЏ Z)
     bottom_idx = centers['z'].idxmin()
     bottom_center = centers.loc[bottom_idx]
     origin = np.array([bottom_center['x'], bottom_center['y'], bottom_center['z']])
 
-    # ПРИОРИТЕТ 1: Ориентируем оси по направлению к первой точке стояния
+    # РџР РРћР РРўР•Рў 1: РћСЂРёРµРЅС‚РёСЂСѓРµРј РѕСЃРё РїРѕ РЅР°РїСЂР°РІР»РµРЅРёСЋ Рє РїРµСЂРІРѕР№ С‚РѕС‡РєРµ СЃС‚РѕСЏРЅРёСЏ
     if standing_point is not None:
         station_pos = np.array([
             standing_point.get('x', 0.0),
@@ -557,7 +427,7 @@ def calculate_local_coordinate_system(
             y_axis = np.array([y_axis_2d[0], y_axis_2d[1], 0.0])
 
             logger.info(
-                "Локальная СК: ось X направлена от точки стояния к центру нижней секции"
+                "Р›РѕРєР°Р»СЊРЅР°СЏ РЎРљ: РѕСЃСЊ X РЅР°РїСЂР°РІР»РµРЅР° РѕС‚ С‚РѕС‡РєРё СЃС‚РѕСЏРЅРёСЏ Рє С†РµРЅС‚СЂСѓ РЅРёР¶РЅРµР№ СЃРµРєС†РёРё"
             )
 
             return {
@@ -567,7 +437,7 @@ def calculate_local_coordinate_system(
                 'valid': True,
             }
 
-    # ПРИОРИТЕТ 2: Используем главные оси нижнего пояса (если доступны)
+    # РџР РРћР РРўР•Рў 2: РСЃРїРѕР»СЊР·СѓРµРј РіР»Р°РІРЅС‹Рµ РѕСЃРё РЅРёР¶РЅРµРіРѕ РїРѕСЏСЃР° (РµСЃР»Рё РґРѕСЃС‚СѓРїРЅС‹)
     if lower_belt_points is not None and len(lower_belt_points) >= 3:
         try:
             belt_xy = lower_belt_points[['x', 'y']].values
@@ -592,7 +462,7 @@ def calculate_local_coordinate_system(
                 y_axis = np.array([y_axis_2d[0], y_axis_2d[1], 0.0])
 
                 logger.info(
-                    "Локальная СК: использованы главные оси нижнего пояса (точек: %d)",
+                    "Р›РѕРєР°Р»СЊРЅР°СЏ РЎРљ: РёСЃРїРѕР»СЊР·РѕРІР°РЅС‹ РіР»Р°РІРЅС‹Рµ РѕСЃРё РЅРёР¶РЅРµРіРѕ РїРѕСЏСЃР° (С‚РѕС‡РµРє: %d)",
                     len(lower_belt_points),
                 )
 
@@ -604,11 +474,11 @@ def calculate_local_coordinate_system(
                 }
         except Exception as e:
             logger.warning(
-                f"Не удалось вычислить главные оси нижнего пояса: {e}, используем fallback"
+                f"РќРµ СѓРґР°Р»РѕСЃСЊ РІС‹С‡РёСЃР»РёС‚СЊ РіР»Р°РІРЅС‹Рµ РѕСЃРё РЅРёР¶РЅРµРіРѕ РїРѕСЏСЃР°: {e}, РёСЃРїРѕР»СЊР·СѓРµРј fallback"
             )
 
-    # ПРИОРИТЕТ 3: Если ничего не доступно - стандартная ориентация
-    logger.warning("Используются стандартные глобальные оси для локальной СК")
+    # РџР РРћР РРўР•Рў 3: Р•СЃР»Рё РЅРёС‡РµРіРѕ РЅРµ РґРѕСЃС‚СѓРїРЅРѕ - СЃС‚Р°РЅРґР°СЂС‚РЅР°СЏ РѕСЂРёРµРЅС‚Р°С†РёСЏ
+    logger.warning("РСЃРїРѕР»СЊР·СѓСЋС‚СЃСЏ СЃС‚Р°РЅРґР°СЂС‚РЅС‹Рµ РіР»РѕР±Р°Р»СЊРЅС‹Рµ РѕСЃРё РґР»СЏ Р»РѕРєР°Р»СЊРЅРѕР№ РЎРљ")
     return {
         'origin': tuple(origin),
         'x_axis': (1.0, 0.0, 0.0),
@@ -624,24 +494,16 @@ def calculate_vertical_deviation_with_local_cs(
     standing_point: dict[str, float]
 ) -> pd.DataFrame:
     """
-    Вычисляет отклонения от вертикали в локальной системе координат
+    ???????????? ?????????? ?????????? ??????? ? ????????? ??????? ?????????.
 
-    Новая логика:
-    1. Строим ось башни через центры секций
-    2. Раскладываем отклонения на оси X и Y локальной системы координат
-    3. Ось X: проекция на линию от точки стояния через центр нижней секции
-    4. Ось Y: перпендикулярно оси X в горизонтальной плоскости
-
-    Args:
-        centers: DataFrame с центрами секций
-        axis: Параметры аппроксимированной оси башни
-        local_cs: Параметры локальной системы координат
-        standing_point: Координаты точки стояния
-
-    Returns:
-        DataFrame с добавленными колонками 'deviation', 'deviation_x', 'deviation_y'
+    ???????????? ?????????????? ???????? ????????? ?????? ?????? ??????
+    ???????????? ?????? ?????? ??????????????? ????? ?????. ????????????????
+    ??? ?? ??? ??????????? ???????? ? `axis`, ?? ?? ???????????? ??? ???????
+    ????????? ??? ???????? ??????????.
     """
-    if not axis['valid'] or centers.empty or not local_cs['valid']:
+    del axis, standing_point
+
+    if centers.empty or not local_cs['valid']:
         result = centers.copy()
         result['deviation'] = 0.0
         result['deviation_x'] = 0.0
@@ -649,37 +511,50 @@ def calculate_vertical_deviation_with_local_cs(
         return result
 
     result = centers.copy()
-    deviations = []
-    deviations_x = []
-    deviations_y = []
+    deviations: list[float] = []
+    deviations_x: list[float] = []
+    deviations_y: list[float] = []
 
-    local_origin = np.array(local_cs['origin'])
-    x_axis = np.array(local_cs['x_axis'])
-    y_axis = np.array(local_cs['y_axis'])
+    x_axis = np.array(local_cs['x_axis'], dtype=float)
+    y_axis = np.array(local_cs['y_axis'], dtype=float)
+    baseline_by_part: dict[int, np.ndarray] = {}
 
-    for idx, row in result.iterrows():
-        point = np.array([row['x'], row['y'], row['z']])
+    for _, row in result.sort_values('z').iterrows():
+        memberships = _decode_part_memberships(row.get('tower_part_memberships'))
+        if memberships:
+            part_key = int(memberships[0])
+        else:
+            try:
+                part_key = int(row.get('tower_part', 1) or 1)
+            except (TypeError, ValueError):
+                part_key = 1
+        if part_key <= 0:
+            part_key = 1
+        baseline_by_part.setdefault(
+            part_key,
+            np.array([row['x'], row['y'], row['z']], dtype=float),
+        )
 
-        # Вычисляем точку на оси башни на высоте текущей секции
-        z_diff = row['z'] - axis['z0']
-        axis_point = np.array([
-            axis['x0'] + axis['dx'] * z_diff,
-            axis['y0'] + axis['dy'] * z_diff,
-            row['z']
-        ])
+    for _, row in result.iterrows():
+        memberships = _decode_part_memberships(row.get('tower_part_memberships'))
+        if memberships:
+            part_key = int(memberships[0])
+        else:
+            try:
+                part_key = int(row.get('tower_part', 1) or 1)
+            except (TypeError, ValueError):
+                part_key = 1
+        if part_key <= 0:
+            part_key = 1
 
-        # Вектор отклонения от оси
-        deviation_vector = point - axis_point
+        point = np.array([row['x'], row['y'], row['z']], dtype=float)
+        baseline_point = baseline_by_part.get(part_key, point)
+        deviation_vector = point - baseline_point
+        deviation_vector[2] = 0.0
 
-        # Проецируем отклонение на оси локальной СК (только в XY плоскости)
-        deviation_vector[2] = 0  # Обнуляем Z компоненту
-
-        # Раскладываем на оси локальной СК
-        deviation_x = np.dot(deviation_vector, x_axis)
-        deviation_y = np.dot(deviation_vector, y_axis)
-
-        # Суммарное горизонтальное отклонение
-        total_deviation = np.linalg.norm(deviation_vector)
+        deviation_x = float(np.dot(deviation_vector, x_axis))
+        deviation_y = float(np.dot(deviation_vector, y_axis))
+        total_deviation = float(np.linalg.norm(deviation_vector))
 
         deviations.append(total_deviation)
         deviations_x.append(deviation_x)
@@ -691,38 +566,37 @@ def calculate_vertical_deviation_with_local_cs(
 
     return result
 
-
 def point_to_line_distance_3d(point: tuple[float, float, float],
                                line_point: tuple[float, float, float],
                                line_direction: tuple[float, float, float]) -> float:
     """
-    Вычисляет расстояние от точки до прямой в 3D
+    Р’С‹С‡РёСЃР»СЏРµС‚ СЂР°СЃСЃС‚РѕСЏРЅРёРµ РѕС‚ С‚РѕС‡РєРё РґРѕ РїСЂСЏРјРѕР№ РІ 3D
 
     Args:
-        point: Координаты точки (x, y, z)
-        line_point: Точка на прямой
-        line_direction: Направляющий вектор прямой
+        point: РљРѕРѕСЂРґРёРЅР°С‚С‹ С‚РѕС‡РєРё (x, y, z)
+        line_point: РўРѕС‡РєР° РЅР° РїСЂСЏРјРѕР№
+        line_direction: РќР°РїСЂР°РІР»СЏСЋС‰РёР№ РІРµРєС‚РѕСЂ РїСЂСЏРјРѕР№
 
     Returns:
-        Расстояние от точки до прямой
+        Р Р°СЃСЃС‚РѕСЏРЅРёРµ РѕС‚ С‚РѕС‡РєРё РґРѕ РїСЂСЏРјРѕР№
     """
     p = np.array(point)
     l0 = np.array(line_point)
     l = np.array(line_direction)
 
-    # Нормализуем направляющий вектор
+    # РќРѕСЂРјР°Р»РёР·СѓРµРј РЅР°РїСЂР°РІР»СЏСЋС‰РёР№ РІРµРєС‚РѕСЂ
     l = l / np.linalg.norm(l)
 
-    # Вектор от точки на прямой до точки
+    # Р’РµРєС‚РѕСЂ РѕС‚ С‚РѕС‡РєРё РЅР° РїСЂСЏРјРѕР№ РґРѕ С‚РѕС‡РєРё
     v = p - l0
 
-    # Проекция v на направление прямой
+    # РџСЂРѕРµРєС†РёСЏ v РЅР° РЅР°РїСЂР°РІР»РµРЅРёРµ РїСЂСЏРјРѕР№
     proj = np.dot(v, l) * l
 
-    # Перпендикулярная составляющая
+    # РџРµСЂРїРµРЅРґРёРєСѓР»СЏСЂРЅР°СЏ СЃРѕСЃС‚Р°РІР»СЏСЋС‰Р°СЏ
     perp = v - proj
 
-    # Расстояние
+    # Р Р°СЃСЃС‚РѕСЏРЅРёРµ
     distance = np.linalg.norm(perp)
 
     return distance
@@ -734,363 +608,27 @@ def distance_to_line_3d(
     line_direction: tuple[float, float, float],
 ) -> float:
     """
-    Совместимый публичный алиас для расчета расстояния от точки до прямой в 3D.
+    РЎРѕРІРјРµСЃС‚РёРјС‹Р№ РїСѓР±Р»РёС‡РЅС‹Р№ Р°Р»РёР°СЃ РґР»СЏ СЂР°СЃС‡РµС‚Р° СЂР°СЃСЃС‚РѕСЏРЅРёСЏ РѕС‚ С‚РѕС‡РєРё РґРѕ РїСЂСЏРјРѕР№ РІ 3D.
     """
     return point_to_line_distance_3d(point, line_point, line_direction)
 
 
 def calculate_vertical_deviation(centers: pd.DataFrame, axis: dict[str, Any]) -> pd.DataFrame:
     """
-    Вычисляет горизонтальные отклонения центров от оси (отклонение от вертикали)
-
-    Args:
-        centers: DataFrame с центрами поясов
-        axis: Параметры аппроксимированной оси
-
-    Returns:
-        DataFrame с добавленной колонкой 'deviation'
+    ???????????? ????????? ?????????????? ???????? ??????? ???????????? ?????? ??????.
     """
-    if not axis['valid'] or centers.empty:
+    del axis
+
+    if centers.empty:
         centers['deviation'] = 0.0
         return centers
 
-    # Оптимизированная версия с векторными операциями numpy
     result = centers.copy()
-
-    # Векторные вычисления для всех точек одновременно
-    z_diff = result['z'].values - axis['z0']
-    x_axis = axis['x0'] + axis['dx'] * z_diff
-    y_axis = axis['y0'] + axis['dy'] * z_diff
-
-    # Горизонтальное отклонение (векторно)
-    x_diff = result['x'].values - x_axis
-    y_diff = result['y'].values - y_axis
-    deviations = np.sqrt(x_diff**2 + y_diff**2)
-
-    result['deviation'] = deviations
+    baseline_row = result.sort_values('z').iloc[0]
+    x_diff = result['x'].values - float(baseline_row['x'])
+    y_diff = result['y'].values - float(baseline_row['y'])
+    result['deviation'] = np.sqrt(x_diff**2 + y_diff**2)
     return result
-
-
-def calculate_straightness_deviation(
-    centers: pd.DataFrame,
-    tower_parts_info: dict[str, Any] | None = None
-) -> pd.DataFrame:
-    """
-    Вычисляет стрелу прогиба (отклонение от прямолинейности)
-
-    Базовая линия строится по нижней и верхней секции части башни,
-    затем измеряется расстояние каждого центра пояса до этой линии.
-
-    Для составной башни расчет выполняется отдельно для каждой части.
-    Точки на нижней и верхней секции каждой части всегда имеют отклонение 0,
-    так как они являются опорными точками для построения базовой линии.
-
-    Args:
-        centers: DataFrame с центрами поясов (может содержать колонку 'tower_part')
-        tower_parts_info: Информация о частях башни (опционально):
-            {
-                'split_height': float,  # Высота раздвоения
-                'parts': [  # Список частей
-                    {'part_number': 1, 'faces': 4, ...},
-                    {'part_number': 2, 'faces': 3, ...}
-                ]
-            }
-
-    Returns:
-        DataFrame с добавленной колонкой 'straightness_deviation'
-    """
-    if len(centers) < 2:
-        centers['straightness_deviation'] = 0.0
-        centers['section_length'] = 0.0
-        return centers
-
-    result = centers.copy()
-    result['straightness_deviation'] = 0.0
-    result['section_length'] = 0.0
-
-    # Проверяем, является ли башня составной
-    part_numbers: list[int] = []
-    if tower_parts_info and tower_parts_info.get('parts'):
-        part_numbers = [
-            int(part.get('part_number'))
-            for part in tower_parts_info['parts']
-            if part.get('part_number') is not None
-        ]
-    if not part_numbers and (
-        ('tower_part_memberships' in centers.columns and centers['tower_part_memberships'].notna().any())
-        or ('tower_part' in centers.columns and centers['tower_part'].notna().any())
-    ):
-        unique_parts = set()
-        if 'tower_part_memberships' in centers.columns:
-            for value in centers['tower_part_memberships'].dropna():
-                unique_parts.update(_decode_part_memberships(value))
-        if not unique_parts and 'tower_part' in centers.columns:
-            unique_parts.update(centers['tower_part'].dropna().unique())
-        part_numbers = [int(part) for part in unique_parts if part is not None]
-    part_numbers = sorted(set(part_numbers))
-
-    if part_numbers:
-        logger.info(f"Прямолинейность: обработка частей {part_numbers}")
-        processed_parts = 0
-        for part_num in part_numbers:
-            part_centers = _filter_points_by_part(centers, part_num)
-            if len(part_centers) < 2:
-                logger.warning(f"Часть {part_num}: недостаточно точек для расчета прямолинейности ({len(part_centers)})")
-                continue
-            processed_parts += 1
-
-            # Сортируем по высоте
-            sorted_part_centers = part_centers.sort_values('z').reset_index(drop=True)
-
-            # Берем нижнюю и верхнюю секцию части как опорные точки
-            # Находим минимальную и максимальную высоту для части (это нижняя и верхняя секция)
-            min_height = sorted_part_centers['z'].min()
-            max_height = sorted_part_centers['z'].max()
-
-            # Находим центры поясов на нижней и верхней секции (с допуском 0.1 м)
-            height_tolerance = 0.1
-            bottom_section_centers = sorted_part_centers[
-                np.abs(sorted_part_centers['z'] - min_height) <= height_tolerance
-            ]
-            top_section_centers = sorted_part_centers[
-                np.abs(sorted_part_centers['z'] - max_height) <= height_tolerance
-            ]
-
-            # Используем средний центр нижней и верхней секции
-            if len(bottom_section_centers) > 0:
-                bottom = {
-                    'x': bottom_section_centers['x'].mean(),
-                    'y': bottom_section_centers['y'].mean(),
-                    'z': bottom_section_centers['z'].mean()
-                }
-            else:
-                bottom = sorted_part_centers.iloc[0]
-
-            if len(top_section_centers) > 0:
-                top = {
-                    'x': top_section_centers['x'].mean(),
-                    'y': top_section_centers['y'].mean(),
-                    'z': top_section_centers['z'].mean()
-                }
-            else:
-                top = sorted_part_centers.iloc[-1]
-
-            # Базовая линия прямолинейности для этой части
-            base_line_point = (bottom['x'], bottom['y'], bottom['z'])
-            dx = top['x'] - bottom['x']
-            dy = top['y'] - bottom['y']
-            dz = top['z'] - bottom['z']
-            base_line_direction = (dx, dy, dz)
-
-            if np.linalg.norm(base_line_direction) < 1e-6:
-                logger.warning(f"Часть {part_num}: опорные точки слишком близки")
-                continue
-
-            # Длина секции (для нормативов)
-            section_length = dz
-
-            # Оптимизированная версия с векторными операциями
-            points_array = sorted_part_centers[['x', 'y', 'z']].values
-            line_point_arr = np.array(base_line_point)
-            line_dir_arr = np.array(base_line_direction)
-
-            # Нормализуем направляющий вектор
-            line_dir_norm = line_dir_arr / np.linalg.norm(line_dir_arr)
-
-            # Векторные вычисления расстояний для всех точек части
-            v = points_array - line_point_arr
-            proj = np.dot(v, line_dir_norm)[:, np.newaxis] * line_dir_norm
-            perp = v - proj
-            deviations = np.linalg.norm(perp, axis=1)
-
-            # Обновляем результаты для точек этой части
-            for idx, orig_idx in enumerate(sorted_part_centers.index):
-                # Проверяем, является ли точка нижней или верхней секцией
-                point_z = sorted_part_centers.iloc[idx]['z']
-                is_bottom_section = np.abs(point_z - min_height) <= height_tolerance
-                is_top_section = np.abs(point_z - max_height) <= height_tolerance
-
-                # Точки на нижней и верхней секции всегда имеют отклонение 0
-                if is_bottom_section or is_top_section:
-                    result.loc[orig_idx, 'straightness_deviation'] = 0.0
-                else:
-                    result.loc[orig_idx, 'straightness_deviation'] = deviations[idx]
-                result.loc[orig_idx, 'section_length'] = section_length
-
-            logger.info(f"Часть {part_num}: рассчитана прямолинейность для {len(part_centers)} поясов, длина секции: {section_length:.3f} м")
-
-        if processed_parts == 0:
-            logger.warning("Ни для одной части не удалось вычислить прямолинейность, выполняем расчет по всей башне")
-        else:
-            return result
-
-    split_height = None
-    if tower_parts_info and tower_parts_info.get('split_height') is not None:
-        split_height = tower_parts_info['split_height']
-        logger.info(f"Расчет прямолинейности по высоте раздвоения: {split_height:.3f} м")
-
-    if split_height is not None:
-        # Раздельный расчет для нижней/верхней части (совместимость со старыми данными)
-        for part_num, comparator in enumerate([lambda z: z < split_height, lambda z: z >= split_height], start=1):
-            part_centers = centers[comparator(centers['z'])].copy()
-            if len(part_centers) < 2:
-                logger.warning(f"Часть {part_num}: недостаточно точек для расчета прямолинейности ({len(part_centers)})")
-                continue
-
-            sorted_part_centers = part_centers.sort_values('z').reset_index(drop=True)
-
-            # Берем нижнюю и верхнюю секцию части как опорные точки
-            min_height = sorted_part_centers['z'].min()
-            max_height = sorted_part_centers['z'].max()
-
-            # Находим центры поясов на нижней и верхней секции (с допуском 0.1 м)
-            height_tolerance = 0.1
-            bottom_section_centers = sorted_part_centers[
-                np.abs(sorted_part_centers['z'] - min_height) <= height_tolerance
-            ]
-            top_section_centers = sorted_part_centers[
-                np.abs(sorted_part_centers['z'] - max_height) <= height_tolerance
-            ]
-
-            # Используем средний центр нижней и верхней секции
-            if len(bottom_section_centers) > 0:
-                bottom = {
-                    'x': bottom_section_centers['x'].mean(),
-                    'y': bottom_section_centers['y'].mean(),
-                    'z': bottom_section_centers['z'].mean()
-                }
-            else:
-                bottom = sorted_part_centers.iloc[0]
-
-            if len(top_section_centers) > 0:
-                top = {
-                    'x': top_section_centers['x'].mean(),
-                    'y': top_section_centers['y'].mean(),
-                    'z': top_section_centers['z'].mean()
-                }
-            else:
-                top = sorted_part_centers.iloc[-1]
-
-            base_line_point = (bottom['x'], bottom['y'], bottom['z'])
-            dx = top['x'] - bottom['x']
-            dy = top['y'] - bottom['y']
-            dz = top['z'] - bottom['z']
-            base_line_direction = (dx, dy, dz)
-
-            if np.linalg.norm(base_line_direction) < 1e-6:
-                logger.warning(f"Часть {part_num}: опорные точки слишком близки")
-                continue
-
-            section_length = dz
-            points_array = sorted_part_centers[['x', 'y', 'z']].values
-            line_point_arr = np.array(base_line_point)
-            line_dir_arr = np.array(base_line_direction)
-            line_dir_norm = line_dir_arr / np.linalg.norm(line_dir_arr)
-            v = points_array - line_point_arr
-            proj = np.dot(v, line_dir_norm)[:, np.newaxis] * line_dir_norm
-            perp = v - proj
-            deviations = np.linalg.norm(perp, axis=1)
-
-            # Определяем высоты нижней и верхней секции для этой части
-            part_min_height = sorted_part_centers['z'].min()
-            part_max_height = sorted_part_centers['z'].max()
-            height_tolerance = 0.1
-
-            for idx, orig_idx in enumerate(sorted_part_centers.index):
-                # Проверяем, является ли точка нижней или верхней секцией
-                point_z = sorted_part_centers.iloc[idx]['z']
-                is_bottom_section = np.abs(point_z - part_min_height) <= height_tolerance
-                is_top_section = np.abs(point_z - part_max_height) <= height_tolerance
-
-                # Точки на нижней и верхней секции всегда имеют отклонение 0
-                if is_bottom_section or is_top_section:
-                    result.loc[orig_idx, 'straightness_deviation'] = 0.0
-                else:
-                    result.loc[orig_idx, 'straightness_deviation'] = deviations[idx]
-                result.loc[orig_idx, 'section_length'] = section_length
-
-        return result
-    else:
-        # Обычный расчет для всей башни
-        sorted_centers = result.sort_values('z').reset_index(drop=True)
-
-        # Берем нижнюю и верхнюю секцию как опорные точки
-        min_height = sorted_centers['z'].min()
-        max_height = sorted_centers['z'].max()
-
-        # Находим центры поясов на нижней и верхней секции (с допуском 0.1 м)
-        height_tolerance = 0.1
-        bottom_section_centers = sorted_centers[
-            np.abs(sorted_centers['z'] - min_height) <= height_tolerance
-        ]
-        top_section_centers = sorted_centers[
-            np.abs(sorted_centers['z'] - max_height) <= height_tolerance
-        ]
-
-        # Используем средний центр нижней и верхней секции
-        if len(bottom_section_centers) > 0:
-            bottom = {
-                'x': bottom_section_centers['x'].mean(),
-                'y': bottom_section_centers['y'].mean(),
-                'z': bottom_section_centers['z'].mean()
-            }
-        else:
-            bottom = sorted_centers.iloc[0]
-
-        if len(top_section_centers) > 0:
-            top = {
-                'x': top_section_centers['x'].mean(),
-                'y': top_section_centers['y'].mean(),
-                'z': top_section_centers['z'].mean()
-            }
-        else:
-            top = sorted_centers.iloc[-1]
-
-        # Базовая линия прямолинейности
-        base_line_point = (bottom['x'], bottom['y'], bottom['z'])
-        dx = top['x'] - bottom['x']
-        dy = top['y'] - bottom['y']
-        dz = top['z'] - bottom['z']
-        base_line_direction = (dx, dy, dz)
-
-        # Длина секции (для нормативов)
-        section_length = dz
-
-        # Оптимизированная версия с векторными операциями
-        points_array = sorted_centers[['x', 'y', 'z']].values
-        line_point_arr = np.array(base_line_point)
-        line_dir_arr = np.array(base_line_direction)
-
-        # Нормализуем направляющий вектор
-        line_dir_norm = line_dir_arr / np.linalg.norm(line_dir_arr)
-
-        # Векторные вычисления расстояний для всех точек
-        v = points_array - line_point_arr
-        proj = np.dot(v, line_dir_norm)[:, np.newaxis] * line_dir_norm
-        perp = v - proj
-        deviations = np.linalg.norm(perp, axis=1)
-
-        # Определяем высоты нижней и верхней секции
-        min_height = sorted_centers['z'].min()
-        max_height = sorted_centers['z'].max()
-        height_tolerance = 0.1
-
-        # Обновляем результаты
-        for idx, orig_idx in enumerate(sorted_centers.index):
-            # Проверяем, является ли точка нижней или верхней секцией
-            point_z = sorted_centers.iloc[idx]['z']
-            is_bottom_section = np.abs(point_z - min_height) <= height_tolerance
-            is_top_section = np.abs(point_z - max_height) <= height_tolerance
-
-            # Точки на нижней и верхней секции всегда имеют отклонение 0
-            if is_bottom_section or is_top_section:
-                result.loc[orig_idx, 'straightness_deviation'] = 0.0
-            else:
-                result.loc[orig_idx, 'straightness_deviation'] = deviations[idx]
-            result.loc[orig_idx, 'section_length'] = section_length
-
-    return result
-
 
 def _apply_straightness_for_subset(
     result: pd.DataFrame,
@@ -1221,22 +759,22 @@ def process_tower_data(
     use_cache: bool = True
 ) -> dict[str, Any]:
     """
-    Полный цикл обработки данных мачты (универсальный для любой формы башни)
+    РџРѕР»РЅС‹Р№ С†РёРєР» РѕР±СЂР°Р±РѕС‚РєРё РґР°РЅРЅС‹С… РјР°С‡С‚С‹ (СѓРЅРёРІРµСЂСЃР°Р»СЊРЅС‹Р№ РґР»СЏ Р»СЋР±РѕР№ С„РѕСЂРјС‹ Р±Р°С€РЅРё)
 
-    Универсальный алгоритм работает для:
-    - Любого количества граней (3, 4, n)
-    - Любой формы (призма, усеченная призма, цилиндр и т.п.)
-    - Не требует знания количества граней или формы
+    РЈРЅРёРІРµСЂСЃР°Р»СЊРЅС‹Р№ Р°Р»РіРѕСЂРёС‚Рј СЂР°Р±РѕС‚Р°РµС‚ РґР»СЏ:
+    - Р›СЋР±РѕРіРѕ РєРѕР»РёС‡РµСЃС‚РІР° РіСЂР°РЅРµР№ (3, 4, n)
+    - Р›СЋР±РѕР№ С„РѕСЂРјС‹ (РїСЂРёР·РјР°, СѓСЃРµС‡РµРЅРЅР°СЏ РїСЂРёР·РјР°, С†РёР»РёРЅРґСЂ Рё С‚.Рї.)
+    - РќРµ С‚СЂРµР±СѓРµС‚ Р·РЅР°РЅРёСЏ РєРѕР»РёС‡РµСЃС‚РІР° РіСЂР°РЅРµР№ РёР»Рё С„РѕСЂРјС‹
 
     Args:
-        points: DataFrame с исходными точками
-        height_tolerance: Допуск группировки по высоте
-        center_method: Метод расчета центра пояса
-        use_assigned_belts: Использовать назначенные пользователем пояса
-        use_cache: Использовать кэширование результатов
+        points: DataFrame СЃ РёСЃС…РѕРґРЅС‹РјРё С‚РѕС‡РєР°РјРё
+        height_tolerance: Р”РѕРїСѓСЃРє РіСЂСѓРїРїРёСЂРѕРІРєРё РїРѕ РІС‹СЃРѕС‚Рµ
+        center_method: РњРµС‚РѕРґ СЂР°СЃС‡РµС‚Р° С†РµРЅС‚СЂР° РїРѕСЏСЃР°
+        use_assigned_belts: РСЃРїРѕР»СЊР·РѕРІР°С‚СЊ РЅР°Р·РЅР°С‡РµРЅРЅС‹Рµ РїРѕР»СЊР·РѕРІР°С‚РµР»РµРј РїРѕСЏСЃР°
+        use_cache: РСЃРїРѕР»СЊР·РѕРІР°С‚СЊ РєСЌС€РёСЂРѕРІР°РЅРёРµ СЂРµР·СѓР»СЊС‚Р°С‚РѕРІ
 
     Returns:
-        Словарь с результатами обработки
+        РЎР»РѕРІР°СЂСЊ СЃ СЂРµР·СѓР»СЊС‚Р°С‚Р°РјРё РѕР±СЂР°Р±РѕС‚РєРё
     """
     required_cols = {'x', 'y', 'z'}
     if points is None or points.empty or not required_cols.issubset(points.columns):
@@ -1252,7 +790,7 @@ def process_tower_data(
             'straightness_summary': {'max_deflection_mm': 0.0, 'passed': 0, 'failed': 0, 'violations': []},
         }
 
-    # Проверяем кэш
+    # РџСЂРѕРІРµСЂСЏРµРј РєСЌС€
     resolved_grouping_mode = resolve_section_grouping_mode(section_grouping_mode, use_assigned_belts)
     cache_key = None
     if use_cache:
@@ -1263,22 +801,22 @@ def process_tower_data(
                 if cache_key in _cache_access_order:
                     _cache_access_order.remove(cache_key)
                 _cache_access_order.append(cache_key)
-                logger.debug("Использован кэшированный результат расчетов")
+                logger.debug("РСЃРїРѕР»СЊР·РѕРІР°РЅ РєСЌС€РёСЂРѕРІР°РЅРЅС‹Р№ СЂРµР·СѓР»СЊС‚Р°С‚ СЂР°СЃС‡РµС‚РѕРІ")
                 return cached_result
             else:
-                logger.debug("Удаляем невалидный кеш расчета и пересчитываем")
+                logger.debug("РЈРґР°Р»СЏРµРј РЅРµРІР°Р»РёРґРЅС‹Р№ РєРµС€ СЂР°СЃС‡РµС‚Р° Рё РїРµСЂРµСЃС‡РёС‚С‹РІР°РµРј")
                 _calculation_cache.pop(cache_key, None)
                 if cache_key in _cache_access_order:
                     _cache_access_order.remove(cache_key)
 
-    # Группируем точки по поясам (используя назначенные или автогруппировку)
+    # Р“СЂСѓРїРїРёСЂСѓРµРј С‚РѕС‡РєРё РїРѕ РїРѕСЏСЃР°Рј (РёСЃРїРѕР»СЊР·СѓСЏ РЅР°Р·РЅР°С‡РµРЅРЅС‹Рµ РёР»Рё Р°РІС‚РѕРіСЂСѓРїРїРёСЂРѕРІРєСѓ)
     belts = group_points_by_height(
         points,
         tolerance=height_tolerance,
         section_grouping_mode=resolved_grouping_mode,
     )
 
-    # Вычисляем центры поясов
+    # Р’С‹С‡РёСЃР»СЏРµРј С†РµРЅС‚СЂС‹ РїРѕСЏСЃРѕРІ
     centers_list = []
     for section_index, (height, belt_points) in enumerate(sorted(belts.items()), start=1):
         x_c, y_c, z_c = calculate_belt_center(belt_points, center_method)
@@ -1314,22 +852,22 @@ def process_tower_data(
 
     centers = pd.DataFrame(centers_list)
 
-    # Дедупликация центров по высоте для составных башен
-    # Логика: для каждой абсолютной высоты оставляем только один центр
-    # Самая нижняя секция, промежуточные секции части, верхняя секция части,
-    # далее нижняя секция следующей части пропускается (совпадает с верхней предыдущей)
+    # Р”РµРґСѓРїР»РёРєР°С†РёСЏ С†РµРЅС‚СЂРѕРІ РїРѕ РІС‹СЃРѕС‚Рµ РґР»СЏ СЃРѕСЃС‚Р°РІРЅС‹С… Р±Р°С€РµРЅ
+    # Р›РѕРіРёРєР°: РґР»СЏ РєР°Р¶РґРѕР№ Р°Р±СЃРѕР»СЋС‚РЅРѕР№ РІС‹СЃРѕС‚С‹ РѕСЃС‚Р°РІР»СЏРµРј С‚РѕР»СЊРєРѕ РѕРґРёРЅ С†РµРЅС‚СЂ
+    # РЎР°РјР°СЏ РЅРёР¶РЅСЏСЏ СЃРµРєС†РёСЏ, РїСЂРѕРјРµР¶СѓС‚РѕС‡РЅС‹Рµ СЃРµРєС†РёРё С‡Р°СЃС‚Рё, РІРµСЂС…РЅСЏСЏ СЃРµРєС†РёСЏ С‡Р°СЃС‚Рё,
+    # РґР°Р»РµРµ РЅРёР¶РЅСЏСЏ СЃРµРєС†РёСЏ СЃР»РµРґСѓСЋС‰РµР№ С‡Р°СЃС‚Рё РїСЂРѕРїСѓСЃРєР°РµС‚СЃСЏ (СЃРѕРІРїР°РґР°РµС‚ СЃ РІРµСЂС…РЅРµР№ РїСЂРµРґС‹РґСѓС‰РµР№)
     if (
         resolved_grouping_mode == SECTION_GROUPING_ASSIGNED_SECTIONS
         and not centers.empty
         and len(centers) > 1
     ):
-        # Сортируем по высоте
+        # РЎРѕСЂС‚РёСЂСѓРµРј РїРѕ РІС‹СЃРѕС‚Рµ
         centers = centers.sort_values('z').reset_index(drop=True)
 
-        # Группируем центры по высоте с допуском
-        # Для центров на одной высоте (с допуском) оставляем только один
+        # Р“СЂСѓРїРїРёСЂСѓРµРј С†РµРЅС‚СЂС‹ РїРѕ РІС‹СЃРѕС‚Рµ СЃ РґРѕРїСѓСЃРєРѕРј
+        # Р”Р»СЏ С†РµРЅС‚СЂРѕРІ РЅР° РѕРґРЅРѕР№ РІС‹СЃРѕС‚Рµ (СЃ РґРѕРїСѓСЃРєРѕРј) РѕСЃС‚Р°РІР»СЏРµРј С‚РѕР»СЊРєРѕ РѕРґРёРЅ
         deduplicated_centers = []
-        height_tolerance_dedup = height_tolerance  # Используем тот же допуск, что и для группировки
+        height_tolerance_dedup = height_tolerance  # РСЃРїРѕР»СЊР·СѓРµРј С‚РѕС‚ Р¶Рµ РґРѕРїСѓСЃРє, С‡С‚Рѕ Рё РґР»СЏ РіСЂСѓРїРїРёСЂРѕРІРєРё
 
         i = 0
         processed_indices = set()
@@ -1341,37 +879,37 @@ def process_tower_data(
             current_row = centers.iloc[i]
             current_z = current_row['z']
 
-            # Находим все центры на этой же высоте (с допуском)
+            # РќР°С…РѕРґРёРј РІСЃРµ С†РµРЅС‚СЂС‹ РЅР° СЌС‚РѕР№ Р¶Рµ РІС‹СЃРѕС‚Рµ (СЃ РґРѕРїСѓСЃРєРѕРј)
             same_height_mask = np.abs(centers['z'].values - current_z) <= height_tolerance_dedup
             same_height_positions = np.where(same_height_mask)[0].tolist()
 
             if len(same_height_positions) > 1:
-                # Если есть несколько центров на одной высоте, усредняем координаты
+                # Р•СЃР»Рё РµСЃС‚СЊ РЅРµСЃРєРѕР»СЊРєРѕ С†РµРЅС‚СЂРѕРІ РЅР° РѕРґРЅРѕР№ РІС‹СЃРѕС‚Рµ, СѓСЃСЂРµРґРЅСЏРµРј РєРѕРѕСЂРґРёРЅР°С‚С‹
                 same_height_rows = centers.iloc[same_height_positions]
                 averaged_center = {
                     'x': float(same_height_rows['x'].mean()),
                     'y': float(same_height_rows['y'].mean()),
-                    'z': float(same_height_rows['z'].mean()),  # Средняя высота
+                    'z': float(same_height_rows['z'].mean()),  # РЎСЂРµРґРЅСЏСЏ РІС‹СЃРѕС‚Р°
                     'belt_height': float(same_height_rows['belt_height'].mean()),
                     'points_count': int(same_height_rows['points_count'].sum()),
                     'tower_part': int(same_height_rows['tower_part'].min()) if same_height_rows['tower_part'].notna().any() else None,
-                    'tower_part_memberships': current_row.get('tower_part_memberships')  # Берем из первого
+                    'tower_part_memberships': current_row.get('tower_part_memberships')  # Р‘РµСЂРµРј РёР· РїРµСЂРІРѕРіРѕ
                 }
                 deduplicated_centers.append(averaged_center)
-                logger.debug(f"Объединено {len(same_height_positions)} центров на высоте ~{current_z:.3f}м в один")
-                # Отмечаем все обработанные индексы
+                logger.debug(f"РћР±СЉРµРґРёРЅРµРЅРѕ {len(same_height_positions)} С†РµРЅС‚СЂРѕРІ РЅР° РІС‹СЃРѕС‚Рµ ~{current_z:.3f}Рј РІ РѕРґРёРЅ")
+                # РћС‚РјРµС‡Р°РµРј РІСЃРµ РѕР±СЂР°Р±РѕС‚Р°РЅРЅС‹Рµ РёРЅРґРµРєСЃС‹
                 processed_indices.update(same_height_positions)
-                # Переходим к следующему необработанному индексу
+                # РџРµСЂРµС…РѕРґРёРј Рє СЃР»РµРґСѓСЋС‰РµРјСѓ РЅРµРѕР±СЂР°Р±РѕС‚Р°РЅРЅРѕРјСѓ РёРЅРґРµРєСЃСѓ
                 i = max(same_height_positions) + 1
             else:
-                # Один центр на этой высоте - просто добавляем
+                # РћРґРёРЅ С†РµРЅС‚СЂ РЅР° СЌС‚РѕР№ РІС‹СЃРѕС‚Рµ - РїСЂРѕСЃС‚Рѕ РґРѕР±Р°РІР»СЏРµРј
                 deduplicated_centers.append(current_row.to_dict())
                 processed_indices.add(i)
                 i += 1
 
         if len(deduplicated_centers) < len(centers):
-            logger.info(f"Дедупликация центров: было {len(centers)}, стало {len(deduplicated_centers)} "
-                       f"(удалено {len(centers) - len(deduplicated_centers)} дубликатов)")
+            logger.info(f"Р”РµРґСѓРїР»РёРєР°С†РёСЏ С†РµРЅС‚СЂРѕРІ: Р±С‹Р»Рѕ {len(centers)}, СЃС‚Р°Р»Рѕ {len(deduplicated_centers)} "
+                       f"(СѓРґР°Р»РµРЅРѕ {len(centers) - len(deduplicated_centers)} РґСѓР±Р»РёРєР°С‚РѕРІ)")
             centers = pd.DataFrame(deduplicated_centers)
             centers = centers.sort_values('z').reset_index(drop=True)
 
@@ -1393,11 +931,11 @@ def process_tower_data(
             'valid': False
         }
 
-    # Аппроксимируем ось башни
+    # РђРїРїСЂРѕРєСЃРёРјРёСЂСѓРµРј РѕСЃСЊ Р±Р°С€РЅРё
     axis = approximate_tower_axis(centers)
 
-    # Ищем точку standing для новой системы координат (используется как fallback)
-    standing_point = {'x': 0.0, 'y': 0.0, 'z': 0.0}  # По умолчанию
+    # РС‰РµРј С‚РѕС‡РєСѓ standing РґР»СЏ РЅРѕРІРѕР№ СЃРёСЃС‚РµРјС‹ РєРѕРѕСЂРґРёРЅР°С‚ (РёСЃРїРѕР»СЊР·СѓРµС‚СЃСЏ РєР°Рє fallback)
+    standing_point = {'x': 0.0, 'y': 0.0, 'z': 0.0}  # РџРѕ СѓРјРѕР»С‡Р°РЅРёСЋ
     if 'is_station' in points.columns:
         station_mask = _build_is_station_mask(points['is_station'])
         station_points = points[station_mask]
@@ -1407,23 +945,23 @@ def process_tower_data(
                 'y': station_points.iloc[0]['y'],
                 'z': station_points.iloc[0]['z']
             }
-            logger.info(f"Найдена точка standing: {standing_point}")
+            logger.info(f"РќР°Р№РґРµРЅР° С‚РѕС‡РєР° standing: {standing_point}")
 
-    # Получаем точки нижнего пояса для определения ориентации локальной СК
-    # (используется для универсального расчета, не зависящего от формы башни)
+    # РџРѕР»СѓС‡Р°РµРј С‚РѕС‡РєРё РЅРёР¶РЅРµРіРѕ РїРѕСЏСЃР° РґР»СЏ РѕРїСЂРµРґРµР»РµРЅРёСЏ РѕСЂРёРµРЅС‚Р°С†РёРё Р»РѕРєР°Р»СЊРЅРѕР№ РЎРљ
+    # (РёСЃРїРѕР»СЊР·СѓРµС‚СЃСЏ РґР»СЏ СѓРЅРёРІРµСЂСЃР°Р»СЊРЅРѕРіРѕ СЂР°СЃС‡РµС‚Р°, РЅРµ Р·Р°РІРёСЃСЏС‰РµРіРѕ РѕС‚ С„РѕСЂРјС‹ Р±Р°С€РЅРё)
     lower_belt_points = None
     if belts:
         min_height = min(belts.keys())
         lower_belt_points = belts[min_height]
-        logger.info(f"Используем {len(lower_belt_points)} точек нижнего пояса для универсальной ориентации локальной СК")
+        logger.info(f"РСЃРїРѕР»СЊР·СѓРµРј {len(lower_belt_points)} С‚РѕС‡РµРє РЅРёР¶РЅРµРіРѕ РїРѕСЏСЃР° РґР»СЏ СѓРЅРёРІРµСЂСЃР°Р»СЊРЅРѕР№ РѕСЂРёРµРЅС‚Р°С†РёРё Р»РѕРєР°Р»СЊРЅРѕР№ РЎРљ")
 
-    # Вычисляем локальную систему координат (универсально для любой формы башни)
+    # Р’С‹С‡РёСЃР»СЏРµРј Р»РѕРєР°Р»СЊРЅСѓСЋ СЃРёСЃС‚РµРјСѓ РєРѕРѕСЂРґРёРЅР°С‚ (СѓРЅРёРІРµСЂСЃР°Р»СЊРЅРѕ РґР»СЏ Р»СЋР±РѕР№ С„РѕСЂРјС‹ Р±Р°С€РЅРё)
     local_cs = calculate_local_coordinate_system(centers, standing_point, lower_belt_points)
 
-    # Вычисляем отклонения от вертикали с новой логикой
+    # Р’С‹С‡РёСЃР»СЏРµРј РѕС‚РєР»РѕРЅРµРЅРёСЏ РѕС‚ РІРµСЂС‚РёРєР°Р»Рё СЃ РЅРѕРІРѕР№ Р»РѕРіРёРєРѕР№
     centers_with_vertical = calculate_vertical_deviation_with_local_cs(centers, axis, local_cs, standing_point)
 
-    # Извлекаем информацию о частях башни из исходных данных
+    # РР·РІР»РµРєР°РµРј РёРЅС„РѕСЂРјР°С†РёСЋ Рѕ С‡Р°СЃС‚СЏС… Р±Р°С€РЅРё РёР· РёСЃС…РѕРґРЅС‹С… РґР°РЅРЅС‹С…
     tower_parts_info = None
     working_points = points[_build_working_tower_mask(points)].copy()
     has_memberships = 'tower_part_memberships' in working_points.columns and working_points['tower_part_memberships'].notna().any()
@@ -1461,9 +999,9 @@ def process_tower_data(
                 tower_parts_info['split_height'] = split_heights[0]
             else:
                 tower_parts_info['split_height'] = None
-            logger.info(f"Обнаружена составная башня: частей={len(parts_meta)}, границы={split_heights if split_heights else 'нет'}")
+            logger.info(f"РћР±РЅР°СЂСѓР¶РµРЅР° СЃРѕСЃС‚Р°РІРЅР°СЏ Р±Р°С€РЅСЏ: С‡Р°СЃС‚РµР№={len(parts_meta)}, РіСЂР°РЅРёС†С‹={split_heights if split_heights else 'РЅРµС‚'}")
 
-    # Вычисляем стрелы прогиба (с учетом частей, если башня составная)
+    # Р’С‹С‡РёСЃР»СЏРµРј СЃС‚СЂРµР»С‹ РїСЂРѕРіРёР±Р° (СЃ СѓС‡РµС‚РѕРј С‡Р°СЃС‚РµР№, РµСЃР»Рё Р±Р°С€РЅСЏ СЃРѕСЃС‚Р°РІРЅР°СЏ)
     # Keep straightness isolated from verticality: no implicit part detection here.
     if False and (tower_parts_info is None or len(tower_parts_info.get('parts', [])) <= 1) and 'belt' in working_points.columns:  # disabled on purpose
         numeric_belts = pd.to_numeric(working_points['belt'], errors='coerce').dropna()
@@ -1509,7 +1047,7 @@ def process_tower_data(
                     'split_heights': [float(split_height)],
                     'auto_detected': True,
                 }
-                logger.info("Автоопределена составная башня для прямолинейности: split_height=%.3f м", float(split_height))
+                logger.info("РђРІС‚РѕРѕРїСЂРµРґРµР»РµРЅР° СЃРѕСЃС‚Р°РІРЅР°СЏ Р±Р°С€РЅСЏ РґР»СЏ РїСЂСЏРјРѕР»РёРЅРµР№РЅРѕСЃС‚Рё: split_height=%.3f Рј", float(split_height))
     centers_with_straightness = calculate_straightness_deviation(centers_with_vertical, tower_parts_info)
     straightness_profiles = build_straightness_profiles(points, tower_parts_info)
     straightness_summary = _summarize_straightness_profiles(straightness_profiles)
@@ -1527,28 +1065,29 @@ def process_tower_data(
         'valid': True
     }
 
-    # Сохраняем в кэш (с ограничением размера и LRU стратегией)
+    # РЎРѕС…СЂР°РЅСЏРµРј РІ РєСЌС€ (СЃ РѕРіСЂР°РЅРёС‡РµРЅРёРµРј СЂР°Р·РјРµСЂР° Рё LRU СЃС‚СЂР°С‚РµРіРёРµР№)
     if use_cache and cache_key is not None:
         cache_key = _get_cache_key(points, height_tolerance, center_method, resolved_grouping_mode)
         if len(_calculation_cache) >= _cache_max_size:
-            # Удаляем самую старую запись (LRU - Least Recently Used)
+            # РЈРґР°Р»СЏРµРј СЃР°РјСѓСЋ СЃС‚Р°СЂСѓСЋ Р·Р°РїРёСЃСЊ (LRU - Least Recently Used)
             if _cache_access_order:
                 oldest_key = _cache_access_order.pop(0)
                 if oldest_key in _calculation_cache:
                     del _calculation_cache[oldest_key]
-                    logger.debug(f"Удалена старая запись из кэша (LRU): {oldest_key[:20]}...")
+                    logger.debug(f"РЈРґР°Р»РµРЅР° СЃС‚Р°СЂР°СЏ Р·Р°РїРёСЃСЊ РёР· РєСЌС€Р° (LRU): {oldest_key[:20]}...")
             else:
-                # Fallback: если список пуст, удаляем первую запись
+                # Fallback: РµСЃР»Рё СЃРїРёСЃРѕРє РїСѓСЃС‚, СѓРґР°Р»СЏРµРј РїРµСЂРІСѓСЋ Р·Р°РїРёСЃСЊ
                 oldest_key = next(iter(_calculation_cache))
                 del _calculation_cache[oldest_key]
 
-        # Добавляем новую запись
+        # Р”РѕР±Р°РІР»СЏРµРј РЅРѕРІСѓСЋ Р·Р°РїРёСЃСЊ
         _calculation_cache[cache_key] = result
-        # Обновляем порядок доступа
+        # РћР±РЅРѕРІР»СЏРµРј РїРѕСЂСЏРґРѕРє РґРѕСЃС‚СѓРїР°
         if cache_key in _cache_access_order:
             _cache_access_order.remove(cache_key)
         _cache_access_order.append(cache_key)
-        logger.debug(f"Результат сохранен в кэш (размер кэша: {len(_calculation_cache)})")
+        logger.debug(f"Р РµР·СѓР»СЊС‚Р°С‚ СЃРѕС…СЂР°РЅРµРЅ РІ РєСЌС€ (СЂР°Р·РјРµСЂ РєСЌС€Р°: {len(_calculation_cache)})")
 
     return result
+
 

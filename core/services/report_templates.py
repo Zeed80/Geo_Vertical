@@ -472,6 +472,35 @@ class ReportDataAssembler:
         }
 
     def _build_verticality_section(self) -> dict[str, Any]:
+        sections = self._get_preferred_verticality_sections()
+        if sections:
+            deviations_mm = [abs(float(section["total_deviation"])) for section in sections]
+            summary = {
+                "total_levels": len(sections),
+                "max_deviation_mm": round(max(deviations_mm), 2),
+                "mean_deviation_mm": round(sum(deviations_mm) / len(deviations_mm), 2),
+                "levels": [],
+            }
+
+            for idx, section in enumerate(sections, start=1):
+                points_value = section.get("points_count", section.get("point_count", 0))
+                try:
+                    points = int(points_value) if points_value is not None and not pd.isna(points_value) else 0
+                except (TypeError, ValueError):
+                    points = 0
+                summary["levels"].append(
+                    {
+                        "index": idx,
+                        "section_number": section.get("section_num"),
+                        "part_num": section.get("part_num"),
+                        "height_m": float(section["height"]),
+                        "deviation_mm": float(section["total_deviation"]),
+                        "points": points,
+                        "source": section.get("source"),
+                    }
+                )
+            return summary
+
         centers = self.processed.get("centers")
         if not isinstance(centers, pd.DataFrame) or centers.empty:
             return {}
@@ -596,6 +625,27 @@ class ReportDataAssembler:
         )
 
     def _build_verticality_records(self) -> list[VerticalDeviationRecord]:
+        sections = self._get_preferred_verticality_sections()
+        if sections:
+            records: list[VerticalDeviationRecord] = []
+            for idx, section in enumerate(sections, start=1):
+                section_number = section.get("section_num")
+                if section_number is None:
+                    section_number = idx
+                try:
+                    normalized_section_number = int(section_number)
+                except (TypeError, ValueError):
+                    normalized_section_number = idx
+                records.append(
+                    VerticalDeviationRecord(
+                        section_number=normalized_section_number,
+                        height_m=float(section["height"]),
+                        deviation_previous_mm=None,
+                        deviation_current_mm=float(section["total_deviation"]),
+                    )
+                )
+            return records
+
         centers = self.processed.get("centers")
         if isinstance(centers, pd.DataFrame) and not centers.empty:
             records: list[VerticalDeviationRecord] = []
@@ -611,6 +661,65 @@ class ReportDataAssembler:
                 )
             return records
         return []
+
+    def _get_preferred_verticality_sections(self) -> list[dict[str, Any]]:
+        payload_candidates = [
+            self.angular_measurements,
+            self.processed.get("angular_verticality"),
+        ]
+
+        for payload in payload_candidates:
+            sections = self._normalize_verticality_sections(payload)
+            if sections:
+                return sections
+        return []
+
+    @staticmethod
+    def _normalize_verticality_sections(payload: Any) -> list[dict[str, Any]]:
+        if not isinstance(payload, dict):
+            return []
+
+        canonical_sections = payload.get("sections")
+        if not isinstance(canonical_sections, list) or not canonical_sections:
+            return []
+
+        result: list[dict[str, Any]] = []
+        for item in canonical_sections:
+            if not isinstance(item, dict):
+                continue
+            height = item.get("height")
+            total_deviation = item.get("total_deviation", item.get("deviation"))
+            if height is None or total_deviation is None:
+                continue
+            section_num = item.get("section_num")
+            try:
+                normalized_section_num = int(section_num) if section_num is not None else None
+            except (TypeError, ValueError):
+                normalized_section_num = None
+            try:
+                normalized = {
+                    "section_num": normalized_section_num,
+                    "part_num": item.get("part_num"),
+                    "height": float(height),
+                    "deviation_x": float(item.get("deviation_x", 0.0) or 0.0),
+                    "deviation_y": float(item.get("deviation_y", 0.0) or 0.0),
+                    "total_deviation": float(total_deviation),
+                    "tolerance": item.get("tolerance"),
+                    "points_count": item.get("points_count", item.get("point_count")),
+                    "source": item.get("source"),
+                    "basis_complete": item.get("basis_complete"),
+                }
+            except (TypeError, ValueError):
+                continue
+            result.append(normalized)
+
+        result.sort(
+            key=lambda section: (
+                float(section.get("height", 0.0) or 0.0),
+                section.get("section_num") if section.get("section_num") is not None else 10**9,
+            )
+        )
+        return result
 
     def _build_straightness_records(self) -> list[StraightnessRecord]:
         profiles = self.processed.get("straightness_profiles")

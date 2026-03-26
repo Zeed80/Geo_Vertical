@@ -17,6 +17,7 @@ from core.services.calculation_service import CalculationService
 from gui.data_import_wizard import DataImportWizard
 from gui.data_table import AddStationDialog, DataTableWidget
 from gui.report_widget import ReportWidget
+from gui.straightness_widget import StraightnessWidget
 from gui.verticality_widget import VerticalityWidget
 from utils.report_generator_enhanced import EnhancedReportGenerator
 
@@ -35,6 +36,45 @@ class _EditorStub:
 
 def _ensure_app():
     return _APP
+
+
+def _concat_without_all_na_warning(base_frame: pd.DataFrame, extra_frame: pd.DataFrame) -> pd.DataFrame:
+    bool_like_columns = {"is_station", "is_auxiliary", "is_control", "is_part_boundary"}
+    all_columns = list(dict.fromkeys([*base_frame.columns.tolist(), *extra_frame.columns.tolist()]))
+
+    def _point_index_series(length: int, offset: int) -> pd.Series:
+        return pd.Series(range(offset + 1, offset + length + 1), dtype="Int64")
+
+    def _default_value(column_name: str):
+        if column_name in bool_like_columns:
+            return False
+        if column_name in base_frame.columns and pd.api.types.is_numeric_dtype(base_frame[column_name]):
+            return 0
+        return ""
+
+    def _prepare(frame: pd.DataFrame, point_index_offset: int) -> pd.DataFrame:
+        prepared = frame.copy()
+        for column_name in all_columns:
+            if column_name == "point_index":
+                fallback = _point_index_series(len(prepared), point_index_offset)
+                if column_name not in prepared.columns:
+                    prepared[column_name] = fallback
+                else:
+                    numeric_point_index = pd.to_numeric(prepared[column_name], errors="coerce")
+                    prepared[column_name] = numeric_point_index.where(numeric_point_index.notna(), fallback).astype("Int64")
+            elif column_name not in prepared.columns:
+                prepared[column_name] = _default_value(column_name)
+            elif prepared[column_name].isna().all():
+                prepared[column_name] = _default_value(column_name)
+        return prepared.loc[:, all_columns]
+
+    return pd.concat(
+        [
+            _prepare(base_frame, 0),
+            _prepare(extra_frame, len(base_frame)),
+        ],
+        ignore_index=True,
+    )
 
 
 def _section_points(center_x: float, center_y: float, z: float, radius: float = 1.0):
@@ -211,7 +251,7 @@ def _build_real_example_fixture(*, add_second_station: bool = False, attach_proc
                 }
             ]
         )
-        raw_data = pd.concat([raw_data, second_station], ignore_index=True)
+        raw_data = _concat_without_all_na_warning(raw_data, second_station)
 
     levels = find_section_levels(raw_data, height_tolerance=0.3)
     editor = _EditorStub(get_section_lines(raw_data, levels, height_tolerance=0.3))
@@ -304,6 +344,28 @@ def test_station_ray_intersection_keeps_large_shift_geometry_exact():
         abs=0.05,
     )
     assert upper_section["center_xy"] == pytest.approx((0.04960381602092927, -0.02162902521950685), abs=1e-9)
+    assert upper_section["total_deviation"] == pytest.approx(
+        math.hypot(49.60381602092927, -21.62902521950685),
+        abs=0.05,
+    )
+
+
+def test_authoritative_two_station_sections_use_lowest_section_as_zero_baseline():
+    widget, _, _, _ = _build_fixture()
+    payload = widget.get_angular_measurements()
+
+    base_section = next(section for section in payload["sections"] if section["section_num"] == 0)
+
+    assert base_section["deviation_x"] == pytest.approx(0.0, abs=1e-9)
+    assert base_section["deviation_y"] == pytest.approx(0.0, abs=1e-9)
+    assert base_section["total_deviation"] == pytest.approx(0.0, abs=1e-9)
+
+    base_rows_x = [row for row in payload["x"] if row.get("section_num") == 0]
+    base_rows_y = [row for row in payload["y"] if row.get("section_num") == 0]
+    assert base_rows_x
+    assert base_rows_y
+    assert all(float(row["delta_mm"]) == pytest.approx(0.0, abs=1e-9) for row in base_rows_x)
+    assert all(float(row["delta_mm"]) == pytest.approx(0.0, abs=1e-9) for row in base_rows_y)
 
 
 def test_non_orthogonal_station_geometry_reconstructs_total_deviation():
@@ -317,7 +379,7 @@ def test_non_orthogonal_station_geometry_reconstructs_total_deviation():
     assert upper_section["station_deviation_x"] == pytest.approx(-4.0, abs=0.05)
     assert upper_section["station_deviation_y"] == pytest.approx(-7.2, abs=0.05)
     assert upper_section["resolved_shift_xy_mm"] == pytest.approx([12.0, -4.0], abs=0.05)
-    assert upper_section["total_deviation"] == pytest.approx(0.0, abs=1e-6)
+    assert upper_section["total_deviation"] == pytest.approx(math.hypot(12.0, -4.0), abs=0.05)
     assert aggregated_upper["total_deviation"] == pytest.approx(upper_section["total_deviation"], abs=1e-6)
 
 
@@ -411,10 +473,11 @@ def test_verticality_widget_falls_back_to_processed_centers_when_table_payload_i
     expected_totals = [float(value) * 1000.0 for value in processed_results["centers"]["deviation"].tolist()]
 
     assert actual_totals == pytest.approx(expected_totals, abs=0.05)
-    assert max(actual_totals) < 20.0
+    assert actual_totals[0] == pytest.approx(0.0, abs=0.05)
+    assert max(actual_totals) > 90.0
 
 
-def test_real_example_with_fictive_station_keeps_verticality_within_processed_range():
+def test_real_example_with_fictive_station_keeps_baseline_verticality_from_processed_centers():
     widget, raw_data, processed_results, editor = _build_real_example_fixture(
         add_second_station=True,
         attach_processed_to_table=True,
@@ -429,7 +492,8 @@ def test_real_example_with_fictive_station_keeps_verticality_within_processed_ra
     payload_totals = [section["total_deviation"] for section in payload["sections"]]
     expected_totals = [float(value) * 1000.0 for value in processed_results["centers"]["deviation"].tolist()]
     assert payload_totals == pytest.approx(expected_totals, abs=0.05)
-    assert max(payload_totals) < 20.0
+    assert payload_totals[0] == pytest.approx(0.0, abs=0.05)
+    assert max(payload_totals) > 90.0
     assert {section["source"] for section in payload["sections"]} == {"processed"}
 
     verticality_widget = VerticalityWidget()
@@ -457,7 +521,7 @@ def test_real_example_with_synthetic_station_still_has_rows_but_uses_station_sec
     assert {section["source"] for section in payload["sections"]} == {"stations"}
 
 
-def test_real_example_station_rows_use_axis_residuals_instead_of_baseline_shifts():
+def test_real_example_station_rows_follow_baseline_shifts_in_station_axes():
     widget, raw_data, _, editor = _build_real_example_fixture(
         add_second_station=True,
         attach_processed_to_table=False,
@@ -467,8 +531,8 @@ def test_real_example_station_rows_use_axis_residuals_instead_of_baseline_shifts
     rows_x = [row for idx, row in enumerate(payload["x"]) if idx % 2 == 0]
     rows_y = [row for idx, row in enumerate(payload["y"]) if idx % 2 == 0]
 
-    assert max(abs(float(row["delta_mm"])) for row in rows_x) < 3.0
-    assert max(abs(float(row["delta_mm"])) for row in rows_y) < 15.0
+    assert max(abs(float(row["delta_mm"])) for row in rows_x) < 10.0
+    assert max(abs(float(row["delta_mm"])) for row in rows_y) > 90.0
 
     verticality_widget = VerticalityWidget()
     verticality_widget.data = raw_data
@@ -484,7 +548,39 @@ def test_real_example_station_rows_use_axis_residuals_instead_of_baseline_shifts
         assert by_section[row["section_num"]]["deviation_y"] == pytest.approx(float(row["delta_mm"]), abs=0.05)
 
 
-def test_verticality_plot_is_normalized_to_zero_at_lowest_section():
+def test_real_example_straightness_widget_uses_readable_labels_and_clustered_heights():
+    _, raw_data, processed_results, _ = _build_real_example_fixture(
+        add_second_station=False,
+        attach_processed_to_table=True,
+    )
+
+    straightness_widget = StraightnessWidget()
+    straightness_widget.set_data(raw_data, processed_results)
+
+    headers = [
+        straightness_widget.deviation_table.horizontalHeaderItem(column).text()
+        for column in range(straightness_widget.deviation_table.columnCount())
+    ]
+    heights = [
+        straightness_widget.deviation_table.item(row, 0).text()
+        for row in range(straightness_widget.deviation_table.rowCount())
+    ]
+
+    assert straightness_widget.info_label.text() == "Графики построены для 4 поясов"
+    assert straightness_widget.graph_tabs.tabText(0) == "Все пояса"
+    assert headers == [
+        "Высота, м",
+        "Пояс 1",
+        "Пояс 2",
+        "Пояс 3",
+        "Пояс 4",
+        "Допустимое, мм",
+    ]
+    assert heights == ["2.5", "10.0", "17.5", "25.0", "30.3"]
+    assert straightness_widget.deviation_table.item(0, 5).text().startswith("±")
+
+
+def test_verticality_plot_uses_raw_section_deviations():
     widget, raw_data, _, editor = _build_real_example_fixture(
         add_second_station=True,
         attach_processed_to_table=False,
@@ -496,17 +592,23 @@ def test_verticality_plot_is_normalized_to_zero_at_lowest_section():
     verticality_widget.editor_3d = editor
     verticality_widget.data_table_widget = widget
     section_data = verticality_widget._calculate_section_deviations()
+    expected_sections = sorted(section_data, key=lambda item: float(item.get("height", 0.0) or 0.0))
+    expected_heights = [float(item["height"]) for item in expected_sections]
+    expected_dev_x = [float(item["deviation_x"]) for item in expected_sections]
+    expected_dev_y = [float(item["deviation_y"]) for item in expected_sections]
 
     verticality_widget.figure.clear()
     ax_x = verticality_widget.figure.add_subplot(1, 2, 1)
     verticality_widget._plot_verticality_profile(ax_x, section_data, component='x')
     profile_x = next(line for line in ax_x.get_lines() if line.get_label() == 'Отклонение по X')
-    assert float(profile_x.get_xdata()[0]) == pytest.approx(0.0, abs=1e-9)
+    assert list(profile_x.get_xdata()) == pytest.approx(expected_dev_x, abs=1e-9)
+    assert list(profile_x.get_ydata()) == pytest.approx(expected_heights, abs=1e-9)
 
     ax_y = verticality_widget.figure.add_subplot(1, 2, 2)
     verticality_widget._plot_verticality_profile(ax_y, section_data, component='y')
     profile_y = next(line for line in ax_y.get_lines() if line.get_label() == 'Отклонение по Y')
-    assert float(profile_y.get_xdata()[0]) == pytest.approx(0.0, abs=1e-9)
+    assert list(profile_y.get_xdata()) == pytest.approx(expected_dev_y, abs=1e-9)
+    assert list(profile_y.get_ydata()) == pytest.approx(expected_heights, abs=1e-9)
 
 
 def test_journal_verticality_and_report_use_same_section_payload():
@@ -609,7 +711,7 @@ def test_duplicate_station_geometry_is_not_treated_as_complete_angular_basis():
         ]
     )
 
-    duplicated = pd.concat([raw_data, duplicate_station], ignore_index=True)
+    duplicated = _concat_without_all_na_warning(raw_data, duplicate_station)
     widget = DataTableWidget(editor)
     widget.set_data(duplicated)
     payload = widget.get_angular_measurements()
@@ -699,7 +801,7 @@ def test_processed_center_calculation_is_unchanged_by_added_second_station():
             }
         ]
     )
-    augmented = pd.concat([raw_data, second_station], ignore_index=True)
+    augmented = _concat_without_all_na_warning(raw_data, second_station)
     augmented_results = process_tower_data(augmented, use_assigned_belts=True, use_cache=False)
 
     pd.testing.assert_frame_equal(
