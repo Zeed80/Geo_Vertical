@@ -40,6 +40,10 @@ from core.report_schema import (
     TitleObjectInfo,
     VerticalDeviationRecord,
 )
+from core.services.verticality_sections import (
+    get_preferred_verticality_sections,
+    normalize_verticality_sections,
+)
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 USER_DATA_DIR = PROJECT_ROOT / "user_data" / "report_templates"
@@ -663,63 +667,14 @@ class ReportDataAssembler:
         return []
 
     def _get_preferred_verticality_sections(self) -> list[dict[str, Any]]:
-        payload_candidates = [
+        return get_preferred_verticality_sections(
             self.angular_measurements,
             self.processed.get("angular_verticality"),
-        ]
-
-        for payload in payload_candidates:
-            sections = self._normalize_verticality_sections(payload)
-            if sections:
-                return sections
-        return []
+        )
 
     @staticmethod
     def _normalize_verticality_sections(payload: Any) -> list[dict[str, Any]]:
-        if not isinstance(payload, dict):
-            return []
-
-        canonical_sections = payload.get("sections")
-        if not isinstance(canonical_sections, list) or not canonical_sections:
-            return []
-
-        result: list[dict[str, Any]] = []
-        for item in canonical_sections:
-            if not isinstance(item, dict):
-                continue
-            height = item.get("height")
-            total_deviation = item.get("total_deviation", item.get("deviation"))
-            if height is None or total_deviation is None:
-                continue
-            section_num = item.get("section_num")
-            try:
-                normalized_section_num = int(section_num) if section_num is not None else None
-            except (TypeError, ValueError):
-                normalized_section_num = None
-            try:
-                normalized = {
-                    "section_num": normalized_section_num,
-                    "part_num": item.get("part_num"),
-                    "height": float(height),
-                    "deviation_x": float(item.get("deviation_x", 0.0) or 0.0),
-                    "deviation_y": float(item.get("deviation_y", 0.0) or 0.0),
-                    "total_deviation": float(total_deviation),
-                    "tolerance": item.get("tolerance"),
-                    "points_count": item.get("points_count", item.get("point_count")),
-                    "source": item.get("source"),
-                    "basis_complete": item.get("basis_complete"),
-                }
-            except (TypeError, ValueError):
-                continue
-            result.append(normalized)
-
-        result.sort(
-            key=lambda section: (
-                float(section.get("height", 0.0) or 0.0),
-                section.get("section_num") if section.get("section_num") is not None else 10**9,
-            )
-        )
-        return result
+        return normalize_verticality_sections(payload)
 
     def _build_straightness_records(self) -> list[StraightnessRecord]:
         profiles = self.processed.get("straightness_profiles")

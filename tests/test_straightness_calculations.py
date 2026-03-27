@@ -2,6 +2,7 @@
 
 import numpy as np
 import pandas as pd
+import pytest
 
 from core.straightness_calculations import (
     auto_detect_split_height,
@@ -10,6 +11,7 @@ from core.straightness_calculations import (
     calculate_belt_deflections,
     find_station_point,
 )
+from core.services.straightness_profiles import get_preferred_straightness_part_map
 
 
 def _make_belt_df(coords):
@@ -170,6 +172,24 @@ class TestBuildStraightnessProfiles:
         assert point_map[104] == 0.0
         assert point_map[101] > 0.0
         assert point_map[103] > 0.0
+
+    def test_part_map_falls_back_to_canonical_profiles_from_raw_points(self):
+        df = pd.DataFrame(
+            [
+                {'x': 0.0, 'y': 0.0, 'z': 0.0, 'belt': 1},
+                {'x': 0.02, 'y': 0.0, 'z': 5.0, 'belt': 1},
+                {'x': 0.0, 'y': 0.0, 'z': 10.0, 'belt': 1},
+            ]
+        )
+
+        part_map = get_preferred_straightness_part_map(None, points=df)
+
+        assert part_map[1]['min_height'] == pytest.approx(0.0, abs=1e-9)
+        assert part_map[1]['max_height'] == pytest.approx(10.0, abs=1e-9)
+        assert [point['deflection'] for point in part_map[1]['belts'][1]] == pytest.approx(
+            [0.0, 20.0, 0.0],
+            abs=1e-9,
+        )
 
 
 class TestCalculateBeltAngle:

@@ -264,3 +264,71 @@ Completed in this pass:
 Residual risk from this phase:
 
 - `gui/straightness_widget.py` still contains mojibake in comments, docstrings, and non-covered legacy text branches; the audited `_render_straightness_plot(...)` path is now normalized and regression-tested.
+
+## Phase 4 Update
+
+Completed in this pass:
+
+- Hardened `gui/verticality_widget.py` so report/preview consumers read canonical section payload from `_current_section_data` instead of re-parsing scaled table text.
+- Isolated `core/calculations.py::process_tower_data(...)` cache entries and cache hits with deep copies so UI-side mutations can no longer contaminate future calculation results.
+- Fixed verticality plot bounds so the tolerance envelope always fits inside the axis limits, even when actual deviations are much smaller than the allowed top deviation.
+- Replaced the widget-level `tight_layout(...)` call with stable manual subplot spacing to avoid the known Matplotlib warning on the narrow on-screen figure.
+
+Confirmed defects now covered by regressions:
+
+1. UI/report mismatch risk: `VerticalityWidget.get_table_data()` could previously return rounded/scaled display values instead of the raw section payload.
+2. Cache contamination risk: `DataTableWidget.set_processed_results(...)` could augment the returned calculations dict and leak that mutation back into the `process_tower_data(...)` cache.
+3. Plot clipping risk: verticality tolerance guide lines could be drawn outside the visible x-range.
+4. Layout warning risk: repeated plot refreshes could emit `Tight layout not applied` warnings during the audited rendering path.
+
+Targeted regression coverage added:
+
+- `tests/test_calculations.py`
+- `tests/test_angular_verticality_payload.py`
+- `tests/test_plot_audit_regressions.py`
+
+Residual risk after this phase:
+
+- Canonical angular verticality sections are still assembled in the GUI layer (`gui/data_table.py`), so the final source-of-truth is protected but not yet fully centralized in a service/core contract.
+- `gui/report_widget.py`, `gui/report_preview_dialog.py`, and `utils/report_generator_enhanced.py` still depend on widget-provided accessors; they are now numerically safer, but the architectural duplication remains.
+
+## Phase 5 Update
+
+Completed in this pass:
+
+- Added `core/services/verticality_sections.py` as the shared contract layer for verticality section normalization, fallback selection, angular aggregation, and normative checks.
+- Switched `CalculationService`, `ReportDataAssembler`, `ReportWidget`, `VerticalityWidget`, and `EnhancedReportGenerator` to the shared helper instead of maintaining separate section-selection logic.
+- Removed one more GUI-side recomputation path in `VerticalityWidget`: when canonical sections already exist in `angular_verticality`, the widget now consumes them directly instead of rebuilding equivalent rows again.
+
+Confirmed contract after this phase:
+
+1. `angular_verticality["sections"]` is the preferred source-of-truth whenever it exists.
+2. Widget table rows are no longer allowed to outrank canonical payloads.
+3. Verticality normative verdicts in service/report layers now inherit `section_num` and `part_num` from the same normalized section contract.
+
+Residual risk after this phase:
+
+- The producer of canonical sections is still `gui/data_table.py`; consumers are now unified, but producer logic is not yet moved out of the GUI layer.
+- `utils/report_generator_enhanced.py` and `gui/report_preview_dialog.py` still contain presentation-specific fallback scaffolding, even though their numeric source now resolves through the shared helper or raw widget payload.
+
+## Phase 6 Update
+
+Completed in this pass:
+
+- Added `core/services/angular_verticality.py` and moved the canonical `angular_verticality` producer out of local GUI recomputation into a dedicated service builder consumed by `DataTableWidget`.
+- Added `core/services/straightness_profiles.py` as the shared selector/normalizer for `straightness_profiles` and part-grouped straightness payloads.
+- Switched `StraightnessWidget.get_all_belts_data()`, `ReportWidget.generate_preview_html(...)`, `ReportPreviewDialog.generate_preview_html(...)`, and `EnhancedReportGenerator` straightness selection to the shared helper with priority `processed_data["straightness_profiles"] -> widget payload -> canonical raw-data rebuild`.
+- Switched `EnhancedReportGenerator` verticality selection to the shared `get_preferred_verticality_sections(...)` path so processed canonical sections outrank widget-only fallback payloads in PDF/DOCX generation too.
+- Added regressions covering the new straightness service helper and the processed-profile priority in report preview HTML.
+
+Confirmed contract after this phase:
+
+1. Canonical `angular_verticality` payload is now produced in `core/services/angular_verticality.py` and only orchestrated from `gui/data_table.py`.
+2. Straightness preview/report tables now resolve from the same numeric source-of-truth as `straightness_profiles`.
+3. Full suite verification passed after the refactor, so the new source-selection helpers are not only locally correct but also compatible with the surrounding import/report flows.
+
+Residual risk after this phase:
+
+- `gui/straightness_widget.py` still contains legacy fallback code paths and mojibake text outside the audited/covered execution path; numerically they are now bypassed by the canonical helper, but cleanup is still desirable.
+- `utils/report_generator_enhanced.py` still has duplicated presentation structure between PDF and DOCX branches; source selection is unified, layout generation is not.
+- The geodesic result contract is still structural rather than fully typed; a typed schema/dataclass layer would make future regressions cheaper to catch.

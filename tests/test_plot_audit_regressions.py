@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import warnings
 
 import pandas as pd
 import pytest
@@ -58,6 +59,49 @@ def test_verticality_plot_draws_zero_line_tolerance_envelope_and_scaled_profile(
         [-expected_tolerance, expected_tolerance],
         abs=1e-9,
     )
+
+
+def test_verticality_plot_limits_always_include_tolerance_envelope():
+    _ensure_app()
+    widget = VerticalityWidget()
+    section_data = [
+        {"section_num": 0, "height": 0.0, "deviation_x": 0.0, "deviation_y": 0.0},
+        {"section_num": 1, "height": 120.0, "deviation_x": 5.0, "deviation_y": -4.0},
+    ]
+
+    ax = widget.figure.add_subplot(1, 1, 1)
+    widget._plot_verticality_profile(ax, section_data, component="x")
+
+    expected_tolerance = get_vertical_tolerance(120.0) * 1000.0
+    x_left, x_right = ax.get_xlim()
+
+    assert x_left <= -expected_tolerance
+    assert x_right >= expected_tolerance
+
+
+def test_verticality_update_plot_keeps_raw_payload_and_avoids_tight_layout_warning():
+    _ensure_app()
+    widget = VerticalityWidget()
+    widget.data = pd.DataFrame(
+        [
+            {"x": 1.0, "y": 0.0, "z": 0.0, "belt": 1},
+            {"x": 1.0, "y": 0.0, "z": 10.0, "belt": 1},
+        ]
+    )
+    section_data = [
+        {"section_num": 0, "height": 0.0, "deviation_x": 0.0, "deviation_y": 0.0, "total_deviation": 0.0},
+        {"section_num": 1, "height": 10.0, "deviation_x": 12.0, "deviation_y": -4.0, "total_deviation": 12.6491106407},
+    ]
+    widget._calculate_section_deviations = lambda: section_data
+    widget.adjust_spin.setValue(2.0)
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        widget.update_plot()
+
+    assert widget.deviation_table.item(1, 3).text() == "+6.00"
+    assert widget.get_table_data()[1]["deviation_x"] == pytest.approx(12.0, abs=1e-9)
+    assert not any("Tight layout not applied" in str(item.message) for item in caught)
 
 
 def test_straightness_plot_draws_zero_line_tolerance_lines_and_profile_points():

@@ -10,6 +10,11 @@ import numpy as np
 import pandas as pd
 
 logger = logging.getLogger(__name__)
+from core.services.straightness_profiles import get_preferred_straightness_part_map
+from core.services.verticality_sections import (
+    aggregate_angular_measurements_by_sections,
+    get_preferred_verticality_sections,
+)
 
 from reportlab.lib import colors
 from reportlab.lib.enums import TA_CENTER, TA_JUSTIFY
@@ -40,138 +45,49 @@ class EnhancedReportGenerator:
     @staticmethod
     def _aggregate_angular_measurements_by_sections(angular_measurements: dict[str, list],
                                                     height_tolerance: float = 0.3) -> list:
-        """
-        Агрегирует данные угловых измерений по секциям для получения отклонений по X, Y и суммарного.
+        return aggregate_angular_measurements_by_sections(
+            angular_measurements,
+            height_tolerance=height_tolerance,
+        )
 
-        Args:
-            angular_measurements: Словарь с ключами 'x' и 'y', содержащий списки данных угловых измерений
-            height_tolerance: Допуск по высоте для группировки точек в одну секцию (метры)
+    @staticmethod
+    def _get_preferred_verticality_data(
+        angular_measurements: dict[str, list] | None,
+        processed_data: dict | None,
+        verticality_widget=None,
+    ) -> list[dict]:
+        widget_data = []
+        if verticality_widget and hasattr(verticality_widget, 'get_table_data'):
+            try:
+                widget_data = verticality_widget.get_table_data()
+            except Exception as exc:
+                logger.warning(f"Ошибка получения данных из виджета вертикальности: {exc}")
 
-        Returns:
-            Список словарей с данными по секциям:
-            [
-                {
-                    'section_num': int,
-                    'height': float,
-                    'deviation_x': float,  # мм
-                    'deviation_y': float,  # мм
-                    'total_deviation': float  # мм (sqrt(dev_x^2 + dev_y^2))
-                },
-                ...
-            ]
-        """
-        if not angular_measurements:
-            return []
+        return get_preferred_verticality_sections(
+            angular_measurements,
+            processed_data.get('angular_verticality') if isinstance(processed_data, dict) else None,
+            widget_data,
+        )
 
-        canonical_sections = angular_measurements.get('sections')
-        if isinstance(canonical_sections, list) and canonical_sections:
-            result = []
-            for item in canonical_sections:
-                if not isinstance(item, dict):
-                    continue
-                height = item.get('height')
-                if height is None:
-                    continue
-                total_dev = item.get('total_deviation', item.get('deviation'))
-                if total_dev is None:
-                    continue
-                result.append({
-                    'section_num': item.get('section_num'),
-                    'height': float(height),
-                    'deviation_x': float(item.get('deviation_x', 0.0) or 0.0),
-                    'deviation_y': float(item.get('deviation_y', 0.0) or 0.0),
-                    'total_deviation': float(total_dev),
-                    'deviation': float(total_dev),
-                    'tolerance': item.get('tolerance'),
-                    'part_num': item.get('part_num'),
-                    'source': item.get('source'),
-                })
-            if result:
-                result.sort(
-                    key=lambda row: (
-                        float(row.get('height', 0.0) or 0.0),
-                        row.get('section_num') if row.get('section_num') is not None else 10**9,
-                    )
-                )
-                return result
+    @staticmethod
+    def _get_preferred_straightness_data(
+        processed_data: dict | None,
+        raw_data=None,
+        straightness_widget=None,
+    ) -> dict[int, dict]:
+        widget_data = {}
+        if straightness_widget and hasattr(straightness_widget, 'get_all_belts_data'):
+            try:
+                widget_data = straightness_widget.get_all_belts_data()
+            except Exception as exc:
+                logger.warning(f"Ошибка получения данных прямолинейности: {exc}")
 
-        basis = angular_measurements.get('basis', {})
-        has_authoritative_stations = basis.get('has_authoritative_stations', basis.get('has_required_stations'))
-        if basis.get('requires_two_stations') and not has_authoritative_stations:
-            return []
-
-        rows_x = angular_measurements.get('x', [])
-        rows_y = angular_measurements.get('y', [])
-
-        if not rows_x and not rows_y:
-            return []
-
-        # Группируем данные по высотам (секциям) для каждой оси
-        def group_by_height(rows, tolerance):
-            """Группирует строки по высоте с заданной толерантностью"""
-            if not rows:
-                return {}
-
-            groups = {}
-            for row in rows:
-                height = row.get('height')
-                if height is None:
-                    continue
-
-                delta_mm = row.get('delta_mm')
-                if delta_mm is None:
-                    continue
-
-                # Находим ближайшую группу по высоте
-                matched_key = None
-                for key_height in groups:
-                    if abs(height - key_height) <= tolerance:
-                        matched_key = key_height
-                        break
-
-                if matched_key is not None:
-                    groups[matched_key].append(delta_mm)
-                else:
-                    groups[height] = [delta_mm]
-
-            # Вычисляем среднее отклонение для каждой группы
-            result = {}
-            for height, deviations in groups.items():
-                valid_deviations = [d for d in deviations if d is not None]
-                if valid_deviations:
-                    result[height] = np.mean(valid_deviations)
-                else:
-                    result[height] = 0.0
-
-            return result
-
-        # Группируем данные по осям
-        deviations_x_by_height = group_by_height(rows_x, height_tolerance)
-        deviations_y_by_height = group_by_height(rows_y, height_tolerance)
-
-        # Получаем все уникальные высоты
-        all_heights = set(deviations_x_by_height.keys()) | set(deviations_y_by_height.keys())
-        all_heights = sorted(all_heights)
-
-        if not all_heights:
-            return []
-
-        # Формируем результат
-        result = []
-        for section_num, height in enumerate(all_heights):
-            dev_x = deviations_x_by_height.get(height, 0.0)
-            dev_y = deviations_y_by_height.get(height, 0.0)
-            total_dev = np.sqrt(dev_x**2 + dev_y**2)
-
-            result.append({
-                'section_num': section_num,
-                'height': height,
-                'deviation_x': float(dev_x),
-                'deviation_y': float(dev_y),
-                'total_deviation': float(total_dev)
-            })
-
-        return result
+        return get_preferred_straightness_part_map(
+            processed_data.get('straightness_profiles') if isinstance(processed_data, dict) else None,
+            widget_data,
+            points=raw_data,
+            tower_parts_info=processed_data.get('tower_parts_info') if isinstance(processed_data, dict) else None,
+        )
 
     @staticmethod
     def _build_verticality_conclusion_lines(vertical_check: dict) -> tuple[str, str]:
@@ -710,17 +626,11 @@ class EnhancedReportGenerator:
             from core.normatives import get_vertical_tolerance
 
             # Приоритет: данные из угловых измерений, затем из виджета вертикальности, затем стандартный способ
-            verticality_data_from_angular = None
-            if angular_measurements and (
-                angular_measurements.get('x')
-                or angular_measurements.get('y')
-                or angular_measurements.get('sections')
-            ):
-                try:
-                    verticality_data_from_angular = self._aggregate_angular_measurements_by_sections(angular_measurements)
-                except Exception as e:
-                    logger.warning(f"Ошибка агрегации данных угловых измерений: {e}")
-                    verticality_data_from_angular = None
+            verticality_data_from_angular = self._get_preferred_verticality_data(
+                angular_measurements,
+                processed_data,
+                vertical_plot_widget,
+            )
 
             if verticality_data_from_angular:
                 # Используем данные из угловых измерений
@@ -943,21 +853,24 @@ class EnhancedReportGenerator:
             ))
             story.append(Spacer(1, 8))
 
-            if straightness_plot_widget and hasattr(straightness_plot_widget, 'get_all_belts_data'):
+            straightness_data = self._get_preferred_straightness_data(
+                processed_data,
+                raw_data,
+                straightness_plot_widget,
+            )
+            if straightness_data:
                 try:
-                    straightness_data = straightness_plot_widget.get_all_belts_data()
+                    # Новая структура: данные сгруппированы по частям
+                    # straightness_data = {part_num: {'min_height': float, 'max_height': float, 'belts': {belt_num: [data]}}}
 
-                    if straightness_data:
-                        # Новая структура: данные сгруппированы по частям
-                        # straightness_data = {part_num: {'min_height': float, 'max_height': float, 'belts': {belt_num: [data]}}}
+                    sorted_parts = sorted(straightness_data.keys())
 
-                        sorted_parts = sorted(straightness_data.keys())
+                    # Общий счетчик рисунков для всех частей (начинается с 2, т.к. рис. 1 - вертикальность)
+                    global_figure_index = 2
 
-                        # Общий счетчик рисунков для всех частей (начинается с 2, т.к. рис. 1 - вертикальность)
-                        global_figure_index = 2
-
-                        for part_num in sorted_parts:
-                            part_info = straightness_data[part_num]
+                    for part_num in sorted_parts:
+                        part_info = straightness_data[part_num]
+                        if True:
                             min_height = part_info.get('min_height', 0.0)
                             max_height = part_info.get('max_height', 0.0)
                             belts_data = part_info.get('belts', {})
@@ -1111,14 +1024,17 @@ class EnhancedReportGenerator:
                 story.append(Spacer(1, 10))
 
             # Заключение о прямолинейности после всех графиков
-            if straightness_plot_widget and hasattr(straightness_plot_widget, 'get_all_belts_data'):
+            straightness_data_for_conclusion = self._get_preferred_straightness_data(
+                processed_data,
+                raw_data,
+                straightness_plot_widget,
+            )
+            if straightness_data_for_conclusion:
                 try:
-                    straightness_data_for_conclusion = straightness_plot_widget.get_all_belts_data()
-                    if straightness_data_for_conclusion:
-                        conclusion_text_straightness = self._generate_straightness_conclusion(straightness_data_for_conclusion)
-                        if conclusion_text_straightness:
-                            story.append(Paragraph(conclusion_text_straightness, body_style))
-                            story.append(Spacer(1, 10))
+                    conclusion_text_straightness = self._generate_straightness_conclusion(straightness_data_for_conclusion)
+                    if conclusion_text_straightness:
+                        story.append(Paragraph(conclusion_text_straightness, body_style))
+                        story.append(Spacer(1, 10))
                 except Exception as e:
                     logger.warning(f"Ошибка формирования заключения о прямолинейности: {e}")
 
@@ -1502,17 +1418,11 @@ class EnhancedReportGenerator:
             # Таблица результатов вертикальности (полная таблица)
             # Приоритет: данные из угловых измерений, затем из виджета вертикальности, затем стандартный способ
             used_widget_data = False
-            verticality_data_from_angular = None
-            if angular_measurements and (
-                angular_measurements.get('x')
-                or angular_measurements.get('y')
-                or angular_measurements.get('sections')
-            ):
-                try:
-                    verticality_data_from_angular = self._aggregate_angular_measurements_by_sections(angular_measurements)
-                except Exception as e:
-                    logger.warning(f"Ошибка агрегации данных угловых измерений: {e}")
-                    verticality_data_from_angular = None
+            verticality_data_from_angular = self._get_preferred_verticality_data(
+                angular_measurements,
+                processed_data,
+                verticality_widget,
+            )
 
             # Определяем количество строк и источник данных
             if verticality_data_from_angular:
@@ -1814,19 +1724,22 @@ class EnhancedReportGenerator:
             desc4 = doc.add_paragraph('Стрелы прогиба рассчитаны относительно базовой линии между нижним и верхним поясами. Значения сопоставлены с нормативом δ ≤ L / 750.')
             desc4.runs[0].font.size = Pt(10)
 
-            if straightness_widget and hasattr(straightness_widget, 'get_all_belts_data'):
+            straightness_data = self._get_preferred_straightness_data(
+                processed_data,
+                raw_data,
+                straightness_widget,
+            )
+            if straightness_data:
                 try:
-                    straightness_data = straightness_widget.get_all_belts_data()
+                    # Новая структура: данные сгруппированы по частям
+                    sorted_parts = sorted(straightness_data.keys())
 
-                    if straightness_data:
-                        # Новая структура: данные сгруппированы по частям
-                        sorted_parts = sorted(straightness_data.keys())
+                    # Общий счетчик рисунков для всех частей (начинается с 2, т.к. рис. 1 - вертикальность)
+                    global_figure_index = 2
 
-                        # Общий счетчик рисунков для всех частей (начинается с 2, т.к. рис. 1 - вертикальность)
-                        global_figure_index = 2
-
-                        for part_num in sorted_parts:
-                            part_info = straightness_data[part_num]
+                    for part_num in sorted_parts:
+                        part_info = straightness_data[part_num]
+                        if True:
                             min_height = part_info.get('min_height', 0.0)
                             max_height = part_info.get('max_height', 0.0)
                             belts_data = part_info.get('belts', {})
@@ -2002,45 +1915,48 @@ class EnhancedReportGenerator:
                 doc.add_paragraph()
 
             # Заключение о прямолинейности после всех графиков
-            if straightness_widget and hasattr(straightness_widget, 'get_all_belts_data'):
+            straightness_data_for_conclusion = self._get_preferred_straightness_data(
+                processed_data,
+                raw_data,
+                straightness_widget,
+            )
+            if straightness_data_for_conclusion:
                 try:
-                    straightness_data_for_conclusion = straightness_widget.get_all_belts_data()
-                    if straightness_data_for_conclusion:
-                        # Находим максимальное значение прогиба
-                        max_deflection = 0.0
-                        max_height = 0.0
-                        max_belt_num = None
-                        max_tolerance = 0.0
+                    # Находим максимальное значение прогиба
+                    max_deflection = 0.0
+                    max_height = 0.0
+                    max_belt_num = None
+                    max_tolerance = 0.0
 
-                        for part_num, part_info in straightness_data_for_conclusion.items():
-                            belts_data = part_info.get('belts', {})
-                            for belt_num, belt_data in belts_data.items():
-                                for item in belt_data:
-                                    deflection_abs = abs(item.get('deflection', 0))
-                                    if deflection_abs > max_deflection:
-                                        max_deflection = deflection_abs
-                                        max_height = item.get('height', 0)
-                                        max_belt_num = belt_num
-                                        max_tolerance = item.get('tolerance', 0)
+                    for part_num, part_info in straightness_data_for_conclusion.items():
+                        belts_data = part_info.get('belts', {})
+                        for belt_num, belt_data in belts_data.items():
+                            for item in belt_data:
+                                deflection_abs = abs(item.get('deflection', 0))
+                                if deflection_abs > max_deflection:
+                                    max_deflection = deflection_abs
+                                    max_height = item.get('height', 0)
+                                    max_belt_num = belt_num
+                                    max_tolerance = item.get('tolerance', 0)
 
-                        if max_deflection > 0.0:
-                            exceeds_text = "превышает" if max_deflection > max_tolerance else "не превышает"
-                            height_str = f"+{max_height:.1f}" if max_height >= 0 else f"{max_height:.1f}"
+                    if max_deflection > 0.0:
+                        exceeds_text = "превышает" if max_deflection > max_tolerance else "не превышает"
+                        height_str = f"+{max_height:.1f}" if max_height >= 0 else f"{max_height:.1f}"
 
-                            conclusion_heading = doc.add_paragraph()
-                            conclusion_heading_run = conclusion_heading.add_run('Заключение:')
-                            conclusion_heading_run.font.bold = True
-                            conclusion_heading_run.font.size = Pt(10)
+                        conclusion_heading = doc.add_paragraph()
+                        conclusion_heading_run = conclusion_heading.add_run('Заключение:')
+                        conclusion_heading_run.font.bold = True
+                        conclusion_heading_run.font.size = Pt(10)
 
-                            conclusion_para1 = doc.add_paragraph()
-                            conclusion_text1 = "Стрелы прогиба рассчитаны относительно базовой линии между нижним и верхним поясами. Значения сопоставлены с нормативом δ ≤ L / 750 (ГОСТ Р 71949-2025 «Конструкции опорные антенных сооружений объектов связи. Правила приемки работ и эксплуатации»)."
-                            conclusion_para1.add_run(conclusion_text1).font.size = Pt(10)
+                        conclusion_para1 = doc.add_paragraph()
+                        conclusion_text1 = "Стрелы прогиба рассчитаны относительно базовой линии между нижним и верхним поясами. Значения сопоставлены с нормативом δ ≤ L / 750 (ГОСТ Р 71949-2025 «Конструкции опорные антенных сооружений объектов связи. Правила приемки работ и эксплуатации»)."
+                        conclusion_para1.add_run(conclusion_text1).font.size = Pt(10)
 
-                            conclusion_para2 = doc.add_paragraph()
-                            conclusion_text2 = f"Стрела прогиба поясов башни {exceeds_text} допустимые значения. Максимальное значение составляет {max_deflection:.1f} мм на отм. {height_str} пояса №{max_belt_num} при допустимом значении {max_tolerance:.1f} мм."
-                            conclusion_para2.add_run(conclusion_text2).font.size = Pt(10)
+                        conclusion_para2 = doc.add_paragraph()
+                        conclusion_text2 = f"Стрела прогиба поясов башни {exceeds_text} допустимые значения. Максимальное значение составляет {max_deflection:.1f} мм на отм. {height_str} пояса №{max_belt_num} при допустимом значении {max_tolerance:.1f} мм."
+                        conclusion_para2.add_run(conclusion_text2).font.size = Pt(10)
 
-                            doc.add_paragraph()  # Отступ
+                        doc.add_paragraph()  # Отступ
                 except Exception as e:
                     logger.warning(f"Ошибка формирования заключения о прямолинейности: {e}")
 

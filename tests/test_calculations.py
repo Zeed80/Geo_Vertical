@@ -304,6 +304,38 @@ class TestProcessTowerData:
         assert results1['valid'] == results2['valid']
         assert len(results1['centers']) == len(results2['centers'])
 
+    def test_cache_returns_isolated_results_when_ui_mutates_payload(self):
+        data = []
+        for z in [0.0, 5.0, 10.0]:
+            for i in range(4):
+                angle = i * np.pi / 2
+                data.append(
+                    {
+                        'x': np.cos(angle),
+                        'y': np.sin(angle),
+                        'z': z,
+                        'name': f'Point_{z}_{i}',
+                    }
+                )
+        df = pd.DataFrame(data)
+
+        invalidate_cache()
+        results1 = process_tower_data(df, height_tolerance=0.1, use_cache=True)
+
+        baseline_center_x = float(results1['centers'].iloc[0]['x'])
+        baseline_axis_dx = float(results1['axis']['dx'])
+
+        results1['centers'].loc[:, 'x'] = 999.0
+        results1['axis']['dx'] = 321.0
+        results1['angular_verticality'] = {'sections': [{'section_num': 99}]}
+
+        results2 = process_tower_data(df, height_tolerance=0.1, use_cache=True)
+
+        assert float(results2['centers'].iloc[0]['x']) == pytest.approx(baseline_center_x, abs=1e-9)
+        assert float(results2['axis']['dx']) == pytest.approx(baseline_axis_dx, abs=1e-9)
+        assert 'angular_verticality' not in results2
+        invalidate_cache()
+
     def test_cache_respects_belt_and_flag_changes(self):
         data = []
         for z in [0.0, 5.0, 10.0]:

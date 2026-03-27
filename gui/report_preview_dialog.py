@@ -216,12 +216,18 @@ class ReportPreviewDialog(QDialog):
             # Таблица вертикальности
             html_parts.append('<h2>2. ТАБЛИЦА ОТКЛОНЕНИЙ СТВОЛА ОТ ВЕРТИКАЛИ</h2>')
             
-            verticality_data = []
+            from core.services.verticality_sections import get_preferred_verticality_sections
+
+            verticality_widget_data = []
             if verticality_widget and hasattr(verticality_widget, 'get_table_data'):
                 try:
-                    verticality_data = verticality_widget.get_table_data()
+                    verticality_widget_data = verticality_widget.get_table_data()
                 except Exception as e:
                     logger.warning(f"Ошибка получения данных вертикальности: {e}")
+            verticality_data = get_preferred_verticality_sections(
+                processed_data.get('angular_verticality') if isinstance(processed_data, dict) else None,
+                verticality_widget_data,
+            )
             
             if verticality_data:
                 html_parts.append('<table>')
@@ -285,67 +291,81 @@ class ReportPreviewDialog(QDialog):
             # Таблица прогибов
             html_parts.append('<h2>3. ТАБЛИЦА СТРЕЛ ПРОГИБА ПОЯСОВ СТВОЛА (ПРЯМОЛИНЕЙНОСТЬ)</h2>')
             
-            straightness_data = {}
+            from core.services.straightness_profiles import get_preferred_straightness_part_map
+
+            straightness_widget_data = {}
             if straightness_widget and hasattr(straightness_widget, 'get_all_belts_data'):
                 try:
-                    straightness_data = straightness_widget.get_all_belts_data()
+                    straightness_widget_data = straightness_widget.get_all_belts_data()
                 except Exception as e:
                     logger.warning(f"Ошибка получения данных прямолинейности: {e}")
-            
+
+            straightness_data = get_preferred_straightness_part_map(
+                processed_data.get('straightness_profiles') if isinstance(processed_data, dict) else None,
+                straightness_widget_data,
+                points=raw_data,
+                tower_parts_info=processed_data.get('tower_parts_info') if isinstance(processed_data, dict) else None,
+            )
+
             if straightness_data:
-                # Получаем все уникальные высоты
-                all_heights = set()
-                for belt_data in straightness_data.values():
-                    for item in belt_data:
-                        all_heights.add(round(item['height'], 1))
-                
-                sorted_heights = sorted(all_heights)
-                sorted_belts = sorted(straightness_data.keys())
-                
-                html_parts.append('<table>')
-                html_parts.append('<thead>')
-                html_parts.append('<tr>')
-                html_parts.append('<th>Высота, м</th>')
-                for belt_num in sorted_belts:
-                    html_parts.append(f'<th>Пояс {belt_num}, мм</th>')
-                html_parts.append('<th>Допустимое, мм</th>')
-                html_parts.append('</tr>')
-                html_parts.append('</thead>')
-                html_parts.append('<tbody>')
-                
-                # Получаем максимальное допустимое значение
-                max_tolerance = 0
-                for belt_data in straightness_data.values():
-                    if belt_data:
-                        # Первый элемент содержит tolerance для всех точек пояса
-                        max_tolerance = max(max_tolerance, belt_data[0].get('tolerance', 0))
-                
-                # Создаем словарь для быстрого доступа
-                belt_height_deflection = {}
-                for belt_num, belt_data in straightness_data.items():
-                    for item in belt_data:
-                        height_rounded = round(item['height'], 1)
-                        belt_height_deflection[(belt_num, height_rounded)] = item.get('deflection', 0)
-                
-                for height in sorted_heights:
+                for part_num in sorted(straightness_data.keys()):
+                    part_info = straightness_data[part_num]
+                    belts_data = part_info.get('belts', {})
+                    if not belts_data:
+                        continue
+
+                    min_height = float(part_info.get('min_height', 0.0) or 0.0)
+                    max_height = float(part_info.get('max_height', 0.0) or 0.0)
+                    if len(straightness_data) > 1:
+                        min_str = f"{min_height:.1f}".replace('.', ',')
+                        max_str = f"{max_height:.3f}".replace('.', ',')
+                        html_parts.append(f'<h3>Часть {part_num} ({min_str} - {max_str})</h3>')
+
+                    all_heights = set()
+                    max_tolerance = 0.0
+                    for belt_data in belts_data.values():
+                        for item in belt_data:
+                            all_heights.add(round(float(item['height']), 1))
+                            max_tolerance = max(max_tolerance, float(item.get('tolerance', 0.0) or 0.0))
+
+                    sorted_heights = sorted(all_heights)
+                    sorted_belts = sorted(belts_data.keys())
+
+                    html_parts.append('<table>')
+                    html_parts.append('<thead>')
                     html_parts.append('<tr>')
-                    html_parts.append(f'<td>{height:.1f}</td>')
-                    
+                    html_parts.append('<th>Высота, м</th>')
                     for belt_num in sorted_belts:
-                        key = (belt_num, height)
-                        if key in belt_height_deflection:
-                            deflection = belt_height_deflection[key]
-                            # Проверяем превышение
-                            status_class = 'status-error' if abs(deflection) > max_tolerance else 'status-ok'
-                            html_parts.append(f'<td class="{status_class}">{deflection:+.1f}</td>')
-                        else:
-                            html_parts.append('<td>-</td>')
-                    
-                    html_parts.append(f'<td>±{max_tolerance:.1f}</td>')
+                        html_parts.append(f'<th>Пояс {belt_num}, мм</th>')
+                    html_parts.append('<th>Допустимое, мм</th>')
                     html_parts.append('</tr>')
-                
-                html_parts.append('</tbody>')
-                html_parts.append('</table>')
+                    html_parts.append('</thead>')
+                    html_parts.append('<tbody>')
+
+                    belt_height_deflection = {}
+                    for belt_num, belt_data in belts_data.items():
+                        for item in belt_data:
+                            height_rounded = round(float(item['height']), 1)
+                            belt_height_deflection[(belt_num, height_rounded)] = float(item.get('deflection', 0.0) or 0.0)
+
+                    for height in sorted_heights:
+                        html_parts.append('<tr>')
+                        html_parts.append(f'<td>{height:.1f}</td>')
+
+                        for belt_num in sorted_belts:
+                            key = (belt_num, height)
+                            if key in belt_height_deflection:
+                                deflection = belt_height_deflection[key]
+                                status_class = 'status-error' if abs(deflection) > max_tolerance else 'status-ok'
+                                html_parts.append(f'<td class="{status_class}">{deflection:+.1f}</td>')
+                            else:
+                                html_parts.append('<td>-</td>')
+
+                        html_parts.append(f'<td>±{max_tolerance:.1f}</td>')
+                        html_parts.append('</tr>')
+
+                    html_parts.append('</tbody>')
+                    html_parts.append('</table>')
             else:
                 html_parts.append('<p><em>Нет данных для отображения</em></p>')
             
@@ -421,4 +441,3 @@ class ReportPreviewDialog(QDialog):
         """Обработчик закрытия окна"""
         self.cleanup_temp_files()
         super().closeEvent(event)
-

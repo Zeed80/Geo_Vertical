@@ -398,6 +398,40 @@ def test_verticality_normatives_do_not_reuse_straightness_summary():
     assert result["violations"]
 
 
+def test_verticality_normatives_preserve_section_metadata_from_canonical_sections():
+    service = CalculationService()
+    result = service._check_verticality_normatives(
+        {
+            "valid": True,
+            "angular_verticality": {
+                "sections": [
+                    {
+                        "section_num": 7,
+                        "part_num": 3,
+                        "height": 10.0,
+                        "deviation_x": 12.0,
+                        "deviation_y": 16.0,
+                        "total_deviation": 20.0,
+                    }
+                ]
+            },
+            "centers": pd.DataFrame([{"z": 10.0, "deviation": 0.0}]),
+        }
+    )
+
+    assert result["passed"] == 0
+    assert result["failed"] == 1
+    assert result["violations"] == [
+        {
+            "belt_height": 10.0,
+            "deviation": 0.02,
+            "normative": 0.01,
+            "section_num": 7,
+            "part_num": 3,
+        }
+    ]
+
+
 def test_verticality_widget_get_table_data_reads_actual_columns():
     _ensure_app()
     widget = VerticalityWidget()
@@ -417,6 +451,79 @@ def test_verticality_widget_get_table_data_reads_actual_columns():
             "total_deviation": 6.4,
             "deviation": 6.4,
             "tolerance": 7.5,
+        }
+    ]
+
+
+def test_verticality_widget_get_table_data_prefers_raw_section_payload_over_scaled_table_text():
+    _ensure_app()
+    widget = VerticalityWidget()
+    section_data = [
+        {
+            "section_num": 1,
+            "height": 7.5,
+            "deviation_x": 8.0,
+            "deviation_y": -6.0,
+            "total_deviation": 10.0,
+        }
+    ]
+
+    widget._current_section_data = widget._make_table_payload(section_data)
+    widget._fill_deviation_table(section_data, divisor=2.0)
+
+    assert widget.deviation_table.item(0, 3).text() == "+4.00"
+    assert widget.deviation_table.item(0, 4).text() == "-3.00"
+    assert widget.deviation_table.item(0, 5).text() == "+5.00"
+
+    data = widget.get_table_data()
+    data[0]["deviation_x"] = 999.0
+
+    assert widget.get_table_data() == [
+        {
+            "section_num": 1,
+            "height": 7.5,
+            "deviation_x": 8.0,
+            "deviation_y": -6.0,
+            "total_deviation": 10.0,
+            "deviation": 10.0,
+            "tolerance": 7.5,
+        }
+    ]
+
+
+def test_verticality_widget_prefers_processed_canonical_sections_without_rebuilding_centers():
+    _ensure_app()
+    widget = VerticalityWidget()
+    widget.processed_data = {
+        "angular_verticality": {
+            "sections": [
+                {
+                    "section_num": 9,
+                    "part_num": 2,
+                    "height": 6.0,
+                    "deviation_x": 14.0,
+                    "deviation_y": -2.0,
+                    "total_deviation": 14.1421356237,
+                    "source": "processed_fallback",
+                }
+            ]
+        },
+        "centers": pd.DataFrame([{"z": 6.0, "x": 0.0, "y": 0.0, "deviation": 0.001}]),
+    }
+
+    assert widget._calculate_section_deviations() == [
+        {
+            "section_num": 9,
+            "part_num": 2,
+            "height": 6.0,
+            "deviation_x": 14.0,
+            "deviation_y": -2.0,
+            "total_deviation": 14.1421356237,
+            "deviation": 14.1421356237,
+            "tolerance": 6.0,
+            "points_count": None,
+            "source": "processed_fallback",
+            "basis_complete": None,
         }
     ]
 

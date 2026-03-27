@@ -2,6 +2,7 @@
 РњРѕРґСѓР»СЊ РјР°С‚РµРјР°С‚РёС‡РµСЃРєРёС… СЂР°СЃС‡РµС‚РѕРІ РґР»СЏ Р°РЅР°Р»РёР·Р° РІРµСЂС‚РёРєР°Р»СЊРЅРѕСЃС‚Рё Рё РїСЂСЏРјРѕР»РёРЅРµР№РЅРѕСЃС‚Рё РјР°С‡С‚
 """
 
+import copy
 import hashlib
 import json
 import logging
@@ -40,6 +41,11 @@ _SECTION_GROUPING_MODES = {
     SECTION_GROUPING_HEIGHT_LEVELS,
     SECTION_GROUPING_ASSIGNED_SECTIONS,
 }
+
+
+def _clone_calculation_result(result: dict[str, Any]) -> dict[str, Any]:
+    """Return an isolated copy so UI layers cannot mutate cached state."""
+    return copy.deepcopy(result)
 
 
 def invalidate_cache():
@@ -802,7 +808,7 @@ def process_tower_data(
                     _cache_access_order.remove(cache_key)
                 _cache_access_order.append(cache_key)
                 logger.debug("РСЃРїРѕР»СЊР·РѕРІР°РЅ РєСЌС€РёСЂРѕРІР°РЅРЅС‹Р№ СЂРµР·СѓР»СЊС‚Р°С‚ СЂР°СЃС‡РµС‚РѕРІ")
-                return cached_result
+                return _clone_calculation_result(cached_result)
             else:
                 logger.debug("РЈРґР°Р»СЏРµРј РЅРµРІР°Р»РёРґРЅС‹Р№ РєРµС€ СЂР°СЃС‡РµС‚Р° Рё РїРµСЂРµСЃС‡РёС‚С‹РІР°РµРј")
                 _calculation_cache.pop(cache_key, None)
@@ -1081,13 +1087,13 @@ def process_tower_data(
                 del _calculation_cache[oldest_key]
 
         # Р”РѕР±Р°РІР»СЏРµРј РЅРѕРІСѓСЋ Р·Р°РїРёСЃСЊ
-        _calculation_cache[cache_key] = result
+        _calculation_cache[cache_key] = _clone_calculation_result(result)
         # РћР±РЅРѕРІР»СЏРµРј РїРѕСЂСЏРґРѕРє РґРѕСЃС‚СѓРїР°
         if cache_key in _cache_access_order:
             _cache_access_order.remove(cache_key)
         _cache_access_order.append(cache_key)
         logger.debug(f"Р РµР·СѓР»СЊС‚Р°С‚ СЃРѕС…СЂР°РЅРµРЅ РІ РєСЌС€ (СЂР°Р·РјРµСЂ РєСЌС€Р°: {len(_calculation_cache)})")
 
-    return result
+    return _clone_calculation_result(result) if use_cache else result
 
 

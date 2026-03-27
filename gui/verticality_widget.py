@@ -3,6 +3,7 @@
 Показывает график отклонений от вертикали по секциям
 """
 
+import copy
 import numpy as np
 import pandas as pd
 from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QPushButton, QHBoxLayout, QLabel,
@@ -16,6 +17,7 @@ from matplotlib.ticker import MaxNLocator
 import logging
 import json
 from typing import List, Dict, Set, Optional
+from core.services.verticality_sections import get_preferred_verticality_sections
 
 logger = logging.getLogger(__name__)
 
@@ -29,6 +31,7 @@ class VerticalityWidget(QWidget):
         self.processed_data = None
         self.editor_3d = None  # Ссылка на 3D редактор для доступа к section_data
         self.data_table_widget = None  # Ссылка на таблицу данных для получения угловых измерений
+        self._current_section_data: List[Dict] = []
         self.init_ui()
         
     def init_ui(self):
@@ -119,6 +122,7 @@ class VerticalityWidget(QWidget):
     def update_plot(self):
         """Обновить график вертикальности"""
         if self.data is None or self.data.empty:
+            self._current_section_data = []
             self.info_label.setText('⚠ Нет данных для отображения')
             return
         
@@ -128,6 +132,7 @@ class VerticalityWidget(QWidget):
             
             # Проверяем наличие секций
             if 'belt' not in self.data.columns:
+                self._current_section_data = []
                 self.info_label.setText('⚠ Данные должны содержать информацию о поясах')
                 return
             
@@ -135,6 +140,7 @@ class VerticalityWidget(QWidget):
             section_data = self._calculate_section_deviations()
             
             if section_data is None or len(section_data) == 0:
+                self._current_section_data = []
                 self.info_label.setText('⚠ Недостаточно данных для построения графика')
                 return
             
@@ -142,6 +148,8 @@ class VerticalityWidget(QWidget):
             divisor = float(self.adjust_spin.value()) if hasattr(self, 'adjust_spin') and self.adjust_spin is not None else 1.0
             if divisor <= 0:
                 divisor = 1.0
+
+            self._current_section_data = self._make_table_payload(section_data)
 
             # Создаем два графика: один для X, один для Y
             ax_x = self.figure.add_subplot(1, 2, 1)
@@ -151,7 +159,7 @@ class VerticalityWidget(QWidget):
             self._plot_verticality_profile(ax_y, section_data, component='y', divisor=divisor)
             
             # Обновляем canvas с улучшенными отступами для предотвращения наложения
-            self.figure.tight_layout(rect=[0.08, 0.08, 0.97, 0.96], pad=2.0, h_pad=2.5, w_pad=3.0)
+            self.figure.subplots_adjust(left=0.18, right=0.96, bottom=0.08, top=0.95, wspace=0.42)
             self.canvas.draw()
             
             # Заполняем таблицу
@@ -160,6 +168,7 @@ class VerticalityWidget(QWidget):
             logger.info(f"График вертикальности построен для {len(section_data)} секций")
             
         except Exception as e:
+            self._current_section_data = []
             logger.error(f"Ошибка при построении графика вертикальности: {e}", exc_info=True)
             self.info_label.setText(f'❌ Ошибка: {str(e)}')
     
@@ -302,9 +311,46 @@ class VerticalityWidget(QWidget):
             return max(0.05, min(1.5, float(min_step) * 0.6))
         return 0.3
 
+    @staticmethod
+    def _make_table_payload(section_data: List[Dict]) -> List[Dict]:
+        from core.normatives import get_vertical_tolerance
+
+        payload: List[Dict] = []
+        for index, section in enumerate(sorted(section_data, key=lambda item: item.get('height', 0.0))):
+            try:
+                height = float(section.get('height', 0.0) or 0.0)
+                deviation_x = float(section.get('deviation_x', 0.0) or 0.0)
+                deviation_y = float(section.get('deviation_y', 0.0) or 0.0)
+                total_deviation = float(
+                    section.get(
+                        'total_deviation',
+                        np.hypot(deviation_x, deviation_y),
+                    ) or 0.0
+                )
+            except (TypeError, ValueError):
+                continue
+
+            payload.append(
+                {
+                    'section_num': int(section.get('section_num', index)),
+                    'height': height,
+                    'deviation_x': deviation_x,
+                    'deviation_y': deviation_y,
+                    'total_deviation': total_deviation,
+                    'deviation': total_deviation,
+                    'tolerance': float(get_vertical_tolerance(height) * 1000.0),
+                }
+            )
+
+        return payload
+
     def _build_sections_from_processed_centers(self) -> List[Dict]:
         if not isinstance(self.processed_data, dict):
             return []
+
+        canonical_sections = get_preferred_verticality_sections(self.processed_data.get('angular_verticality'))
+        if canonical_sections:
+            return canonical_sections
 
         centers = self.processed_data.get('centers')
         if not isinstance(centers, pd.DataFrame) or centers.empty:
@@ -390,83 +436,15 @@ class VerticalityWidget(QWidget):
         Returns:
             List[Dict]: Список словарей с данными секций
         """
-        # Приоритетно используем данные из таблицы угловых измерений
-        if not (self.data_table_widget and hasattr(self.data_table_widget, 'get_angular_measurements')):
-            processed_sections = self._build_sections_from_processed_centers()
-            if processed_sections:
-                logger.info(f"Using processed centers for verticality: {len(processed_sections)} sections")
-                return processed_sections
-
         if self.data_table_widget and hasattr(self.data_table_widget, 'get_angular_measurements'):
             try:
                 if hasattr(self.data_table_widget, 'ensure_complete_angular_station_basis'):
                     self.data_table_widget.ensure_complete_angular_station_basis(interactive=False)
                 angular_measurements = self.data_table_widget.get_angular_measurements()
-                if angular_measurements and (
-                    angular_measurements.get('x')
-                    or angular_measurements.get('y')
-                    or angular_measurements.get('sections')
-                ):
-                    # Агрегируем данные угловых измерений по секциям
-                    from utils.report_generator_enhanced import EnhancedReportGenerator
-                    angular_result = EnhancedReportGenerator._aggregate_angular_measurements_by_sections(angular_measurements)
-                    
-                    if angular_result:
-                        # Сопоставляем с section_data для получения правильных номеров секций и информации о частях
-                        if self.editor_3d and hasattr(self.editor_3d, 'section_data') and self.editor_3d.section_data:
-                            section_data_list = self.editor_3d.section_data
-                            # Пронумеровываем секции, если еще не пронумерованы
-                            self._number_sections_sequentially(section_data_list)
-                            
-                            # Создаем словарь для сопоставления по высоте
-                            height_to_section = {}
-                            height_tolerance = 0.01
-                            for section in section_data_list:
-                                height = section.get('height')
-                                if height is not None:
-                                    # Ищем ближайшую высоту в словаре
-                                    matched_height = None
-                                    for existing_height in height_to_section.keys():
-                                        if abs(height - existing_height) <= height_tolerance:
-                                            matched_height = existing_height
-                                            break
-                                    
-                                    if matched_height is None:
-                                        height_to_section[height] = section
-                            
-                            # Обогащаем данные из угловых измерений информацией из section_data
-                            enriched_result = []
-                            for angular_item in angular_result:
-                                angular_height = angular_item.get('height')
-                                
-                                # Ищем соответствующую секцию по высоте
-                                matched_section = None
-                                for section_height, section in height_to_section.items():
-                                    if abs(angular_height - section_height) <= height_tolerance:
-                                        matched_section = section
-                                        break
-                                
-                                if matched_section:
-                                    # Используем номер секции и информацию о частях из section_data
-                                    angular_item['section_num'] = matched_section.get('section_num', angular_item.get('section_num', 0))
-                                    
-                                    # Добавляем информацию о части
-                                    tower_part = matched_section.get('tower_part')
-                                    if tower_part is not None:
-                                        angular_item['part_num'] = int(tower_part) if not isinstance(tower_part, str) else tower_part
-                                    elif 'tower_part_memberships' in matched_section:
-                                        memberships = self._decode_part_memberships(matched_section.get('tower_part_memberships'))
-                                        if memberships:
-                                            angular_item['part_num'] = memberships[0]  # Используем первую часть
-                                
-                                enriched_result.append(angular_item)
-                            
-                            logger.info(f"Используем данные из таблицы угловых измерений: {len(enriched_result)} секций")
-                            return enriched_result
-                        else:
-                            # Если нет section_data, возвращаем данные как есть
-                            logger.info(f"Используем данные из таблицы угловых измерений (без сопоставления с section_data): {len(angular_result)} секций")
-                            return angular_result
+                sections = get_preferred_verticality_sections(angular_measurements)
+                if sections:
+                    logger.info(f"Используем canonical payload угловых измерений: {len(sections)} секций")
+                    return sections
             except Exception as e:
                 logger.warning(f"Не удалось получить данные из таблицы угловых измерений: {e}")
 
@@ -474,7 +452,7 @@ class VerticalityWidget(QWidget):
         if processed_sections:
             logger.info(f"Используем рассчитанные центры секций (fallback): {len(processed_sections)} секций")
             return processed_sections
-        
+
         # Fallback: расчет на основе центров секций
         logger.info("Используем расчет на основе центров секций (fallback)")
         
@@ -720,6 +698,9 @@ class VerticalityWidget(QWidget):
             List[Dict]: Список словарей с ключами 'section_num', 'height', 
                        'deviation_x', 'deviation_y', 'total_deviation', 'tolerance'
         """
+        if self._current_section_data:
+            return copy.deepcopy(self._current_section_data)
+
         data = []
         for i in range(self.deviation_table.rowCount()):
             section_item = self.deviation_table.item(i, 0)  # № секции
@@ -772,6 +753,9 @@ class VerticalityWidget(QWidget):
         heights = [d['height'] for d in section_data_sorted]
         raw_dev_x = [float(d.get('deviation_x', 0.0) or 0.0) for d in section_data_sorted]
         raw_dev_y = [float(d.get('deviation_y', 0.0) or 0.0) for d in section_data_sorted]
+        base_height = min(heights) if heights else 0.0
+        highest_height = max(heights) if heights else 0.0
+        top_allowed = get_vertical_tolerance(highest_height) * 1000 if heights else 0.0
         if component == 'x':
             deviations = raw_dev_x
             component_label = 'X'
@@ -794,7 +778,8 @@ class VerticalityWidget(QWidget):
         
         combined = deviations + paired_deviations
         max_deviation_abs = max(abs(d) for d in combined) if combined else 50
-        x_limit = max_deviation_abs * 1.1 if max_deviation_abs > 0 else 10
+        allowed_extent = max(max_deviation_abs, abs(top_allowed))
+        x_limit = allowed_extent * 1.1 if allowed_extent > 0 else 10
         ax.set_xlim(-x_limit, x_limit)
         
         # Пределы по вертикали (точные значения минимума и максимума высот)
@@ -819,9 +804,6 @@ class VerticalityWidget(QWidget):
         ax.xaxis.set_major_locator(MaxNLocator(nbins=6))
         
         # Рисуем предельные линии для каждой высоты секции
-        base_height = min(heights) if heights else 0.0
-        highest_height = max(heights) if heights else 0.0
-        top_allowed = get_vertical_tolerance(highest_height) * 1000 if heights else 0.0
         if top_allowed > 0:
             y_top = highest_height + (highest_height - base_height) * 0.05
             ax.plot(

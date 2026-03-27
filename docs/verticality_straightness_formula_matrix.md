@@ -54,3 +54,23 @@
    - `report_generator_enhanced`
 2. Для `straightness_profiles` и таблиц отчета максимальная стрела прогиба должна совпадать с `straightness_summary["max_deflection_mm"]`.
 3. Нормативный вывод должен зависеть от неокругленного значения, а не от текстового форматирования.
+
+## Phase 4 Source-Of-Truth Appendix
+
+| Metric | Canonical owner | Consumers | Fallback order | Audit note |
+| --- | --- | --- | --- | --- |
+| `centers`, `axis`, `local_cs`, `straightness_profiles`, `straightness_summary`, `valid` | `core/calculations.py::process_tower_data` | service layer, widgets, reports | none inside the same calculation result | Cache entries and cache hits must stay immutable from the consumer perspective. |
+| Verticality section deviations in mm | `angular_verticality["sections"]` when available; otherwise processed centers promoted into section payload | `VerticalityWidget`, preview, full report, enhanced report | stations -> processed canonical sections -> centers | UI tables must never become the numeric source-of-truth. |
+| Widget table rows | `gui/verticality_widget.py::_current_section_data` | `get_table_data()`, report fallbacks | `_current_section_data` -> manual table parsing -> legacy `section_data` | Table text is presentation-only and may be scaled by `k1`. |
+| Verticality tolerance envelope on plots | `core.normatives.get_vertical_tolerance(max_height) * 1000` | `VerticalityWidget._plot_verticality_profile` | none | Plot limits must include both factual deviations and the normative envelope. |
+| Straightness belt profiles | `straightness_profiles` normalized through `core/services/straightness_profiles.py` | straightness widget, preview, PDF/DOCX/full report | processed profiles -> helper-normalized widget payload -> canonical rebuild from raw points | Numeric selection is centralized; only presentation scaffolding still duplicates. |
+
+Phase 5 note:
+
+- Shared normalization, selection, and normative-check rules now live in `core/services/verticality_sections.py`.
+- Consumers should call the shared helper layer before attempting any local reconstruction from widget text or report-specific structures.
+
+Phase 6 note:
+
+- Canonical angular verticality production now lives in `core/services/angular_verticality.py`; GUI coordinates the builder instead of owning the numeric contract.
+- Straightness payload selection now lives in `core/services/straightness_profiles.py`; report/preview layers should prefer it over any local belt regrouping logic.

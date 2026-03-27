@@ -531,40 +531,14 @@ class ReportWidget(QWidget):
                                    verticality_data_from_angular=None,
                                    verticality_data=None) -> dict:
         """Считает проверку вертикальности теми же правилами, что и генератор отчета."""
-        from core.normatives import NormativeChecker
+        from core.services.verticality_sections import build_verticality_check_from_sources
 
-        checker = NormativeChecker()
-        verticality_data_from_angular = verticality_data_from_angular or []
-        verticality_data = verticality_data or []
-
-        if verticality_data_from_angular:
-            deviations_m = []
-            heights_m = []
-            for item in verticality_data_from_angular:
-                deviations_m.append(float(item.get('total_deviation', 0)) / 1000.0)
-                heights_m.append(float(item.get('height', 0)))
-            if deviations_m:
-                return checker.check_vertical_deviations(deviations_m, heights_m)
-
-        if verticality_data:
-            deviations_m = []
-            heights_m = []
-            for item in verticality_data:
-                total_dev_mm = item.get('total_deviation', item.get('deviation', 0))
-                deviations_m.append(float(total_dev_mm) / 1000.0)
-                heights_m.append(float(item.get('height', 0)))
-            if deviations_m:
-                return checker.check_vertical_deviations(deviations_m, heights_m)
-
-        centers = processed_data.get('centers')
-        if centers is not None and hasattr(centers, 'empty') and not centers.empty:
-            if 'deviation' in centers.columns and 'z' in centers.columns:
-                return checker.check_vertical_deviations(
-                    centers['deviation'].tolist(),
-                    centers['z'].tolist()
-                )
-
-        return self._empty_verticality_check()
+        return build_verticality_check_from_sources(
+            verticality_data_from_angular,
+            verticality_data,
+            processed_data.get('angular_verticality') if isinstance(processed_data, dict) else None,
+            centers=processed_data.get('centers') if isinstance(processed_data, dict) else None,
+        )
 
     def _render_verticality_stats_html(self, vertical_check: dict) -> str:
         """Формирует HTML статистики по вертикальности."""
@@ -782,28 +756,23 @@ class ReportWidget(QWidget):
             
             # Получаем данные угловых измерений для таблицы вертикальности
             angular_measurements = self._collect_angular_measurements()
+            from core.services.verticality_sections import get_preferred_verticality_sections
             
-            # Агрегируем данные угловых измерений по секциям
-            verticality_data_from_angular = None
-            if angular_measurements and (
-                angular_measurements.get('x')
-                or angular_measurements.get('y')
-                or angular_measurements.get('sections')
-            ):
+            verticality_widget_data = []
+            if verticality_widget and hasattr(verticality_widget, 'get_table_data'):
                 try:
-                    verticality_data_from_angular = EnhancedReportGenerator._aggregate_angular_measurements_by_sections(angular_measurements)
-                except Exception as e:
-                    logger.warning(f"Ошибка агрегации данных угловых измерений: {e}")
-            
-            verticality_data = []
-            if verticality_data_from_angular:
-                # Используем данные из угловых измерений
-                verticality_data = verticality_data_from_angular
-            elif verticality_widget and hasattr(verticality_widget, 'get_table_data'):
-                try:
-                    verticality_data = verticality_widget.get_table_data()
+                    verticality_widget_data = verticality_widget.get_table_data()
                 except Exception as e:
                     logger.warning(f"Ошибка получения данных вертикальности: {e}")
+
+            verticality_data_from_angular = []
+            verticality_data = get_preferred_verticality_sections(
+                angular_measurements,
+                processed_data.get('angular_verticality') if isinstance(processed_data, dict) else None,
+                verticality_widget_data,
+            )
+            if angular_measurements:
+                verticality_data_from_angular = get_preferred_verticality_sections(angular_measurements)
 
             vertical_check = self._compute_verticality_check(
                 processed_data,
@@ -880,12 +849,21 @@ class ReportWidget(QWidget):
             # Таблица прогибов
             html_parts.append('<h2>4. ТАБЛИЦА СТРЕЛ ПРОГИБА ПОЯСОВ СТВОЛА (ПРЯМОЛИНЕЙНОСТЬ)</h2>')
             
+            from core.services.straightness_profiles import get_preferred_straightness_part_map
+
             straightness_data = {}
+            straightness_widget_data = {}
             if straightness_widget and hasattr(straightness_widget, 'get_all_belts_data'):
                 try:
-                    straightness_data = straightness_widget.get_all_belts_data()
+                    straightness_widget_data = straightness_widget.get_all_belts_data()
                 except Exception as e:
                     logger.warning(f"Ошибка получения данных прямолинейности: {e}")
+            straightness_data = get_preferred_straightness_part_map(
+                processed_data.get('straightness_profiles') if isinstance(processed_data, dict) else None,
+                straightness_widget_data,
+                points=raw_data,
+                tower_parts_info=processed_data.get('tower_parts_info') if isinstance(processed_data, dict) else None,
+            )
             
             if straightness_data:
                 # Новая структура: данные сгруппированы по частям

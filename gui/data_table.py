@@ -30,6 +30,8 @@ from core.point_utils import (
     build_working_tower_mask,
     normalize_tower_point_flags,
 )
+from core.services.verticality_sections import build_verticality_check_from_sections
+from core.services.angular_verticality import AngularVerticalityBuilder
 
 logger = logging.getLogger(__name__)
 
@@ -1385,65 +1387,14 @@ class DataTableWidget(QWidget):
         return payload
 
     def _build_angular_verticality_payload(self, tower_data: pd.DataFrame) -> Dict[str, Any]:
-        payload = self._default_angular_verticality_payload()
-        section_entries = self._prepare_angular_sections(tower_data)
-        rows_by_axis: Dict[str, List[Dict[str, Any]]] = {'x': [], 'y': []}
-        axis_sections: Dict[str, Dict[str, Dict[str, Any]]] = {'x': {}, 'y': {}}
-        payload['basis'] = self._build_angular_basis_metadata()
-        has_required_stations = bool(payload['basis'].get('has_required_stations'))
-        has_authoritative_stations = bool(payload['basis'].get('has_authoritative_stations', has_required_stations))
-        fallback_sections = self._build_sections_from_processed_results(section_entries)
-
-        for axis in ('x', 'y'):
-            station_coords = self._get_station_for_axis(axis)
-            if station_coords is None:
-                continue
-
-            raw_rows: List[Dict[str, Any]] = []
-            for section in section_entries:
-                points_df = section.get('points_df')
-                if points_df is None or points_df.empty or len(points_df) < 2:
-                    continue
-                raw_rows.extend(
-                    self._build_axis_rows_from_points(
-                        points_df,
-                        station_coords,
-                        section_label=str(section.get('section_label', '')),
-                        section_num=section.get('section_num'),
-                        part_num=section.get('part_num'),
-                        part_memberships=section.get('part_memberships'),
-                        section_height=section.get('height'),
-                        belt_sequence=section.get('belt_sequence'),
-                    )
-                )
-
-            finalized_rows, finalized_sections = self._finalize_axis_rows(axis, station_coords, raw_rows)
-            rows_by_axis[axis] = finalized_rows
-            axis_sections[axis] = finalized_sections
-
-        station_sections: List[Dict[str, Any]] = []
-        if has_required_stations:
-            station_sections = self._build_sections_from_axis_payload(
-                axis_sections,
-                authoritative=has_authoritative_stations,
-            )
-            if has_authoritative_stations:
-                merged_sections = self._merge_station_sections_with_fallback(station_sections, fallback_sections)
-            else:
-                merged_sections = fallback_sections or station_sections
-        else:
-            merged_sections = fallback_sections
-
-        payload['rows_by_axis'] = rows_by_axis
-        payload['x'] = rows_by_axis['x']
-        payload['y'] = rows_by_axis['y']
-        payload['sections'] = merged_sections
-        self._synchronize_axis_rows_with_sections(payload)
-        payload['complete'] = has_authoritative_stations and bool(merged_sections) and all(
-            bool(item.get('basis_complete')) for item in merged_sections
+        builder = AngularVerticalityBuilder(
+            processed_results=self.processed_results,
+            section_snapshots=(self.editor_3d.section_data if self.editor_3d and hasattr(self.editor_3d, 'section_data') else []),
+            primary_station_coords=self._get_station_for_axis('x'),
+            secondary_station_coords=self._get_station_for_axis('y'),
+            basis_metadata=self._build_angular_basis_metadata(),
         )
-        payload['vertical_check'] = self._build_verticality_check_from_sections(merged_sections)
-        return payload
+        return builder.build_payload(tower_data)
 
     @staticmethod
     def _bearing_seconds_between_points(
@@ -2264,24 +2215,7 @@ class DataTableWidget(QWidget):
         return merged
 
     def _build_verticality_check_from_sections(self, sections: List[Dict[str, Any]]) -> Dict[str, Any]:
-        valid_sections = [
-            item for item in sections
-            if item.get('height') is not None and item.get('total_deviation') is not None
-        ]
-        if not valid_sections:
-            return self._empty_verticality_check()
-
-        deviations_m = [float(item['total_deviation']) / 1000.0 for item in valid_sections]
-        heights_m = [float(item['height']) for item in valid_sections]
-        result = NormativeChecker().check_vertical_deviations(deviations_m, heights_m)
-
-        for collection_name in ('compliant', 'non_compliant'):
-            for item in result.get(collection_name, []):
-                source_section = valid_sections[item.get('index', 0)]
-                item['section_num'] = source_section.get('section_num')
-                item['part_num'] = source_section.get('part_num')
-
-        return result
+        return build_verticality_check_from_sections(sections)
 
 
     def _build_axis_rows_from_points(

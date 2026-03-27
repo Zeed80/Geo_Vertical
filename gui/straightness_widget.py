@@ -20,6 +20,10 @@ import logging
 from core.normatives import get_straightness_tolerance
 from core.point_utils import build_working_tower_mask
 from core.straightness_calculations import calculate_belt_deflections as calculate_canonical_belt_deflections
+from core.services.straightness_profiles import (
+    get_preferred_straightness_part_map,
+    get_preferred_straightness_profiles,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -122,9 +126,9 @@ class StraightnessWidget(QWidget):
 
     def _get_profile_lookup(self) -> dict[tuple[int, int], dict]:
         lookup: dict[tuple[int, int], dict] = {}
-        if not isinstance(self.processed_data, dict):
-            return lookup
-        for profile in self.processed_data.get('straightness_profiles', []) or []:
+        for profile in get_preferred_straightness_profiles(
+            self.processed_data.get('straightness_profiles') if isinstance(self.processed_data, dict) else None
+        ):
             try:
                 part_number = int(profile.get('part_number', 1))
                 belt_number = int(profile.get('belt', 0))
@@ -1046,6 +1050,16 @@ class StraightnessWidget(QWidget):
                 }
             }
         """
+        if self.data is None or self.data.empty or 'belt' not in self.data.columns:
+            return {}
+
+        tower_parts_info = self.processed_data.get('tower_parts_info') if isinstance(self.processed_data, dict) else None
+        return get_preferred_straightness_part_map(
+            self.processed_data.get('straightness_profiles') if isinstance(self.processed_data, dict) else None,
+            points=self._get_working_data(),
+            tower_parts_info=tower_parts_info,
+        )
+
         all_data_by_parts = {}
         
         if self.data is None or self.data.empty or 'belt' not in self.data.columns:
