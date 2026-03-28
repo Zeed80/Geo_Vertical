@@ -11,6 +11,8 @@ import pandas as pd
 
 from core.point_utils import (
     build_is_station_mask as _build_is_station_mask,
+)
+from core.point_utils import (
     build_working_tower_mask as _build_working_tower_mask,
 )
 from core.section_state import SECTION_BUILD_HEIGHT_TOLERANCE

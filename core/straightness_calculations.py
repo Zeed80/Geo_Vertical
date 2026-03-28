@@ -12,7 +12,11 @@ import pandas as pd
 from core.normatives import get_straightness_tolerance
 from core.point_utils import (
     build_working_tower_mask as _build_working_tower_mask,
+)
+from core.point_utils import (
     decode_part_memberships as _decode_part_memberships,
+)
+from core.point_utils import (
     filter_points_by_part as _filter_points_by_part,
 )
 

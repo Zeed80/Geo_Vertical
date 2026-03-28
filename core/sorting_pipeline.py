@@ -20,12 +20,12 @@ import pandas as pd
 from scipy.optimize import linear_sum_assignment
 
 from core.planar_orientation import (
+    _ensure_center_xy,
     clockwise_angle_from_anchor_rad,
     clockwise_order_indices,
     extract_reference_station_xy,
     observer_right_axis,
     select_rightmost_anchor_vector,
-    _ensure_center_xy,
 )
 from core.point_utils import (
     build_working_tower_mask,

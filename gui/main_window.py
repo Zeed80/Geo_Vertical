@@ -42,7 +42,7 @@ from core.section_state import (
 )
 from utils.coordinate_systems import CoordinateSystemManager, get_common_epsg_list
 from core.services import ProjectManager, CalculationService
-from core.tower_generator import TowerBlueprint, generate_tower_data
+from core.tower_generator import TowerBlueprint
 from core.schema_exporter import (
     build_schema_data,
     export_schema_to_dxf,
@@ -108,6 +108,7 @@ class MainWindow(QMainWindow):
         self.center_method = 'mean'
         self.expected_belt_count = None  # None = автоопределение
         self.tower_faces_count = None  # Количество граней башни
+        self.structure_type = 'tower'  # Тип конструкции: 'tower', 'mast', 'odn'
         
         # Сохраненные пути
         self._paths_settings = QSettings('GeoVertical', 'GeoVerticalAnalyzerPaths')
@@ -230,6 +231,7 @@ class MainWindow(QMainWindow):
             'original_data_before_sections': self._clone_dataframe(self.original_data_before_sections),
             'height_tolerance': self.height_tolerance,
             'center_method': self.center_method,
+            'structure_type': self.structure_type,
             'expected_belt_count': self.expected_belt_count,
             'tower_faces_count': self.tower_faces_count,
             'tower_blueprint_state': self._tower_blueprint.to_dict() if self._tower_blueprint else None,
@@ -633,7 +635,9 @@ class MainWindow(QMainWindow):
                     tower_center = tower_data[['x', 'y']].mean()
                     station_xy = np.array([station['x'], station['y']])
                     center_xy = np.array([tower_center['x'], tower_center['y']])
-                    diff = station_xy - center_xy
+                    # Вектор от стоянки до башни (правильное направление для blueprint):
+                    # instrument_angle_deg — угол направления «стоянка → башня».
+                    diff = center_xy - station_xy
                     instrument_distance = float(np.linalg.norm(diff))
                     instrument_angle_deg = float(np.degrees(np.arctan2(diff[1], diff[0])))
                     instrument_height = float(station.get('z', 1.7))
@@ -736,8 +740,19 @@ class MainWindow(QMainWindow):
         self.project_manager.transformation_audit = self.transformation_audit
         self.height_tolerance = project_data.get('height_tolerance', 0.1)
         self.center_method = project_data.get('center_method', 'mean')
+        self.structure_type = project_data.get('structure_type', 'tower')
+        self.calculation_service = CalculationService(structure_type=self.structure_type)
         self.expected_belt_count = project_data.get('expected_belt_count')
         self.tower_faces_count = project_data.get('tower_faces_count')
+
+        # Валидация согласованности raw_data и processed_data
+        if self.processed_data is not None and self.raw_data is not None:
+            centers = self.processed_data.get('centers')
+            if centers is not None and not centers.empty and not self.raw_data.empty:
+                # Если количество точек в processed_data несовместимо с raw_data — сбрасываем результаты
+                if len(self.raw_data) == 0:
+                    self.processed_data = None
+                    logger.warning("processed_data сброшен: raw_data пуст")
 
         has_raw_data = self.raw_data is not None and not self.raw_data.empty
         if has_raw_data:
@@ -1255,6 +1270,7 @@ class MainWindow(QMainWindow):
         self.editor_3d.point_selected.connect(self.on_3d_point_selected)
         self.editor_3d.belt_assigned.connect(self.on_belt_assigned)
         self.editor_3d.tower_blueprint_requested.connect(self.apply_tower_blueprint)
+        self.editor_3d.tower_reference_model_updated.connect(self.update_reference_model)
         self.editor_3d.setMinimumWidth(600)
         self.restore_editor_toolbar_position()
         top_splitter.addWidget(self.editor_3d)
@@ -1890,13 +1906,13 @@ class MainWindow(QMainWindow):
                     station_data = processed_data[processed_data['is_station'] == True]
                     if not station_data.empty:
                         station = station_data.iloc[0]
-                        # Вычисляем расстояние и угол от центра башни
+                        # Вычисляем расстояние и угол: вектор стоянка → башня
                         tower_data = processed_data[build_working_tower_mask(processed_data)]
                         if not tower_data.empty:
                             tower_center = tower_data[['x', 'y']].mean()
                             station_xy = np.array([station['x'], station['y']])
                             center_xy = np.array([tower_center['x'], tower_center['y']])
-                            diff = station_xy - center_xy
+                            diff = center_xy - station_xy
                             instrument_distance = float(np.linalg.norm(diff))
                             instrument_angle_deg = float(np.degrees(np.arctan2(diff[1], diff[0])))
                             instrument_height = float(station.get('z', 1.7))
@@ -2073,6 +2089,7 @@ class MainWindow(QMainWindow):
             height_tolerance=self.height_tolerance,
             center_method=self.center_method,
             section_grouping_mode='height_levels',
+            structure_type=self.structure_type,
             parent=self
         )
         
@@ -2151,7 +2168,17 @@ class MainWindow(QMainWindow):
             self.straightness_widget.info_label.setText(results_text)
             
             logger.info(f"Расчет завершен: {results_text}")
-            
+
+            # Отображаем предупреждения расчёта (R², опорная точка и др.)
+            calc_warnings = results.get('warnings') or []
+            if calc_warnings:
+                warning_text = '\n'.join(f'• {w}' for w in calc_warnings)
+                QMessageBox.warning(
+                    self,
+                    'Предупреждения расчёта',
+                    f'Расчёт завершён, но обнаружены следующие предупреждения:\n\n{warning_text}'
+                )
+
             # Восстанавливаем активную станцию
             if hasattr(self, '_saved_active_station') and self._saved_active_station is not None:
                 try:
@@ -2422,6 +2449,7 @@ class MainWindow(QMainWindow):
                 ),
                 height_tolerance=self.height_tolerance,
                 center_method=self.center_method,
+                structure_type=self.structure_type,
                 expected_belt_count=self.expected_belt_count,
                 tower_faces_count=self.tower_faces_count,
                 xy_plane_state=xy_plane_state,
@@ -2713,6 +2741,17 @@ class MainWindow(QMainWindow):
             self.editor_3d.show_tower_builder_tab()
         self.statusBar.showMessage('Конструктор башни готов к работе', 3000)
 
+    def update_reference_model(self, blueprint) -> None:
+        """
+        Обновляет референсную модель для визуализации.
+        НЕ заменяет данные съёмки — только обновляет вайрфрейм-оверлей в 3D окне.
+        Вызывается при нажатии 'Обновить модель' в конструкторе.
+        """
+        self._tower_blueprint = blueprint
+        self.project_manager.tower_builder_state = blueprint.to_dict()
+        self.statusBar.showMessage("Референсная модель обновлена", 3000)
+        logger.info("Референсная модель конструктора обновлена без замены данных")
+
     def apply_tower_blueprint(self, blueprint: TowerBlueprint):
         """Применяет blueprint, созданный в конструкторе."""
         if not isinstance(blueprint, TowerBlueprint):
@@ -2967,10 +3006,13 @@ class MainWindow(QMainWindow):
         dialog = SettingsDialog(self)
         dialog.set_height_tolerance(self.height_tolerance)
         dialog.set_center_method(self.center_method)
-        
+        dialog.set_structure_type(self.structure_type)
+
         if dialog.exec() == QDialog.DialogCode.Accepted:
             self.height_tolerance = dialog.get_height_tolerance()
             self.center_method = dialog.get_center_method()
+            self.structure_type = dialog.get_structure_type()
+            self.calculation_service = CalculationService(structure_type=self.structure_type)
             self.statusBar.showMessage('Параметры обновлены')
             
     def on_belt_count_changed(self, value: int):
@@ -3916,6 +3958,7 @@ class MainWindow(QMainWindow):
                     ),
                     height_tolerance=self.height_tolerance,
                     center_method=self.center_method,
+                    structure_type=self.structure_type,
                     expected_belt_count=self.expected_belt_count,
                     tower_faces_count=self.tower_faces_count,
                     xy_plane_state=xy_plane_state,

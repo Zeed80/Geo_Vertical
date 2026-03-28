@@ -24,6 +24,8 @@ from core.exceptions import (
 from core.normatives import NormativeChecker
 from core.point_utils import (
     build_is_station_mask as _build_is_station_mask,
+)
+from core.point_utils import (
     build_working_tower_mask as _build_working_tower_mask,
 )
 from core.services.verticality_sections import build_verticality_check_from_sources
@@ -42,10 +44,11 @@ class CalculationService:
     - Подготовку данных для расчетов (трансформация координат)
     """
 
-    def __init__(self):
+    def __init__(self, structure_type: str = "tower"):
         """Инициализация сервиса расчетов"""
         self.crs_manager = CoordinateSystemManager()
-        self.normative_checker = NormativeChecker()
+        self.structure_type = str(structure_type or "tower").lower()
+        self.normative_checker = NormativeChecker(self.structure_type)
 
     def calculate(
         self,
@@ -348,18 +351,19 @@ class CalculationService:
             if not deflections:
                 return {'passed': 0, 'failed': 0, 'violations': []}
 
-            # Используем метод NormativeChecker для проверки всех отклонений
-            # Берем первую длину секции (все должны быть одинаковыми)
-            section_length = section_lengths[0] if section_lengths else 0.0
-            check_result = self.normative_checker.check_straightness_deviations(deflections, section_length)
+            # Проверяем каждое отклонение с допуском своей секции
+            check_result = self.normative_checker.check_straightness_deviations(
+                deflections, section_lengths
+            )
 
-            # Преобразуем результат в нужный формат
+            # Составляем список нарушений с правильным section_length для каждого
             violations = []
-            for i, item in enumerate(check_result.get('non_compliant', [])):
+            for item in check_result.get('non_compliant', []):
+                idx = item.get('index', 0)
                 violations.append({
-                    'belt_height': heights[i] if i < len(heights) else 0.0,
+                    'belt_height': heights[idx] if idx < len(heights) else 0.0,
                     'deviation': item.get('deflection', 0.0),
-                    'section_length': section_length,
+                    'section_length': section_lengths[idx] if idx < len(section_lengths) else 0.0,
                     'normative': item.get('tolerance', 0.0)
                 })
 

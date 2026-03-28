@@ -13,7 +13,6 @@ from core.calculations import process_tower_data
 from core.point_utils import decode_part_memberships
 from gui.data_table import DataTableWidget
 
-
 FACE_COORDS = {
     1: (1.0, 0.0),
     2: (0.0, 1.0),

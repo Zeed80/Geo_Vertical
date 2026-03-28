@@ -10,12 +10,6 @@ import numpy as np
 import pandas as pd
 
 logger = logging.getLogger(__name__)
-from core.services.straightness_profiles import get_preferred_straightness_part_map
-from core.services.verticality_sections import (
-    aggregate_angular_measurements_by_sections,
-    get_preferred_verticality_sections,
-)
-
 from reportlab.lib import colors
 from reportlab.lib.enums import TA_CENTER, TA_JUSTIFY
 from reportlab.lib.pagesizes import A4
@@ -31,6 +25,12 @@ from reportlab.platypus import (
     Spacer,
     Table,
     TableStyle,
+)
+
+from core.services.straightness_profiles import get_preferred_straightness_part_map
+from core.services.verticality_sections import (
+    aggregate_angular_measurements_by_sections,
+    get_preferred_verticality_sections,
 )
 
 

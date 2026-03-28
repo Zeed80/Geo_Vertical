@@ -4,6 +4,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
+from core.services.straightness_profiles import get_preferred_straightness_part_map
 from core.straightness_calculations import (
     auto_detect_split_height,
     build_straightness_profiles,
@@ -11,7 +12,6 @@ from core.straightness_calculations import (
     calculate_belt_deflections,
     find_station_point,
 )
-from core.services.straightness_profiles import get_preferred_straightness_part_map
 
 
 def _make_belt_df(coords):

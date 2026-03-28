@@ -56,6 +56,7 @@ class TowerBuilderPanel(QWidget):
     SECTION_COL_DEVIATION_Y = 3  # Девиация Y в мм
 
     blueprintRequested = pyqtSignal(TowerBlueprintV2)
+    referenceModelUpdated = pyqtSignal(TowerBlueprintV2)
     statusMessage = pyqtSignal(str)
     towerVisualizationRequested = pyqtSignal(TowerBlueprintV2)  # Сигнал для запроса визуализации в основном окне
 
@@ -131,9 +132,16 @@ class TowerBuilderPanel(QWidget):
         main_layout.addWidget(self.panel_container, stretch=1)
         
         # Кнопка построения (для режима вкладок)
-        self.generate_btn = QPushButton("Построить башню")
-        self.generate_btn.clicked.connect(self._emit_blueprint)
+        self.generate_btn = QPushButton("Обновить модель")
+        self.generate_btn.setToolTip("Обновить вайрфрейм-оверлей в 3D окне без замены данных съёмки")
+        self.generate_btn.clicked.connect(self._emit_reference_update)
         main_layout.addWidget(self.generate_btn)
+
+        self.generate_data_btn = QPushButton("Создать башню из чертежа...")
+        self.generate_data_btn.setToolTip("Сгенерировать синтетические точки (ЗАМЕНЯЕТ данные съёмки)")
+        self.generate_data_btn.setStyleSheet("QPushButton { color: #c47a00; font-weight: bold; }")
+        self.generate_data_btn.clicked.connect(self._emit_blueprint)
+        main_layout.addWidget(self.generate_data_btn)
         
         # Инициализировать режим
         self._on_mode_changed()
@@ -1033,19 +1041,40 @@ class TowerBuilderPanel(QWidget):
             if part_index in self._section_tables:
                 self._apply_sections_to_table(part_index)
 
-    def _emit_blueprint(self) -> None:
+    def _emit_reference_update(self) -> None:
+        """Обновить референсную модель (вайрфрейм оверлей) без замены данных съёмки."""
         try:
             blueprint = self.build_blueprint()
         except ValueError as error:
             QMessageBox.warning(self, "Ошибка параметров", str(error))
             return
-        
+        self.referenceModelUpdated.emit(blueprint)
+        self.statusMessage.emit("Референсная модель башни обновлена.")
+
+    def _emit_blueprint(self) -> None:
+        """Сгенерировать синтетические данные из чертежа (ЗАМЕНЯЕТ данные съёмки)."""
+        reply = QMessageBox.warning(
+            self,
+            "Замена данных",
+            "Это действие ЗАМЕНИТ все импортированные данные синтетическими точками.\n"
+            "Реальные измерения будут утеряны (отмена через Ctrl+Z).\n\nПродолжить?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
+            QMessageBox.StandardButton.Cancel,
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+        try:
+            blueprint = self.build_blueprint()
+        except ValueError as error:
+            QMessageBox.warning(self, "Ошибка параметров", str(error))
+            return
+
         # Update calculation tab
         if hasattr(self, "calculation_tab"):
             self.calculation_tab.set_blueprint(blueprint)
-            
+
         self.blueprintRequested.emit(blueprint)
-        self.statusMessage.emit("Чертёж башни обновлён.")
+        self.statusMessage.emit("Башня сгенерирована из чертежа.")
 
     # ------------------------------------------------------------------ templates / wizard
     def _get_templates_dir(self) -> Path:
@@ -1277,6 +1306,7 @@ class TowerBuilderPanel(QWidget):
         if new_mode == 'unified':
             self._unified_panel = UnifiedTowerBuilderPanel()
             self._unified_panel.blueprintRequested.connect(self.blueprintRequested.emit)
+            self._unified_panel.referenceModelUpdated.connect(self.referenceModelUpdated.emit)
             self._unified_panel.statusMessage.connect(self.statusMessage.emit)
             # Подключить сигнал визуализации для отображения в основном окне
             self._unified_panel.towerVisualizationRequested.connect(self.towerVisualizationRequested.emit)

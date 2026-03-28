@@ -12,11 +12,15 @@ import numpy as np
 import pandas as pd
 from scipy import stats
 
-from core.section_operations import _build_section_entries
+from core.import_grouping import estimate_composite_split_height
 from core.point_utils import (
     build_flag_mask as _build_flag_mask,
-    build_working_tower_mask as _build_working_tower_mask,
+)
+from core.point_utils import (
     build_is_station_mask as _build_is_station_mask,
+)
+from core.point_utils import (
+    build_working_tower_mask as _build_working_tower_mask,
 )
 from core.point_utils import (
     decode_part_memberships as _decode_part_memberships,
@@ -24,7 +28,7 @@ from core.point_utils import (
 from core.point_utils import (
     filter_points_by_part as _filter_points_by_part,
 )
-from core.import_grouping import estimate_composite_split_height
+from core.section_operations import _build_section_entries
 from core.straightness_calculations import build_straightness_profiles
 
 logger = logging.getLogger(__name__)
@@ -255,7 +259,7 @@ def group_points_by_height(
     resolved_mode = resolve_section_grouping_mode(section_grouping_mode, use_assigned_belts)
     working_points = points[_build_working_tower_mask(points)]
     if len(working_points) != len(points):
-        logger.info("Р ВР В· Р С–РЎР‚РЎС“Р С—Р С—Р С‘РЎР‚Р С•Р Р†Р С”Р С‘ Р С—Р С• РЎРѓР ВµР С”РЎвЂ Р С‘РЎРЏР С Р С‘РЎРѓР С”Р В»РЎР‹РЎвЂЎР ВµР Р…РЎвЂ№ Р Р…Р ВµРЎР‚Р В°Р В±Р С•РЎвЂЎР С‘Р Вµ РЎвЂљР С•РЎвЂЎР С”Р С‘ Р СР В°РЎвЂЎРЎвЂљРЎвЂ№")
+        logger.info("Р ВР В· Р С–РЎР‚РЎС“Р С—Р С—Р С'РЎР‚Р С•Р Р†Р С”Р С' Р С—Р С• РЎРѓР ВµР С”РЎвЂ Р С'РЎРЏР С Р С'РЎРѓР С”Р В»РЎР‹РЎвЂЎР ВµР Р…РЎвЂ№ Р Р…Р ВµРЎР‚Р В°Р В±Р С•РЎвЂЎР С'Р Вµ РЎвЂљР С•РЎвЂЎР С”Р С' Р СР В°РЎвЂЎРЎвЂљРЎвЂ№")
 
     if (
         resolved_mode == SECTION_GROUPING_ASSIGNED_SECTIONS
@@ -287,7 +291,7 @@ def group_points_by_height(
 
 def calculate_belt_center(points: pd.DataFrame, method: str = 'mean') -> tuple[float, float, float]:
     """
-    Р’С‹С‡РёСЃР»СЏРµС‚ С†РµРЅС‚СЂ РїРѕСЏСЃР°
+    Р'С‹С‡РёСЃР»СЏРµС‚ С†РµРЅС‚СЂ РїРѕСЏСЃР°
 
     Args:
         points: DataFrame СЃ С‚РѕС‡РєР°РјРё РїРѕСЏСЃР°
@@ -350,16 +354,30 @@ def approximate_tower_axis(centers: pd.DataFrame) -> dict[str, Union[float, bool
     x0 = intercept_x + slope_x * z0
     y0 = intercept_y + slope_y * z0
 
+    # Предупреждение при плохом качестве линейной аппроксимации
+    warnings = []
+    r2_x = r_x ** 2
+    r2_y = r_y ** 2
+    if r2_x < 0.9 or r2_y < 0.9:
+        warnings.append(
+            f"Ось башни плохо аппроксимирована прямой "
+            f"(R²_x={r2_x:.3f}, R²_y={r2_y:.3f}). "
+            f"Возможна значительная кривизна конструкции или выброс данных."
+        )
+
     return {
-        'x0': x0,           # РљРѕРѕСЂРґРёРЅР°С‚Р° X РІ РѕСЃРЅРѕРІР°РЅРёРё
-        'y0': y0,           # РљРѕРѕСЂРґРёРЅР°С‚Р° Y РІ РѕСЃРЅРѕРІР°РЅРёРё
-        'z0': z0,           # Р’С‹СЃРѕС‚Р° РѕСЃРЅРѕРІР°РЅРёСЏ
-        'dx': slope_x,      # РќР°РєР»РѕРЅ РѕСЃРё РїРѕ X
-        'dy': slope_y,      # РќР°РєР»РѕРЅ РѕСЃРё РїРѕ Y
-        'dz': 1.0,          # РќР°РїСЂР°РІР»РµРЅРёРµ РїРѕ Z
-        'r_x': r_x,         # РљРѕСЌС„С„РёС†РёРµРЅС‚ РєРѕСЂСЂРµР»СЏС†РёРё X
-        'r_y': r_y,         # РљРѕСЌС„С„РёС†РёРµРЅС‚ РєРѕСЂСЂРµР»СЏС†РёРё Y
-        'valid': True
+        'x0': x0,           # Координата X в основании
+        'y0': y0,           # Координата Y в основании
+        'z0': z0,           # Высота основания
+        'dx': slope_x,      # Наклон оси по X
+        'dy': slope_y,      # Наклон оси по Y
+        'dz': 1.0,          # Направление по Z
+        'r_x': r_x,         # Коэффициент корреляции X
+        'r_y': r_y,         # Коэффициент корреляции Y
+        'r2_x': r2_x,       # Коэффициент детерминации X
+        'r2_y': r2_y,       # Коэффициент детерминации Y
+        'valid': True,
+        'warnings': warnings,
     }
 
 
@@ -369,7 +387,7 @@ def calculate_local_coordinate_system(
     lower_belt_points: pd.DataFrame | None = None
 ) -> dict[str, Union[tuple[float, float, float], bool]]:
     """
-    Р’С‹С‡РёСЃР»СЏРµС‚ СѓРЅРёРІРµСЂСЃР°Р»СЊРЅСѓСЋ Р»РѕРєР°Р»СЊРЅСѓСЋ СЃРёСЃС‚РµРјСѓ РєРѕРѕСЂРґРёРЅР°С‚ РґР»СЏ СЂР°СЃС‡РµС‚Р° РІРµСЂС‚РёРєР°Р»СЊРЅРѕСЃС‚Рё
+    Р'С‹С‡РёСЃР»СЏРµС‚ СѓРЅРёРІРµСЂСЃР°Р»СЊРЅСѓСЋ Р»РѕРєР°Р»СЊРЅСѓСЋ СЃРёСЃС‚РµРјСѓ РєРѕРѕСЂРґРёРЅР°С‚ РґР»СЏ СЂР°СЃС‡РµС‚Р° РІРµСЂС‚РёРєР°Р»СЊРЅРѕСЃС‚Рё
 
     РђР»РіРѕСЂРёС‚Рј СѓРЅРёРІРµСЂСЃР°Р»РµРЅ РґР»СЏ Р»СЋР±РѕР№ С„РѕСЂРјС‹ Р±Р°С€РЅРё (3-РіСЂР°РЅРЅР°СЏ, 4-РіСЂР°РЅРЅР°СЏ, n-РіСЂР°РЅРЅР°СЏ,
     СѓСЃРµС‡РµРЅРЅР°СЏ РїСЂРёР·РјР°, РїСЂРёР·РјР° Рё С‚.Рї.) Рё РЅРµ Р·Р°РІРёСЃРёС‚ РѕС‚ РєРѕР»РёС‡РµСЃС‚РІР° РіСЂР°РЅРµР№.
@@ -576,7 +594,7 @@ def point_to_line_distance_3d(point: tuple[float, float, float],
                                line_point: tuple[float, float, float],
                                line_direction: tuple[float, float, float]) -> float:
     """
-    Р’С‹С‡РёСЃР»СЏРµС‚ СЂР°СЃСЃС‚РѕСЏРЅРёРµ РѕС‚ С‚РѕС‡РєРё РґРѕ РїСЂСЏРјРѕР№ РІ 3D
+    Р'С‹С‡РёСЃР»СЏРµС‚ СЂР°СЃСЃС‚РѕСЏРЅРёРµ РѕС‚ С‚РѕС‡РєРё РґРѕ РїСЂСЏРјРѕР№ РІ 3D
 
     Args:
         point: РљРѕРѕСЂРґРёРЅР°С‚С‹ С‚РѕС‡РєРё (x, y, z)
@@ -590,10 +608,13 @@ def point_to_line_distance_3d(point: tuple[float, float, float],
     l0 = np.array(line_point)
     l = np.array(line_direction)
 
-    # РќРѕСЂРјР°Р»РёР·СѓРµРј РЅР°РїСЂР°РІР»СЏСЋС‰РёР№ РІРµРєС‚РѕСЂ
-    l = l / np.linalg.norm(l)
+    # Нормализуем направляющий вектор
+    norm = np.linalg.norm(l)
+    if norm < 1e-10:
+        raise ValueError("Degenerate line direction: zero-length vector")
+    l = l / norm
 
-    # Р’РµРєС‚РѕСЂ РѕС‚ С‚РѕС‡РєРё РЅР° РїСЂСЏРјРѕР№ РґРѕ С‚РѕС‡РєРё
+    # Р'РµРєС‚РѕСЂ РѕС‚ С‚РѕС‡РєРё РЅР° РїСЂСЏРјРѕР№ РґРѕ С‚РѕС‡РєРё
     v = p - l0
 
     # РџСЂРѕРµРєС†РёСЏ v РЅР° РЅР°РїСЂР°РІР»РµРЅРёРµ РїСЂСЏРјРѕР№
@@ -630,7 +651,7 @@ def calculate_vertical_deviation(centers: pd.DataFrame, axis: dict[str, Any]) ->
         return centers
 
     result = centers.copy()
-    baseline_row = result.sort_values('z').iloc[0]
+    baseline_row = result.dropna(subset=['x', 'y']).sort_values('z').iloc[0]
     x_diff = result['x'].values - float(baseline_row['x'])
     y_diff = result['y'].values - float(baseline_row['y'])
     result['deviation'] = np.sqrt(x_diff**2 + y_diff**2)
@@ -822,7 +843,7 @@ def process_tower_data(
         section_grouping_mode=resolved_grouping_mode,
     )
 
-    # Р’С‹С‡РёСЃР»СЏРµРј С†РµРЅС‚СЂС‹ РїРѕСЏСЃРѕРІ
+    # Р'С‹С‡РёСЃР»СЏРµРј С†РµРЅС‚СЂС‹ РїРѕСЏСЃРѕРІ
     centers_list = []
     for section_index, (height, belt_points) in enumerate(sorted(belts.items()), start=1):
         x_c, y_c, z_c = calculate_belt_center(belt_points, center_method)
@@ -899,7 +920,7 @@ def process_tower_data(
                     'belt_height': float(same_height_rows['belt_height'].mean()),
                     'points_count': int(same_height_rows['points_count'].sum()),
                     'tower_part': int(same_height_rows['tower_part'].min()) if same_height_rows['tower_part'].notna().any() else None,
-                    'tower_part_memberships': current_row.get('tower_part_memberships')  # Р‘РµСЂРµРј РёР· РїРµСЂРІРѕРіРѕ
+                    'tower_part_memberships': current_row.get('tower_part_memberships')  # Р'РµСЂРµРј РёР· РїРµСЂРІРѕРіРѕ
                 }
                 deduplicated_centers.append(averaged_center)
                 logger.debug(f"РћР±СЉРµРґРёРЅРµРЅРѕ {len(same_height_positions)} С†РµРЅС‚СЂРѕРІ РЅР° РІС‹СЃРѕС‚Рµ ~{current_z:.3f}Рј РІ РѕРґРёРЅ")
@@ -961,10 +982,10 @@ def process_tower_data(
         lower_belt_points = belts[min_height]
         logger.info(f"РСЃРїРѕР»СЊР·СѓРµРј {len(lower_belt_points)} С‚РѕС‡РµРє РЅРёР¶РЅРµРіРѕ РїРѕСЏСЃР° РґР»СЏ СѓРЅРёРІРµСЂСЃР°Р»СЊРЅРѕР№ РѕСЂРёРµРЅС‚Р°С†РёРё Р»РѕРєР°Р»СЊРЅРѕР№ РЎРљ")
 
-    # Р’С‹С‡РёСЃР»СЏРµРј Р»РѕРєР°Р»СЊРЅСѓСЋ СЃРёСЃС‚РµРјСѓ РєРѕРѕСЂРґРёРЅР°С‚ (СѓРЅРёРІРµСЂСЃР°Р»СЊРЅРѕ РґР»СЏ Р»СЋР±РѕР№ С„РѕСЂРјС‹ Р±Р°С€РЅРё)
+    # Р'С‹С‡РёСЃР»СЏРµРј Р»РѕРєР°Р»СЊРЅСѓСЋ СЃРёСЃС‚РµРјСѓ РєРѕРѕСЂРґРёРЅР°С‚ (СѓРЅРёРІРµСЂСЃР°Р»СЊРЅРѕ РґР»СЏ Р»СЋР±РѕР№ С„РѕСЂРјС‹ Р±Р°С€РЅРё)
     local_cs = calculate_local_coordinate_system(centers, standing_point, lower_belt_points)
 
-    # Р’С‹С‡РёСЃР»СЏРµРј РѕС‚РєР»РѕРЅРµРЅРёСЏ РѕС‚ РІРµСЂС‚РёРєР°Р»Рё СЃ РЅРѕРІРѕР№ Р»РѕРіРёРєРѕР№
+    # Р'С‹С‡РёСЃР»СЏРµРј РѕС‚РєР»РѕРЅРµРЅРёСЏ РѕС‚ РІРµСЂС‚РёРєР°Р»Рё СЃ РЅРѕРІРѕР№ Р»РѕРіРёРєРѕР№
     centers_with_vertical = calculate_vertical_deviation_with_local_cs(centers, axis, local_cs, standing_point)
 
     # РР·РІР»РµРєР°РµРј РёРЅС„РѕСЂРјР°С†РёСЋ Рѕ С‡Р°СЃС‚СЏС… Р±Р°С€РЅРё РёР· РёСЃС…РѕРґРЅС‹С… РґР°РЅРЅС‹С…
@@ -1007,7 +1028,7 @@ def process_tower_data(
                 tower_parts_info['split_height'] = None
             logger.info(f"РћР±РЅР°СЂСѓР¶РµРЅР° СЃРѕСЃС‚Р°РІРЅР°СЏ Р±Р°С€РЅСЏ: С‡Р°СЃС‚РµР№={len(parts_meta)}, РіСЂР°РЅРёС†С‹={split_heights if split_heights else 'РЅРµС‚'}")
 
-    # Р’С‹С‡РёСЃР»СЏРµРј СЃС‚СЂРµР»С‹ РїСЂРѕРіРёР±Р° (СЃ СѓС‡РµС‚РѕРј С‡Р°СЃС‚РµР№, РµСЃР»Рё Р±Р°С€РЅСЏ СЃРѕСЃС‚Р°РІРЅР°СЏ)
+    # Р'С‹С‡РёСЃР»СЏРµРј СЃС‚СЂРµР»С‹ РїСЂРѕРіРёР±Р° (СЃ СѓС‡РµС‚РѕРј С‡Р°СЃС‚РµР№, РµСЃР»Рё Р±Р°С€РЅСЏ СЃРѕСЃС‚Р°РІРЅР°СЏ)
     # Keep straightness isolated from verticality: no implicit part detection here.
     if False and (tower_parts_info is None or len(tower_parts_info.get('parts', [])) <= 1) and 'belt' in working_points.columns:  # disabled on purpose
         numeric_belts = pd.to_numeric(working_points['belt'], errors='coerce').dropna()
@@ -1058,6 +1079,14 @@ def process_tower_data(
     straightness_profiles = build_straightness_profiles(points, tower_parts_info)
     straightness_summary = _summarize_straightness_profiles(straightness_profiles)
 
+    # Собираем предупреждения из разных этапов расчёта
+    calc_warnings: list[str] = list(axis.get('warnings') or [])
+    if standing_point == {'x': 0.0, 'y': 0.0, 'z': 0.0}:
+        calc_warnings.append(
+            "Опорная точка (standing) не найдена — используются координаты начала координат (0, 0, 0). "
+            "Для башен вдали от начала координат ориентация локальной СК может быть некорректна."
+        )
+
     result = {
         'belts': belts,
         'centers': centers_with_straightness,
@@ -1068,6 +1097,7 @@ def process_tower_data(
         'section_grouping_mode': resolved_grouping_mode,
         'straightness_profiles': straightness_profiles,
         'straightness_summary': straightness_summary,
+        'warnings': calc_warnings,
         'valid': True
     }
 

@@ -15,7 +15,8 @@
       "Bash(python -m pytest tests/test_import_regressions.py::test_semichniy_straightness_profiles_ignore_service_points_and_match_widget -x -v)",
       "Bash(python:*)",
       "Bash(grep -v \"^$\\\\|WARNING\\\\|INFO\\\\|DEBUG\")",
-      "Bash(grep -v \"^$\\\\|WARNING\\\\|INFO\\\\|DEBUG\\\\|UserWarning\")"
+      "Bash(grep -v \"^$\\\\|WARNING\\\\|INFO\\\\|DEBUG\\\\|UserWarning\")",
+      "Bash(xargs grep:*)"
     ]
   }
 }

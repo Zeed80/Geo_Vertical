@@ -214,11 +214,7 @@ class UndoManager:
                     # Для DataChangeCommand сохраняем данные
                     cmd_dict['old_data'] = cmd.old_data
                     cmd_dict['new_data'] = cmd.new_data
-                elif isinstance(cmd, EditorStateCommand):
-                    cmd_dict['old_state'] = cmd.old_state
-                    cmd_dict['new_state'] = cmd.new_state
-                    cmd_dict['skip_initial_execute'] = cmd._skip_initial_execute
-                elif isinstance(cmd, MainWindowStateCommand):
+                elif isinstance(cmd, EditorStateCommand) or isinstance(cmd, MainWindowStateCommand):
                     cmd_dict['old_state'] = cmd.old_state
                     cmd_dict['new_state'] = cmd.new_state
                     cmd_dict['skip_initial_execute'] = cmd._skip_initial_execute
@@ -452,8 +448,8 @@ class DataChangeCommand(Command):
         """
         self.data_getter = data_getter
         self.data_setter = data_setter
-        self.old_data = old_data.copy()
-        self.new_data = new_data.copy()
+        self.old_data = old_data.copy(deep=True)
+        self.new_data = new_data.copy(deep=True)
         self.description = description
         self.post_execute = post_execute
         self.post_undo = post_undo
@@ -1073,6 +1069,11 @@ class TowerBlueprintApplyCommand(Command):
                     if self.main_window.expected_belt_count is not None:
                         self.main_window.belt_count_spin.setValue(int(self.main_window.expected_belt_count))
 
+                # Сбрасываем флаг применения blueprint: данные съёмки восстановлены,
+                # blueprint теперь снова является только референсной моделью (оверлеем)
+                if hasattr(self.main_window.editor_3d, '_blueprint_applied'):
+                    self.main_window.editor_3d._blueprint_applied = False
+
                 # Обновляем blueprint в редакторе
                 if hasattr(self.main_window.editor_3d, 'set_tower_builder_blueprint'):
                     self.main_window.editor_3d.set_tower_builder_blueprint(self.old_tower_blueprint)
@@ -1099,6 +1100,8 @@ class TowerBlueprintApplyCommand(Command):
                     self.main_window.editor_3d.set_data(pd.DataFrame())
                 if hasattr(self.main_window.editor_3d, 'set_section_lines'):
                     self.main_window.editor_3d.set_section_lines([])
+                if hasattr(self.main_window.editor_3d, '_blueprint_applied'):
+                    self.main_window.editor_3d._blueprint_applied = False
                 if hasattr(self.main_window.editor_3d, 'set_tower_builder_blueprint'):
                     self.main_window.editor_3d.set_tower_builder_blueprint(None)
 

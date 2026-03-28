@@ -34,7 +34,7 @@ class IcingRegion:
     description: str = ""
 
 
-WIND_REGIONS: List[WindRegion] = [
+WIND_REGIONS: list[WindRegion] = [
     WindRegion("Ia", 0.17, "Ia район — 0.17 кПа"),
     WindRegion("I", 0.23, "I район — 0.23 кПа"),
     WindRegion("II", 0.30, "II район — 0.30 кПа"),
@@ -45,7 +45,7 @@ WIND_REGIONS: List[WindRegion] = [
     WindRegion("VII", 0.85, "VII район — 0.85 кПа"),
 ]
 
-SNOW_REGIONS: List[SnowRegion] = [
+SNOW_REGIONS: list[SnowRegion] = [
     SnowRegion("I", 0.50, "I район — 0.50 кПа"),
     SnowRegion("II", 1.00, "II район — 1.00 кПа"),
     SnowRegion("III", 1.50, "III район — 1.50 кПа"),
@@ -56,7 +56,7 @@ SNOW_REGIONS: List[SnowRegion] = [
     SnowRegion("VIII", 4.00, "VIII район — 4.00 кПа"),
 ]
 
-ICING_REGIONS: List[IcingRegion] = [
+ICING_REGIONS: list[IcingRegion] = [
     IcingRegion("I", 5.0, "I район — 5 мм"),
     IcingRegion("II", 10.0, "II район — 10 мм"),
     IcingRegion("III", 15.0, "III район — 15 мм"),
@@ -64,7 +64,7 @@ ICING_REGIONS: List[IcingRegion] = [
     IcingRegion("V", 25.0, "V район — 25 мм"),
 ]
 
-SEISMICITY_LEVELS: List[Tuple[int, str]] = [
+SEISMICITY_LEVELS: list[tuple[int, str]] = [
     (5, "5 баллов — несейсмичная территория"),
     (6, "6 баллов — слабая сейсмичность"),
     (7, "7 баллов — умеренная сейсмичность"),
@@ -73,7 +73,7 @@ SEISMICITY_LEVELS: List[Tuple[int, str]] = [
 ]
 
 
-LOCALITY_CLIMATE_DB: Dict[str, Dict[str, str]] = {
+LOCALITY_CLIMATE_DB: dict[str, dict[str, str]] = {
     "москва": {"wind": "I", "snow": "III", "icing": "II", "seismicity": "5"},
     "санкт-петербург": {"wind": "II", "snow": "III", "icing": "II", "seismicity": "5"},
     "новосибирск": {"wind": "III", "snow": "IV", "icing": "III", "seismicity": "6"},
@@ -124,15 +124,15 @@ LOCALITY_CLIMATE_DB: Dict[str, Dict[str, str]] = {
 }
 
 
-def get_wind_regions() -> List[WindRegion]:
+def get_wind_regions() -> list[WindRegion]:
     return list(WIND_REGIONS)
 
 
-def get_snow_regions() -> List[SnowRegion]:
+def get_snow_regions() -> list[SnowRegion]:
     return list(SNOW_REGIONS)
 
 
-def get_icing_regions() -> List[IcingRegion]:
+def get_icing_regions() -> list[IcingRegion]:
     return list(ICING_REGIONS)
 
 
@@ -157,21 +157,21 @@ def find_icing_region(code: str) -> IcingRegion | None:
     return None
 
 
-def lookup_locality(locality: str) -> Dict[str, str] | None:
+def lookup_locality(locality: str) -> dict[str, str] | None:
     key = locality.strip().lower()
     return LOCALITY_CLIMATE_DB.get(key)
 
 
-def get_locality_names() -> List[str]:
+def get_locality_names() -> list[str]:
     return sorted(LOCALITY_CLIMATE_DB.keys(), key=str.lower)
 
 
-def autofill_loads_from_locality(locality: str) -> Dict[str, float] | None:
+def autofill_loads_from_locality(locality: str) -> dict[str, float] | None:
     """Возвращает нагрузки по населённому пункту или None."""
     info = lookup_locality(locality)
     if info is None:
         return None
-    result: Dict[str, float] = {}
+    result: dict[str, float] = {}
     wind = find_wind_region(info.get("wind", ""))
     if wind:
         result["wind_pressure_kpa"] = wind.pressure_kpa

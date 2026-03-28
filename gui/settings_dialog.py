@@ -72,20 +72,40 @@ class SettingsDialog(QDialog):
         
         calc_layout.addWidget(methods_group)
         
+        # Группа: Тип конструкции
+        structure_group = QGroupBox('Тип конструкции')
+        structure_layout = QFormLayout()
+        structure_group.setLayout(structure_layout)
+
+        self.structure_type_combo = QComboBox()
+        self.structure_type_combo.addItem('Башня (Δ = 0.001·h)', 'tower')
+        self.structure_type_combo.addItem('Мачта (Δ = 0.0007·h)', 'mast')
+        self.structure_type_combo.addItem('ОДН (Δ = 0.005·h)', 'odn')
+        self.structure_type_combo.setToolTip(
+            'Тип конструкции влияет на коэффициент допуска вертикальности:\n'
+            'Башня — 0.001, Мачта — 0.0007, ОДН — 0.005'
+        )
+        structure_layout.addRow('Тип конструкции:', self.structure_type_combo)
+
+        calc_layout.addWidget(structure_group)
+
         # Группа: Допуски (только для информации)
         tolerances_group = QGroupBox('Нормативные допуски (только просмотр)')
         tolerances_layout = QFormLayout()
         tolerances_group.setLayout(tolerances_layout)
-        
-        vertical_label = QLabel('0.001 × h (СП 70.13330.2012)')
-        vertical_label.setStyleSheet('color: #0066cc; font-weight: bold;')
-        tolerances_layout.addRow('Вертикальность:', vertical_label)
-        
+
+        self.vertical_tolerance_label = QLabel('0.001 × h (СП 70.13330.2012)')
+        self.vertical_tolerance_label.setStyleSheet('color: #0066cc; font-weight: bold;')
+        tolerances_layout.addRow('Вертикальность:', self.vertical_tolerance_label)
+
         straight_label = QLabel('L / 750 (Инструкция 1980)')
         straight_label.setStyleSheet('color: #0066cc; font-weight: bold;')
         tolerances_layout.addRow('Прямолинейность:', straight_label)
-        
+
         calc_layout.addWidget(tolerances_group)
+
+        # Обновляем подпись допуска при смене типа
+        self.structure_type_combo.currentIndexChanged.connect(self._update_tolerance_label)
         calc_layout.addStretch()
         
         tabs.addTab(calc_tab, 'Расчеты')
@@ -217,7 +237,10 @@ class SettingsDialog(QDialog):
             
             center_method = self.settings_manager.load_setting('calculation/center_method', 'mean')
             self.set_center_method(center_method)
-            
+
+            structure_type = self.settings_manager.load_setting('calculation/structure_type', 'tower')
+            self.set_structure_type(str(structure_type))
+
             # Загружаем настройки интерфейса
             font_size = self.settings_manager.load_setting('ui/font_size', 10)
             self.font_size_spin.setValue(int(font_size))
@@ -246,6 +269,7 @@ class SettingsDialog(QDialog):
             # Сохраняем настройки расчетов
             self.settings_manager.save_setting('calculation/height_tolerance', self.height_tolerance_spin.value())
             self.settings_manager.save_setting('calculation/center_method', self.get_center_method())
+            self.settings_manager.save_setting('calculation/structure_type', self.get_structure_type())
             
             # Сохраняем настройки интерфейса
             self.settings_manager.save_setting('ui/font_size', self.font_size_spin.value())
@@ -294,6 +318,24 @@ class SettingsDialog(QDialog):
             except SettingsSaveError as e:
                 QMessageBox.critical(self, 'Ошибка', f'Ошибка экспорта настроек:\n{str(e)}')
         
+    def _update_tolerance_label(self):
+        """Обновляет подпись допуска вертикальности при смене типа конструкции."""
+        coeff_map = {'tower': '0.001', 'mast': '0.0007', 'odn': '0.005'}
+        key = self.structure_type_combo.currentData() or 'tower'
+        coeff = coeff_map.get(key, '0.001')
+        self.vertical_tolerance_label.setText(f'{coeff} × h (СП 70.13330.2012)')
+
+    def get_structure_type(self) -> str:
+        """Возвращает тип конструкции."""
+        return self.structure_type_combo.currentData() or 'tower'
+
+    def set_structure_type(self, structure_type: str):
+        """Устанавливает тип конструкции."""
+        for i in range(self.structure_type_combo.count()):
+            if self.structure_type_combo.itemData(i) == structure_type:
+                self.structure_type_combo.setCurrentIndex(i)
+                return
+
     def get_height_tolerance(self) -> float:
         """Возвращает допуск группировки по высоте"""
         return self.height_tolerance_spin.value()
@@ -329,7 +371,7 @@ class SettingsDialog(QDialog):
         """Восстанавливает настройки по умолчанию"""
         self.height_tolerance_spin.setValue(0.1)
         self.center_method_combo.setCurrentIndex(0)
-        self.units_combo.setCurrentIndex(0)
+        self.structure_type_combo.setCurrentIndex(0)
         self.point_size_spin.setValue(100)
         self.show_grid_check.setChecked(True)
         self.show_legend_check.setChecked(True)

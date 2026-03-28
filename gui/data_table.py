@@ -384,7 +384,7 @@ class DataTableWidget(QWidget):
         self.station_table.itemChanged.connect(self.on_station_item_changed)
         try:
             self.station_table.itemSelectionChanged.disconnect()
-        except Exception:
+        except (RuntimeError, TypeError):
             pass
         self.station_table.itemSelectionChanged.connect(self.on_station_selection_changed)
         self.setup_table_style(self.station_table)
@@ -442,7 +442,7 @@ class DataTableWidget(QWidget):
         self.tower_table.itemChanged.connect(self.on_tower_item_changed)
         try:
             self.tower_table.itemSelectionChanged.disconnect()
-        except Exception:
+        except (RuntimeError, TypeError):
             pass
         self.tower_table.itemSelectionChanged.connect(self.on_tower_selection_changed)
         self.setup_table_style(self.tower_table)
@@ -564,8 +564,8 @@ class DataTableWidget(QWidget):
             if hasattr(self.editor_3d, 'set_active_station_index'):
                 try:
                     self.editor_3d.set_active_station_index(None)
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.warning(f"Не удалось сбросить активную станцию в 3D-редакторе: {e}")
             if hasattr(self, 'set_active_station_btn'):
                 self.set_active_station_btn.setEnabled(False)
             return
@@ -579,7 +579,7 @@ class DataTableWidget(QWidget):
         for signal in (self.station_table.itemChanged, self.tower_table.itemChanged):
             try:
                 signal.disconnect()
-            except Exception:
+            except RuntimeError:
                 pass
         
         # Разделяем данные на точки стояния и точки башни
@@ -613,8 +613,8 @@ class DataTableWidget(QWidget):
             if hasattr(self.editor_3d, 'set_active_station_index'):
                 try:
                     self.editor_3d.set_active_station_index(None)
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.warning(f"Не удалось сбросить активную станцию в 3D-редакторе: {e}")
             self.set_active_station_btn.setEnabled(False)
         else:
             for i, (idx, row) in enumerate(station_data.iterrows()):
@@ -907,7 +907,7 @@ class DataTableWidget(QWidget):
         self.show_angular_mode = bool(checked)
         try:
             self.tower_table.itemChanged.disconnect()
-        except Exception:
+        except (RuntimeError, TypeError):
             pass
         self.populate_tower_table()
         if not self.show_angular_mode:
@@ -1095,7 +1095,7 @@ class DataTableWidget(QWidget):
                 )
                 try:
                     part_table.itemSelectionChanged.disconnect()
-                except Exception:
+                except (RuntimeError, TypeError):
                     pass
                 part_table.itemSelectionChanged.connect(self.on_tower_selection_changed)
                 self.setup_table_style(part_table)
@@ -2872,7 +2872,7 @@ class DataTableWidget(QWidget):
             self.original_data.at[global_idx, 'name'] = name_value
             if global_idx in self._current_station_data.index:
                 self._current_station_data.at[global_idx, 'name'] = name_value
-            self.update_station_combos(self._current_station_data)
+            self._update_station_ids()
         
         self._emit_data_mutation(previous_data, 'Редактирование точки стояния')
         self.data_changed.emit()
@@ -3696,8 +3696,8 @@ class DataTableWidget(QWidget):
                     if str(stored_idx) == str(search_idx):
                         logger.debug(f"_find_row_in_table: Найдено совпадение в строке {r} через строковое сравнение: '{stored_idx}' == '{search_idx}'")
                         return r
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.debug(f"_find_row_in_table: ошибка строкового сравнения строки {r}: {e}")
                     
             except (TypeError, ValueError) as e:
                 logger.debug(f"_find_row_in_table: Ошибка сравнения в строке {r}: {e}")
@@ -3914,8 +3914,8 @@ class DataTableWidget(QWidget):
         if hasattr(self.editor_3d, 'set_active_station_index'):
             try:
                 self.editor_3d.set_active_station_index(station_id)
-            except Exception:
-                pass
+            except Exception as e:
+                logger.warning(f"Не удалось установить активную станцию в 3D-редакторе: {e}")
         current_selection = station_id
         self.populate_station_table()
         self._update_station_selection(state_id=current_selection)

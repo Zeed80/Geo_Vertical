@@ -35,6 +35,7 @@ class UnifiedTowerBuilderPanel(QWidget):
     """
     
     blueprintRequested = pyqtSignal(TowerBlueprintV2)
+    referenceModelUpdated = pyqtSignal(TowerBlueprintV2)
     statusMessage = pyqtSignal(str)
     towerVisualizationRequested = pyqtSignal(TowerBlueprintV2)  # Сигнал для запроса визуализации в основном окне
     
@@ -61,9 +62,16 @@ class UnifiedTowerBuilderPanel(QWidget):
         self.toolbar = QHBoxLayout()
         self.toolbar.setSpacing(4)
         
-        self.generate_btn = QPushButton("Построить башню")
-        self.generate_btn.clicked.connect(self._emit_blueprint)
+        self.generate_btn = QPushButton("Обновить модель")
+        self.generate_btn.setToolTip("Обновить вайрфрейм-оверлей в 3D окне без замены данных съёмки")
+        self.generate_btn.clicked.connect(self._emit_reference_update)
         self.toolbar.addWidget(self.generate_btn)
+
+        self.generate_data_btn = QPushButton("Создать башню из чертежа...")
+        self.generate_data_btn.setToolTip("Сгенерировать синтетические точки (ЗАМЕНЯЕТ данные съёмки)")
+        self.generate_data_btn.setStyleSheet("QPushButton { color: #c47a00; font-weight: bold; }")
+        self.generate_data_btn.clicked.connect(self._emit_blueprint)
+        self.toolbar.addWidget(self.generate_data_btn)
         
         # Кнопка мастера групповых операций
         self.master_btn = QPushButton("Мастер операций")
@@ -204,13 +212,31 @@ class UnifiedTowerBuilderPanel(QWidget):
         self.set_blueprint(new_blueprint)
         self.statusMessage.emit("Групповая операция применена")
     
-    def _emit_blueprint(self) -> None:
-        """Эмитировать сигнал с текущим чертежом."""
+    def _emit_reference_update(self) -> None:
+        """Обновить референсную модель (вайрфрейм оверлей) без замены данных съёмки."""
         if self._current_blueprint:
-            self.blueprintRequested.emit(self._current_blueprint)
-            self.statusMessage.emit("Чертёж башни обновлён")
+            self.referenceModelUpdated.emit(self._current_blueprint)
+            self.statusMessage.emit("Референсная модель обновлена")
         else:
+            self.statusMessage.emit("Нет чертежа для обновления")
+
+    def _emit_blueprint(self) -> None:
+        """Сгенерировать синтетические данные из чертежа (ЗАМЕНЯЕТ данные съёмки)."""
+        if not self._current_blueprint:
             self.statusMessage.emit("Нет чертежа для построения")
+            return
+        reply = QMessageBox.warning(
+            self,
+            "Замена данных",
+            "Это действие ЗАМЕНИТ все импортированные данные синтетическими точками.\n"
+            "Реальные измерения будут утеряны (отмена через Ctrl+Z).\n\nПродолжить?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
+            QMessageBox.StandardButton.Cancel,
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+        self.blueprintRequested.emit(self._current_blueprint)
+        self.statusMessage.emit("Башня сгенерирована из чертежа")
     
     def get_structure_tree(self) -> TowerStructureTreeWidget:
         """Получить дерево структуры башни."""

@@ -15,7 +15,7 @@ class NormativeDocument:
     applies_to: tuple[str, ...] = ()
 
 
-NORMATIVE_REFERENCES: List[NormativeDocument] = [
+NORMATIVE_REFERENCES: list[NormativeDocument] = [
     NormativeDocument(
         "СП 70.13330.2012",
         "Несущие и ограждающие конструкции. Актуализированная редакция СНиП 3.03.01-87",
@@ -139,13 +139,13 @@ NORMATIVE_REFERENCES: List[NormativeDocument] = [
 ]
 
 
-def get_normatives_for_structure(structure_type: str) -> List[NormativeDocument]:
+def get_normatives_for_structure(structure_type: str) -> list[NormativeDocument]:
     """Возвращает нормативные документы, применимые к данному типу опоры."""
     key = str(structure_type or "tower").lower()
     return [doc for doc in NORMATIVE_REFERENCES if not doc.applies_to or key in doc.applies_to]
 
 
-def format_normative_list(docs: List[NormativeDocument]) -> List[str]:
+def format_normative_list(docs: list[NormativeDocument]) -> list[str]:
     """Формирует текстовый перечень нормативных документов."""
     return [f"{doc.code} {doc.title}" for doc in docs]
 
@@ -221,18 +221,35 @@ class NormativeChecker:
                 results["failed"] += 1
         return results
 
-    def check_straightness_deviations(self, deflections: list, section_length: float) -> dict:
-        tolerance = get_straightness_tolerance(section_length)
-        results = {
+    def check_straightness_deviations(
+        self,
+        deflections: list,
+        section_lengths: float | list[float],
+    ) -> dict:
+        """Проверяет отклонения прямолинейности.
+
+        section_lengths может быть скалярным значением (применяется ко всем
+        отклонениям) или списком (по одной длине на каждое отклонение).
+        """
+        if isinstance(section_lengths, (int, float)):
+            lengths = [float(section_lengths)] * len(deflections)
+        else:
+            lengths = list(section_lengths)
+            if len(lengths) < len(deflections):
+                lengths += [lengths[-1] if lengths else 0.0] * (len(deflections) - len(lengths))
+
+        results: dict = {
             "compliant": [],
             "non_compliant": [],
             "total": len(deflections),
             "passed": 0,
             "failed": 0,
-            "tolerance": tolerance,
+            # Для обратной совместимости — допуск первого элемента
+            "tolerance": get_straightness_tolerance(lengths[0]) if lengths else 0.0,
         }
 
-        for i, deflection in enumerate(deflections):
+        for i, (deflection, sec_len) in enumerate(zip(deflections, lengths)):
+            tolerance = get_straightness_tolerance(sec_len)
             is_compliant = abs(deflection) <= tolerance
             result_item = {
                 "index": i,

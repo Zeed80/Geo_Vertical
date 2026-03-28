@@ -11,9 +11,9 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
 from core.sorting_pipeline import (
     SortedTowerResult,
-    _cluster_height_levels,
-    _assign_face_tracks,
     _angular_distance,
+    _assign_face_tracks,
+    _cluster_height_levels,
     sort_imported_tower_points,
 )
 

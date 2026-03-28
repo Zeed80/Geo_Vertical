@@ -3,7 +3,8 @@ from __future__ import annotations
 import copy
 import json
 import math
-from typing import Any, Iterable, Optional
+from collections.abc import Iterable
+from typing import Any, Optional
 
 import numpy as np
 import pandas as pd
@@ -30,14 +31,14 @@ class AngularVerticalityBuilder:
         self.basis_metadata = copy.deepcopy(basis_metadata or {})
 
     @staticmethod
-    def _safe_int(value: Any, default: Optional[int] = None) -> Optional[int]:
+    def _safe_int(value: Any, default: int | None = None) -> int | None:
         try:
             return int(value)
         except (TypeError, ValueError):
             return default
 
     @staticmethod
-    def _make_section_key(section_num: Optional[int], height: Optional[float]) -> str:
+    def _make_section_key(section_num: int | None, height: float | None) -> str:
         try:
             if section_num is not None and not pd.isna(section_num):
                 return f"section:{int(section_num)}"
@@ -228,7 +229,7 @@ class AngularVerticalityBuilder:
         self,
         height: float,
         section_entries: list[dict[str, Any]],
-        tolerance: Optional[float] = None,
+        tolerance: float | None = None,
     ) -> dict[str, Any] | None:
         if not section_entries:
             return None
@@ -608,7 +609,7 @@ class AngularVerticalityBuilder:
         )
 
     @staticmethod
-    def _bearing_seconds_between_points(from_xy: np.ndarray, to_xy: np.ndarray) -> Optional[float]:
+    def _bearing_seconds_between_points(from_xy: np.ndarray, to_xy: np.ndarray) -> float | None:
         vector = np.asarray(to_xy, dtype=float) - np.asarray(from_xy, dtype=float)
         norm = float(np.linalg.norm(vector))
         if norm < 1e-9:
@@ -621,7 +622,7 @@ class AngularVerticalityBuilder:
         station_xy: np.ndarray,
         reference_xy: np.ndarray,
         actual_xy: np.ndarray,
-    ) -> Optional[float]:
+    ) -> float | None:
         reference_vec = np.asarray(reference_xy, dtype=float) - np.asarray(station_xy, dtype=float)
         ref_norm = float(np.linalg.norm(reference_vec))
         if ref_norm < 1e-9:
@@ -822,7 +823,7 @@ class AngularVerticalityBuilder:
         return finalized_rows, axis_sections
 
     @staticmethod
-    def _direction_from_angle_seconds(angle_sec: Optional[float]) -> np.ndarray | None:
+    def _direction_from_angle_seconds(angle_sec: float | None) -> np.ndarray | None:
         if angle_sec is None:
             return None
         angle_rad = math.radians(float(angle_sec) / 3600.0)
@@ -1029,7 +1030,7 @@ class AngularVerticalityBuilder:
     @staticmethod
     def _deterministic_circle_difference_seconds(
         *,
-        section_num: Optional[int],
+        section_num: int | None,
         section_label: str,
         side_label: str,
         height: float,
@@ -1050,7 +1051,7 @@ class AngularVerticalityBuilder:
         return f'{d:03d}° {m:02d}\' {s:05.2f}"'
 
     @classmethod
-    def _format_angle_seconds(cls, angle_sec: Optional[float]) -> str:
+    def _format_angle_seconds(cls, angle_sec: float | None) -> str:
         if angle_sec is None:
             return "—"
         return cls.degrees_to_dms_string((float(angle_sec) / 3600.0) % 360.0)
@@ -1074,9 +1075,9 @@ class AngularVerticalityBuilder:
     def _create_angle_row_from_bearings(
         self,
         section_label: str,
-        section_num: Optional[int],
-        part_num: Optional[int],
-        part_memberships: Optional[Iterable[int]],
+        section_num: int | None,
+        part_num: int | None,
+        part_memberships: Iterable[int] | None,
         height: float,
         side_label: str,
         bearing_deg: float,
@@ -1128,11 +1129,11 @@ class AngularVerticalityBuilder:
         points_df: pd.DataFrame,
         station_coords: tuple[float, float, float],
         section_label: str,
-        section_num: Optional[int],
-        part_num: Optional[int],
-        part_memberships: Optional[Iterable[int]],
-        section_height: Optional[float],
-        belt_sequence: Optional[Iterable[Any]] = None,
+        section_num: int | None,
+        part_num: int | None,
+        part_memberships: Iterable[int] | None,
+        section_height: float | None,
+        belt_sequence: Iterable[Any] | None = None,
     ) -> list[dict[str, Any]]:
         if points_df is None or points_df.empty:
             return []

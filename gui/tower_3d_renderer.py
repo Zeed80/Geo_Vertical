@@ -41,7 +41,7 @@ class Tower3DRenderer:
     def __init__(self, glview: gl.GLViewWidget):
         """
         Инициализация рендерера.
-        
+
         Args:
             glview: Виджет OpenGL для отрисовки
         """
@@ -49,19 +49,36 @@ class Tower3DRenderer:
         self._blueprint: Optional[TowerBlueprintV2] = None
         self._model: Optional[TowerModel] = None
         self._visible = True
-        
+
+        # Смещение в мировых координатах: прибавляется ко всем узлам при рендеринге,
+        # чтобы предпросмотр башни совпадал с облаком измеренных точек.
+        self._world_offset: np.ndarray = np.zeros(3, dtype=float)
+
         # Элементы визуализации
         self._member_items: Dict[int, gl.GLLinePlotItem] = {}
         self._node_items: Dict[int, gl.GLScatterPlotItem] = {}
-        
+
         # Настройки отображения
         self._show_profiles = True  # Учитывать профили при отрисовке
         self._show_nodes = False    # Показывать узлы
     
+    def set_world_offset(self, offset: np.ndarray) -> None:
+        """Установить XYZ-смещение для позиционирования предпросмотра в мировых координатах.
+
+        Вызывать до render_blueprint(), либо повторный вызов render_blueprint() применит
+        актуальное смещение.
+
+        Args:
+            offset: массив [x, y, z] — смещение, прибавляемое ко всем узлам модели.
+        """
+        self._world_offset = np.asarray(offset, dtype=float)
+        if self._model is not None:
+            self._update_visualization()
+
     def render_blueprint(self, blueprint: Optional[TowerBlueprintV2]) -> None:
         """
         Отрисовать чертеж башни.
-        
+
         Args:
             blueprint: Чертеж башни для отрисовки
         """
@@ -191,7 +208,9 @@ class Tower3DRenderer:
             for member_id, start_id, end_id in elements:
                 n1 = self._model.nodes[start_id]
                 n2 = self._model.nodes[end_id]
-                segments.append([n1.coords, n2.coords])
+                c1 = np.asarray(n1.coords, dtype=float) + self._world_offset
+                c2 = np.asarray(n2.coords, dtype=float) + self._world_offset
+                segments.append([c1, c2])
                 member_ids.append(member_id)
             
             # Вычислить толщину линий
@@ -219,11 +238,11 @@ class Tower3DRenderer:
         if self._show_nodes:
             node_positions = []
             node_ids = []
-            
+
             for node_id, node in self._model.nodes.items():
-                node_positions.append(node.coords)
+                node_positions.append(np.asarray(node.coords, dtype=float) + self._world_offset)
                 node_ids.append(node_id)
-            
+
             if node_positions:
                 pos = np.array(node_positions, dtype=float)
                 node_item = gl.GLScatterPlotItem(

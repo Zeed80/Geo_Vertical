@@ -44,9 +44,9 @@ def _serialize_value(value: Any) -> Any:
     if isinstance(value, (np.floating,)):
         v = float(value)
         if math.isnan(v):
-            return None
+            return "__nan__"
         if math.isinf(v):
-            return None
+            return "__inf__" if v > 0 else "__neginf__"
         return v
     if isinstance(value, np.bool_):
         return bool(value)
@@ -61,8 +61,10 @@ def _serialize_value(value: Any) -> Any:
     if isinstance(value, set):
         return [_serialize_value(item) for item in sorted(value)]
     if isinstance(value, float):
-        if math.isnan(value) or math.isinf(value):
-            return None
+        if math.isnan(value):
+            return "__nan__"
+        if math.isinf(value):
+            return "__inf__" if value > 0 else "__neginf__"
     return value
 
 
@@ -96,6 +98,12 @@ def _deserialize_value(value: Any) -> Any:
         return {k: _deserialize_value(v) for k, v in value.items()}
     if isinstance(value, list):
         return [_deserialize_value(item) for item in value]
+    if value == "__nan__":
+        return float('nan')
+    if value == "__inf__":
+        return float('inf')
+    if value == "__neginf__":
+        return float('-inf')
     return value
 
 
@@ -133,6 +141,7 @@ class ProjectManager:
         center_method: str,
         expected_belt_count: int | None,
         tower_faces_count: int | None,
+        structure_type: str = 'tower',
         xy_plane_state: Any | None = None,
         section_data: Any | None = None,
         tower_builder_state: dict[str, Any] | None = None,
@@ -154,6 +163,7 @@ class ProjectManager:
                 'original_data_before_sections': original_data_before_sections,
                 'height_tolerance': height_tolerance,
                 'center_method': center_method,
+                'structure_type': structure_type,
                 'expected_belt_count': expected_belt_count,
                 'tower_faces_count': tower_faces_count,
                 'xy_plane_state': xy_plane_state,
@@ -267,6 +277,7 @@ class ProjectManager:
         center_method: str,
         expected_belt_count: int | None,
         tower_faces_count: int | None,
+        structure_type: str = 'tower',
         xy_plane_state: Any | None = None,
         section_data: Any | None = None,
         tower_builder_state: dict[str, Any] | None = None,
@@ -292,14 +303,15 @@ class ProjectManager:
                 center_method,
                 expected_belt_count,
                 tower_faces_count,
-                xy_plane_state,
-                section_data,
-                tower_builder_state,
-                full_report_state,
-                undo_history,
-                import_context,
-                import_diagnostics,
-                transformation_audit,
+                structure_type=structure_type,
+                xy_plane_state=xy_plane_state,
+                section_data=section_data,
+                tower_builder_state=tower_builder_state,
+                full_report_state=full_report_state,
+                undo_history=undo_history,
+                import_context=import_context,
+                import_diagnostics=import_diagnostics,
+                transformation_audit=transformation_audit,
             )
 
             self._cleanup_old_autosaves()

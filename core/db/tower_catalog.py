@@ -8,7 +8,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import List, Dict, Any
+from typing import Any, Dict, List
 
 
 @dataclass(frozen=True)
@@ -24,11 +24,11 @@ class TowerCatalogEntry:
     year_project: int | None = None
     description: str = ""
     normative_codes: tuple[str, ...] = ()
-    default_loads: Dict[str, float] = field(default_factory=dict)
-    profiles: Dict[str, str] = field(default_factory=dict)
+    default_loads: dict[str, float] = field(default_factory=dict)
+    profiles: dict[str, str] = field(default_factory=dict)
 
 
-TOWER_CATALOG: List[TowerCatalogEntry] = [
+TOWER_CATALOG: list[TowerCatalogEntry] = [
     TowerCatalogEntry(
         code="ПСМО-40",
         name="Призматическая стальная мачта обзорная 40 м",
@@ -199,7 +199,7 @@ TOWER_CATALOG: List[TowerCatalogEntry] = [
 ]
 
 
-def get_tower_catalog() -> List[TowerCatalogEntry]:
+def get_tower_catalog() -> list[TowerCatalogEntry]:
     return list(TOWER_CATALOG)
 
 
@@ -211,6 +211,6 @@ def find_tower_by_code(code: str) -> TowerCatalogEntry | None:
     return None
 
 
-def find_towers_by_type(structure_type: str) -> List[TowerCatalogEntry]:
+def find_towers_by_type(structure_type: str) -> list[TowerCatalogEntry]:
     key = structure_type.lower()
     return [t for t in TOWER_CATALOG if t.structure_type == key]

@@ -64,6 +64,7 @@ class PointEditor3DWidget(QWidget):
     data_changed = pyqtSignal()
     toolbar_position_changed = pyqtSignal(str)
     tower_blueprint_requested = pyqtSignal(object)
+    tower_reference_model_updated = pyqtSignal(object)
     
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -132,7 +133,10 @@ class PointEditor3DWidget(QWidget):
         # Рендерер для визуализации башни из конструктора
         # Будет инициализирован после создания glview в init_ui()
         self._tower_renderer: Optional[Tower3DRenderer] = None
-        
+
+        # Режим отображения: 'both' | 'import_only' | 'blueprint_only'
+        self._display_mode: str = 'both'
+
         # Компоненты для режима unified (будут созданы при необходимости)
         self._unified_structure_tree: Optional[QWidget] = None
         self._unified_properties_panel: Optional[QWidget] = None
@@ -217,6 +221,7 @@ class PointEditor3DWidget(QWidget):
         self.side_tabs.setMinimumWidth(360)
         self.tower_builder_panel = TowerBuilderPanel(self)
         self.tower_builder_panel.blueprintRequested.connect(self._on_tower_blueprint_requested)
+        self.tower_builder_panel.referenceModelUpdated.connect(self._on_reference_model_updated)
         self.tower_builder_panel.statusMessage.connect(self._set_status_message)
         # Подключить сигнал визуализации для отображения башни в основном окне
         self.tower_builder_panel.towerVisualizationRequested.connect(self._on_tower_visualization_requested)
@@ -247,6 +252,25 @@ class PointEditor3DWidget(QWidget):
         self.info_label.setMaximumHeight(20)  # Ограничиваем высоту
         info_layout.addWidget(self.info_label)
         info_layout.addStretch()
+
+        # Селектор режима отображения
+        _display_label = QLabel('Вид:')
+        _display_label.setStyleSheet('font-size: 9pt; padding: 2px;')
+        _display_label.setMaximumHeight(20)
+        info_layout.addWidget(_display_label)
+        self.display_mode_combo = QComboBox()
+        self.display_mode_combo.addItems(['Оба', 'Только из импорта', 'Только из конструктора'])
+        self.display_mode_combo.setFixedHeight(22)
+        self.display_mode_combo.setFixedWidth(170)
+        self.display_mode_combo.setStyleSheet('font-size: 9pt;')
+        self.display_mode_combo.setToolTip(
+            'Оба — показать и точки съёмки, и башню из конструктора\n'
+            'Только из импорта — только измеренные точки\n'
+            'Только из конструктора — только башня из конструктора'
+        )
+        self.display_mode_combo.currentIndexChanged.connect(self._on_display_mode_changed)
+        info_layout.addWidget(self.display_mode_combo)
+
         root_layout.addLayout(info_layout)
     
         # Применяем позицию панели
@@ -1377,15 +1401,31 @@ class PointEditor3DWidget(QWidget):
         if not getattr(self, '_updating_3d_view', False):
             self.update_3d_view()
         self.update_info_label()
-        
+
         # Центрируем камеру только при загрузке данных
         self.reset_camera()
+
+        # Валидация section_data: убираем секции со ссылками на несуществующие пояса
+        if self.section_data and not self.data.empty and 'belt' in self.data.columns:
+            valid_belts = set(pd.to_numeric(self.data['belt'], errors='coerce').dropna().unique())
+            original_count = len(self.section_data)
+            self.section_data = [
+                s for s in self.section_data
+                if not (s.get('belt_nums'))
+                or any(b in valid_belts for b in (s.get('belt_nums') or []))
+            ]
+            removed = original_count - len(self.section_data)
+            if removed > 0:
+                logger.warning(
+                    f"Удалено {removed} секций с устаревшими ссылками на пояса после перезагрузки данных"
+                )
+                self._update_section_toolbar_state()
 
         if preserve_history:
             self.update_undo_redo_buttons()
         else:
             self.clear_history()
-    
+
     def _ensure_point_indices(self, dataframe: Optional[pd.DataFrame] = None):
         """
         Гарантирует наличие уникального столбца point_index для стабильной нумерации точек.
@@ -1429,7 +1469,7 @@ class PointEditor3DWidget(QWidget):
             next_candidate = int(point_idx_series[point_idx_series.notna()].max()) if point_idx_series.notna().any() else 0
             
             # Используем векторные операции где возможно
-            point_idx_array = point_idx_series.values
+            point_idx_array = point_idx_series.values.copy()
             
             for i in range(len(point_idx_array)):
                 value = point_idx_array[i]
@@ -1743,9 +1783,11 @@ class PointEditor3DWidget(QWidget):
                     labels_added += 1
 
             logger.info(f"Добавлено {labels_added} текстовых меток из {len(self.data)} точек")
+            # Применить режим отображения (import/blueprint/both)
+            self._apply_display_mode_visibility()
         finally:
             self._updating_3d_view = False
-    
+
     def update_belt_lines(self):
         """Отрисовка линий поясов - последовательные соединения снизу вверх."""
         if self.data is None or self.data.empty:
@@ -4113,21 +4155,45 @@ class PointEditor3DWidget(QWidget):
         self.update_3d_view()
     
     def reset_camera(self):
-        """Сброс положения камеры"""
-        if self.data is not None and not self.data.empty:
-            positions = self.data[['x', 'y', 'z']].values
-            center = positions.mean(axis=0)
-            
-            # Вычисляем расстояние камеры
-            extent = positions.max(axis=0) - positions.min(axis=0)
-            distance = np.linalg.norm(extent) * 2
-            
-            self.glview.setCameraPosition(
-                distance=distance,
-                elevation=30,
-                azimuth=45
-            )
-            self.glview.opts['center'] = pg.Vector(center[0], center[1], center[2])
+        """Сброс положения камеры по центру башни (с учётом режима отображения)."""
+        mode = getattr(self, '_display_mode', 'both')
+        has_data = self.data is not None and not self.data.empty
+        has_blueprint = (
+            self._tower_renderer is not None
+            and self._tower_renderer._model is not None
+            and bool(self._tower_renderer._model.nodes)
+        )
+
+        # Режим «только из конструктора» или нет данных съёмки — фокус на Blueprint
+        if mode == 'blueprint_only' or (not has_data and has_blueprint):
+            self._focus_camera_on_blueprint()
+            return
+
+        if not has_data:
+            return
+
+        # Исключаем точки стоянок, вспомогательные и контрольные дубли —
+        # фокус должен быть на башне, а не на инструментальных позициях.
+        working = self.data
+        for _col in ('is_station', 'is_auxiliary', 'is_control'):
+            if _col in working.columns:
+                working = working[~working[_col].astype(bool)]
+        if working.empty:
+            working = self.data  # запасной вариант
+
+        positions = working[['x', 'y', 'z']].values
+        center = positions.mean(axis=0)
+
+        # Вычисляем расстояние камеры
+        extent = positions.max(axis=0) - positions.min(axis=0)
+        distance = max(float(np.linalg.norm(extent)) * 2, 10.0)
+
+        self.glview.setCameraPosition(
+            distance=distance,
+            elevation=30,
+            azimuth=45
+        )
+        self.glview.opts['center'] = pg.Vector(center[0], center[1], center[2])
     
     def update_info_label(self):
         """Обновление информационной панели"""
@@ -5403,17 +5469,21 @@ class PointEditor3DWidget(QWidget):
                 self.main_splitter.setCollapsible(1, True)
             self.side_tabs.hide()
 
+    def _on_reference_model_updated(self, blueprint: TowerBlueprintV2) -> None:
+        """
+        Обработка обновления референсной модели из конструктора.
+        Обновляет только вайрфрейм-оверлей, данные съёмки НЕ затрагиваются.
+        """
+        self._tower_blueprint = blueprint
+        # НЕ устанавливаем _blueprint_applied — survey data неприкосновенны
+        self.render_tower_from_blueprint(blueprint)
+        self.tower_reference_model_updated.emit(blueprint)
+
     def _on_tower_blueprint_requested(self, blueprint: TowerBlueprint):
         self._tower_blueprint = blueprint
         self.tower_blueprint_requested.emit(blueprint)
-        
-        # При применении blueprint очищаем предпросмотр
-        # Визуализация будет через set_structural_lines() после применения
-        self._clear_tower_preview()
-        self._blueprint_applied = True
-        
-        # Обновить визуализацию башни в 3D окне (но она не будет отображаться, т.к. blueprint применен)
-        self.render_tower_from_blueprint(blueprint)
+        # Флаг _blueprint_applied выставляется только в TowerBlueprintApplyCommand.execute()
+        # после фактической замены данных — не здесь
     
     def _on_tower_visualization_requested(self, blueprint: Optional[TowerBlueprintV2]) -> None:
         """
@@ -5440,9 +5510,13 @@ class PointEditor3DWidget(QWidget):
 
     def set_tower_builder_blueprint(self, blueprint: Optional[TowerBlueprint]):
         self._tower_blueprint = blueprint
+        # При установке нового blueprint (например, после импорта данных)
+        # сбрасываем флаг, чтобы вайрфрейм рендерился как оверлей поверх точек съёмки
+        if blueprint is not None:
+            self._blueprint_applied = False
         if hasattr(self, 'tower_builder_panel'):
             self.tower_builder_panel.set_blueprint(blueprint)
-        
+
         # Обновить визуализацию башни в 3D окне
         self.render_tower_from_blueprint(blueprint)
     
@@ -5481,6 +5555,22 @@ class PointEditor3DWidget(QWidget):
         
         # Если это уже TowerBlueprintV2, используем напрямую
         if isinstance(blueprint, TowerBlueprintV2):
+            # Позиционируем предпросмотр башни по центру облака измеренных точек.
+            # TowerModelBuilder строит модель в локальных координатах (0,0,Z);
+            # чтобы она совпала с данными, сдвигаем её на среднее XY рабочих точек.
+            world_offset = np.zeros(3, dtype=float)
+            if self.data is not None and not self.data.empty:
+                working = self.data
+                for _col in ('is_station', 'is_auxiliary', 'is_control'):
+                    if _col in working.columns:
+                        working = working[~working[_col].astype(bool)]
+                if not working.empty:
+                    world_offset[0] = float(working['x'].mean())
+                    world_offset[1] = float(working['y'].mean())
+                    # Z: модель строится от 0, данные могут иметь смещение по Z —
+                    # берём минимальный Z рабочих точек как основание башни.
+                    world_offset[2] = float(working['z'].min())
+            self._tower_renderer.set_world_offset(world_offset)
             self._tower_renderer.render_blueprint(blueprint)
             # Включить кнопку, если есть чертеж
             if hasattr(self, 'toggle_tower_visualization_btn'):
@@ -5488,6 +5578,11 @@ class PointEditor3DWidget(QWidget):
                 # Восстановить сохраненное состояние видимости
                 if self.is_tower_visualization_visible():
                     self.toggle_tower_visualization_btn.setChecked(True)
+            # Если нет данных съёмки или режим «только конструктор» — перефокусировать камеру
+            no_survey = self.data is None or self.data.empty
+            blueprint_only = getattr(self, '_display_mode', 'both') == 'blueprint_only'
+            if no_survey or blueprint_only:
+                self._focus_camera_on_blueprint()
         else:
             # Для старого формата TowerBlueprint не отрисовываем
             # (можно добавить конвертацию при необходимости)
@@ -5548,16 +5643,90 @@ class PointEditor3DWidget(QWidget):
     def _is_blueprint_applied(self) -> bool:
         """
         Проверить, применен ли blueprint к точкам.
-        
+
         Returns:
             True если blueprint применен, False если нет
         """
         return self._blueprint_applied
-    
+
     def _clear_tower_preview(self) -> None:
         """Очистить визуализацию предпросмотра башни из конструктора."""
         if self._tower_renderer:
             self._tower_renderer.clear()
+
+    # ------------------------------------------------------------------
+    # Режим отображения (import / blueprint / both)
+    # ------------------------------------------------------------------
+
+    def _on_display_mode_changed(self, index: int) -> None:
+        """Обработка смены режима в комбобоксе отображения."""
+        modes = ['both', 'import_only', 'blueprint_only']
+        self._display_mode = modes[index] if index < len(modes) else 'both'
+        self._apply_display_mode_visibility()
+        # Перефокусировать камеру согласно новому режиму
+        self.reset_camera()
+
+    def _apply_display_mode_visibility(self) -> None:
+        """Применить видимость 3D-объектов согласно текущему режиму отображения."""
+        mode = getattr(self, '_display_mode', 'both')
+        import_visible = mode in ('both', 'import_only')
+        blueprint_visible = mode in ('both', 'blueprint_only')
+
+        # ---- Элементы импорта ----
+        if self.point_scatter is not None:
+            self.point_scatter.setVisible(import_visible)
+        for item in self.point_labels:
+            item.setVisible(import_visible)
+        for item in self.belt_lines:
+            item.setVisible(import_visible)
+        for item in self.section_lines:
+            item.setVisible(import_visible)
+        for item in self.belt_connection_lines:
+            item.setVisible(import_visible)
+        if self.central_axis_line is not None:
+            self.central_axis_line.setVisible(import_visible)
+        for item in self.belt_polylines.values():
+            item.setVisible(import_visible)
+
+        # ---- Башня из конструктора ----
+        if self._tower_renderer:
+            self._tower_renderer.set_visible(blueprint_visible)
+        if hasattr(self, 'structural_items'):
+            for item in self.structural_items:
+                item.setVisible(blueprint_visible)
+
+        # Синхронизация кнопки переключения башни
+        if hasattr(self, 'toggle_tower_visualization_btn'):
+            has_blueprint = (
+                self._tower_renderer is not None
+                and self._tower_renderer._model is not None
+            )
+            if mode == 'import_only':
+                self.toggle_tower_visualization_btn.setEnabled(False)
+                self.toggle_tower_visualization_btn.setChecked(False)
+            else:
+                self.toggle_tower_visualization_btn.setEnabled(has_blueprint)
+                if has_blueprint:
+                    self.toggle_tower_visualization_btn.setChecked(blueprint_visible)
+
+    def _focus_camera_on_blueprint(self) -> None:
+        """Сфокусировать камеру на башне из конструктора."""
+        if (self._tower_renderer is None
+                or self._tower_renderer._model is None
+                or not self._tower_renderer._model.nodes):
+            return
+        coords = np.array(
+            [
+                np.asarray(n.coords, dtype=float) + self._tower_renderer._world_offset
+                for n in self._tower_renderer._model.nodes.values()
+            ],
+            dtype=float,
+        )
+        center = coords.mean(axis=0)
+        extent = coords.max(axis=0) - coords.min(axis=0)
+        distance = max(float(np.linalg.norm(extent)) * 2, 10.0)
+        self.glview.setCameraPosition(distance=distance, elevation=30, azimuth=45)
+        self.glview.opts['center'] = pg.Vector(float(center[0]), float(center[1]), float(center[2]))
     
     def _setup_unified_mode(self) -> None:
         """

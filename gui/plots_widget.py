@@ -69,8 +69,8 @@ class VerticalityPlotWidget(BasePlotWidget):
         tolerances_mm = np.array([get_vertical_tolerance(h) * 1000 for h in heights])
         
         # Определяем цвета точек (зеленый - норма, красный - превышение)
-        colors = ['#2ECC71' if abs(d) <= t else '#E74C3C' 
-                 for d, t in zip(deviations_mm, tolerances_mm)]
+        passed_flags = [abs(d) <= t for d, t in zip(deviations_mm, tolerances_mm)]
+        colors = ['#2ECC71' if p else '#E74C3C' for p in passed_flags]
         
         # Заполненная область допуска (как в примере)
         ax.fill_betweenx(heights, -tolerances_mm, tolerances_mm, 
@@ -105,8 +105,8 @@ class VerticalityPlotWidget(BasePlotWidget):
         ax.set_xlim(-tolerances_mm.max() - x_margin, tolerances_mm.max() + x_margin)
         
         # Статистика
-        passed = sum(1 for c in colors if c == 'green')
-        failed = sum(1 for c in colors if c == 'red')
+        passed = sum(passed_flags)
+        failed = len(passed_flags) - passed
         stats_text = f'✓ В норме: {passed}\n✗ Превышение: {failed}'
         ax.text(0.98, 0.02, stats_text, transform=ax.transAxes,
                verticalalignment='bottom', horizontalalignment='right',
@@ -147,8 +147,8 @@ class StraightnessPlotWidget(BasePlotWidget):
             tolerance = 0
         
         # Определяем цвета
-        colors = ['#2ECC71' if abs(d) <= tolerance else '#E74C3C' 
-                 for d in deviations_mm]
+        passed_flags = [abs(d) <= tolerance for d in deviations_mm]
+        colors = ['#2ECC71' if p else '#E74C3C' for p in passed_flags]
         
         # Заполненная область допуска
         if tolerance > 0:
@@ -185,8 +185,8 @@ class StraightnessPlotWidget(BasePlotWidget):
             ax.set_xlim(-tolerance - x_margin, tolerance + x_margin)
         
         # Статистика
-        passed = sum(1 for c in colors if c == 'green')
-        failed = sum(1 for c in colors if c == 'red')
+        passed = sum(passed_flags)
+        failed = len(passed_flags) - passed
         stats_text = f'✓ В норме: {passed}\n✗ Превышение: {failed}'
         if tolerance > 0:
             stats_text += f'\n\nДопуск: {tolerance:.2f} мм'

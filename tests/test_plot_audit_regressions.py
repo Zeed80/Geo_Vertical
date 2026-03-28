@@ -5,13 +5,12 @@ import warnings
 
 import pandas as pd
 import pytest
-from PyQt6.QtWidgets import QApplication
 from matplotlib.figure import Figure
+from PyQt6.QtWidgets import QApplication
 
 from core.normatives import get_straightness_tolerance, get_vertical_tolerance
 from gui.straightness_widget import StraightnessWidget
 from gui.verticality_widget import VerticalityWidget
-
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 

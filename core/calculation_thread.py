@@ -44,6 +44,7 @@ class CalculationThread(QThread):
         center_method: str,
         use_assigned_belts: bool | None = None,
         section_grouping_mode: str = 'height_levels',
+        structure_type: str = 'tower',
         parent=None
     ):
         """
@@ -56,6 +57,7 @@ class CalculationThread(QThread):
             height_tolerance: Допуск группировки по высоте
             center_method: Метод расчета центра пояса
             use_assigned_belts: Использовать назначенные пояса
+            structure_type: Тип конструкции ('tower', 'mast', 'odn')
             parent: Родительский объект
         """
         super().__init__(parent)
@@ -69,7 +71,7 @@ class CalculationThread(QThread):
         self._cancelled = False
 
         # Создаем сервис расчетов
-        self.calculation_service = CalculationService()
+        self.calculation_service = CalculationService(structure_type=structure_type)
 
     def cancel(self):
         """Отменить расчеты"""

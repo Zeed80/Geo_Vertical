@@ -835,7 +835,7 @@ class ReportDataAssembler:
             )
 
     def _build_normative_list(self) -> list[str]:
-        from core.normatives import get_normatives_for_structure, format_normative_list
+        from core.normatives import format_normative_list, get_normatives_for_structure
         structure_type = str(self.import_context.get("tower_type", "tower")).lower()
         if structure_type not in ("tower", "mast", "odn"):
             structure_type = "tower"

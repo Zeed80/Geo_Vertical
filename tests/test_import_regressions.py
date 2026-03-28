@@ -4,7 +4,7 @@ from pathlib import Path
 import pandas as pd
 import pytest
 from PyQt6.QtCore import Qt
-from PyQt6.QtWidgets import QApplication, QMessageBox, QInputDialog, QWidget
+from PyQt6.QtWidgets import QApplication, QInputDialog, QMessageBox, QWidget
 
 from core.data_loader import load_survey_data
 from core.import_grouping import estimate_composite_split_height, group_points_by_global_angle
@@ -22,8 +22,8 @@ from core.services.project_manager import ProjectManager
 from core.services.report_templates import ReportDataAssembler, ReportTemplateManager, build_report_data_from_template
 from core.tower_generator import create_blueprint_from_imported_data
 from gui.data_import_wizard import DataImportWizard
-from gui.straightness_widget import StraightnessWidget
 from gui.second_station_import_wizard import SecondStationImportWizard
+from gui.straightness_widget import StraightnessWidget
 from tests.test_full_report_pipeline import _sample_report_data
 
 EXAMPLES_DIR = Path(__file__).resolve().parents[1] / "examples"

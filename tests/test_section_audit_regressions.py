@@ -6,8 +6,8 @@ import pytest
 from pandas.testing import assert_frame_equal
 from PyQt6.QtWidgets import QApplication, QMessageBox
 
-from core.section_operations import get_section_lines
 from core.import_models import ImportDiagnostics, LoadedSurveyData
+from core.section_operations import get_section_lines
 from core.services.project_manager import ProjectManager
 from gui import main_window as main_window_module
 
