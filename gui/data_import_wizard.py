@@ -170,6 +170,7 @@ class DataImportWizard(QDialog):
         details = diagnostics.get('details', {}) or {}
         station_blocks = details.get('station_blocks', []) or []
         auxiliary_points = details.get('auxiliary_points', []) or []
+        dedup_stats = details.get('dedup_stats', {}) or {}
 
         candidate_preview = 'нет'
         if standing_candidates:
@@ -189,6 +190,13 @@ class DataImportWizard(QDialog):
             f"Много стояний: {'да' if self.multi_station_detected else 'нет'}",
             f"Автодетект {'зафиксирован' if self.auto_detect_locked else 'может уточняться'}",
         ]
+        if dedup_stats.get('multi_station_dedup_applied'):
+            n_groups = dedup_stats.get('duplicate_groups', 0)
+            n_marked = dedup_stats.get('redundant_points_marked', 0)
+            lines.append(
+                f"Автодедупликация: {n_groups} групп дублей, "
+                f"{n_marked} избыточных измерений → контрольные дубли"
+            )
         if station_blocks:
             station_preview = ", ".join(
                 f"{block.get('station_name', '?')} ({block.get('point_count', 0)} т.)"
@@ -704,9 +712,24 @@ class DataImportWizard(QDialog):
         
         # Если настройки не загружены, инициализация по умолчанию
         if not self.tower_parts:
+            default_faces = int(getattr(self, 'belt_count', None) or 4)
             self.tower_parts = [
-                {"part_number": 1, "shape": "prism", "faces": 4, "split_height": None}
+                {"part_number": 1, "shape": "prism", "faces": default_faces, "split_height": None}
             ]
+
+        # Если только одна часть (нет раздвоения) — автоматически добавляем вторую часть
+        # с автодетектом высоты раздвоения, чтобы не требовать ручного добавления
+        if len(self.tower_parts) == 1:
+            default_faces = int(self.tower_parts[0].get('faces') or getattr(self, 'belt_count', None) or 4)
+            auto_height = self._auto_detect_split_height()
+            self.tower_parts.append({
+                "part_number": 2,
+                "shape": "prism",
+                "faces": default_faces,
+                "split_height": auto_height,
+            })
+            if auto_height is not None:
+                logger.info(f"Автодобавлена вторая часть составной башни с высотой раздвоения: {auto_height:.3f} м")
         
         self._update_composite_settings_ui()
     
@@ -1655,15 +1678,15 @@ class DataImportWizard(QDialog):
     
     def auto_sort_belts(self):
         """Автоматическая сортировка точек по поясам"""
-        from core.belt_operations import auto_assign_belts
-        
+        from core.sorting_pipeline import sort_imported_tower_points
+
         # Очищаем все списки
         for belt_list in self.belt_lists:
             belt_list.clear()
         self.point_assignment_status = {}
         self.multi_station_result = None
         self.multi_station_audit = {}
-        
+
         # Проверяем, есть ли сохраненные настройки сортировки
         if self.saved_settings and 'belt_assignments' in self.saved_settings:
             saved_numbering_version = self.saved_settings.get('belt_numbering_version')
@@ -1674,308 +1697,210 @@ class DataImportWizard(QDialog):
                     BELT_NUMBERING_VERSION,
                 )
             else:
-                # Загружаем сохраненную сортировку
-                logger.info("Загрузка сохраненной сортировки точек по поясам")
-
-                # Получаем индекс точки standing для исключения
-                station_idx = None
-                if hasattr(self, 'station_combo') and self.station_combo.currentIndex() >= 0:
-                    station_idx = self.station_combo.currentData()
-                    logger.info(f"Исключаем точку standing из загруженной сортировки: индекс {station_idx}")
-
-                belt_assignments = self.saved_settings['belt_assignments']
-
-                # ВАЖНО: Берем только точки, которые были выбраны на шаге 1
-                selected_points_df = self.get_selected_points()
-                selected_names = set(selected_points_df['name'].tolist())
-
-                logger.info(f"Выбрано точек на шаге 1: {len(selected_names)}")
-                for point_name in selected_names:
-                    point_row = self.raw_data[self.raw_data['name'] == point_name]
-                    if not point_row.empty:
-                        self._set_point_assignment_status(int(point_row.index[0]), 'загружено из сохраненной сортировки')
-
-                # Используем оригинальные индексы из raw_data, но только для выбранных точек
-                loaded_count = 0
-                skipped_count = 0
-
-                for belt_num, point_names in belt_assignments.items():
-                    belt_idx = int(belt_num) - 1
-                    if belt_idx < 0 or belt_idx >= len(self.belt_lists):
-                        continue
-
-                    for point_name in point_names:
-                        # ПРОВЕРЯЕМ: была ли эта точка выбрана на шаге 1?
-                        if point_name not in selected_names:
-                            skipped_count += 1
-                            logger.debug(f"Пропускаем точку '{point_name}' - не выбрана на шаге 1")
-                            continue
-
-                        # Ищем точку по имени в ОРИГИНАЛЬНЫХ данных (raw_data)
-                        point_row = self.raw_data[self.raw_data['name'] == point_name]
-                        if not point_row.empty:
-                            # Берем ОРИГИНАЛЬНЫЙ индекс из raw_data
-                            original_idx = point_row.index[0]
-
-                            # Пропускаем точку standing
-                            if original_idx == station_idx:
-                                logger.debug(f"Пропускаем точку '{point_name}' - это точка standing")
-                                continue
-
-                            z = point_row['z'].iloc[0]
-
-                            item_text = f"{point_name} (Z = {z:.3f} м)"
-                            item = QListWidgetItem(item_text)
-                            item.setData(Qt.ItemDataRole.UserRole, original_idx)  # Сохраняем оригинальный индекс!
-                            self._style_belt_item(item, int(belt_num))
-                            self._decorate_assignment_item(item, original_idx)
-
-                            self.belt_lists[belt_idx].addItem(item)
-                            loaded_count += 1
-
-                logger.info(f"Сохраненная сортировка загружена: {loaded_count} точек, пропущено {skipped_count}")
-                if loaded_count > 0:
-                    self._refresh_unassigned_points_list()
-                    self._refresh_assignment_summary()
+                if self._try_load_saved_belt_assignments():
                     return
-                logger.warning("Не удалось применить сохраненную сортировку — выполняем автоматическое распределение")
-                # очистим списки перед автосортировкой
-                for belt_list in self.belt_lists:
-                    belt_list.clear()
-        
-        # Если нет сохраненных настроек - выполняем автоматическую сортировку
-        if self.multi_station_detected:
-            self._prepare_multi_station_reference()
-            if hasattr(self, 'multi_station_summary_label') and self.multi_station_summary_label is not None:
-                self.multi_station_summary_label.setText(
-                    "\n".join(self._build_multi_station_summary_lines())
-                    or "Обнаружено несколько блоков стояния. Автораскладка будет выполнена по каждому блоку отдельно."
-                )
-            if self.multi_station_result is not None and not self.multi_station_result.empty:
-                working_result = self.multi_station_result[build_working_tower_mask(self.multi_station_result)].copy()
-                self._populate_belts_from_dataframe(working_result)
-                for _, row in self.multi_station_result[build_flag_mask(self.multi_station_result, 'is_control')].iterrows():
-                    details = f"Контрольный дубль {row.get('survey_station_name') or ''}".strip()
-                    self._set_point_assignment_status(int(row.name), 'контрольный дубль', details)
-                for _, row in self.multi_station_result[build_flag_mask(self.multi_station_result, 'is_auxiliary')].iterrows():
-                    self._set_point_assignment_status(int(row.name), 'вспомогательная точка', 'Точка исключена из поясов')
-                for _, row in self.multi_station_result[build_flag_mask(self.multi_station_result, 'is_station')].iterrows():
-                    role = 'базовая стоянка' if row.get('station_role') == 'primary' else 'дополнительная стоянка'
-                    self._set_point_assignment_status(int(row.name), role, 'Стояние исключено из поясов')
-                self._refresh_unassigned_points_list()
-                self._refresh_assignment_summary()
-                return
 
-        filtered = self._get_assignable_points()
-        
-        if filtered.empty:
+        # Получаем точки для сортировки
+        if self.multi_station_detected:
+            source_data = self._get_multi_station_source_data()
+            if source_data is None or source_data.empty:
+                return
+        else:
+            source_data = self._get_assignable_points()
+
+        if source_data.empty:
             QMessageBox.warning(self, 'Предупреждение', 'Нет выбранных точек для сортировки')
             return
-        
-        # Получаем индекс точки standing для исключения из сортировки
-        # ВАЖНО: точка standing должна быть доступна для выбора, но не попадать в списки поясов
+
+        # Получаем индекс точки standing
         station_idx = None
         if hasattr(self, 'station_combo') and self.station_combo.currentIndex() >= 0:
             station_idx = self.station_combo.currentData()
-            logger.info(f"Исключаем точку standing из автосортировки: индекс {station_idx}")
-        
-        # ВАЖНО: filtered содержит оригинальные индексы из raw_data
-        # Создаем копию и добавляем рабочие колонки
-        points_list = filtered.copy()
-        points_list['assigned'] = False
-        points_list['belt'] = 0
-        points_list['tower_part'] = 1  # По умолчанию все точки в первой части
-        points_list['part_belt'] = 0  # Номер пояса внутри части
-        points_list['faces'] = int(self.belt_count or 4) if self.tower_type != 'composite' else None
-        
-        # Список оригинальных индексов в порядке их следования (исключаем точку standing из сортировки)
-        # Но точка standing должна быть доступна в комбо-боксе для выбора
-        original_indices = [idx for idx in points_list.index.tolist() if idx != station_idx]
-        for original_idx in original_indices:
-            self._set_point_assignment_status(int(original_idx), 'не назначено')
-        
-        indices_preview = f"{original_indices[:10]}..." if len(original_indices) > 10 else f"{original_indices}"
-        logger.info(f"Начинаем автосортировку: всего {len(original_indices)} выбранных точек, "
-                   f"тип башни: {self.tower_type}, оригинальные индексы: {indices_preview}")
-        
-        # Если башня составная - определяем принадлежность точек к частям с учетом разброса
-        # ВАЖНО: Точки на границе частей дублируются и включаются в обе части
-        def resolve_faces_for_part(part_num: int) -> int:
-            if self.tower_type == 'composite' and len(self.tower_parts) >= part_num:
-                return int(self.tower_parts[part_num - 1].get('faces', self.belt_count or 4) or (self.belt_count or 4))
-            return int(self.belt_count or 4)
 
-        point_part_memberships = {}
+        # Определяем split heights для составных башен
+        split_heights = None
         if self.tower_type == 'composite' and len(self.tower_parts) > 1:
-            logger.info(f"Составная башня: {len(self.tower_parts)} частей, разброс = {self.split_height_tolerance:.2f} м")
-            
             split_heights = []
             for part in self.tower_parts[1:]:
                 split_height = part.get('split_height')
                 if split_height is not None:
                     split_heights.append(split_height)
-            
-            for original_idx in original_indices:
-                z = points_list.loc[original_idx, 'z']
-                parts_for_point = self._determine_point_parts(z, split_heights)
-                point_part_memberships[original_idx] = parts_for_point
-                points_list.loc[original_idx, 'tower_part'] = parts_for_point[0]
-                points_list.loc[original_idx, 'faces'] = resolve_faces_for_part(parts_for_point[0])
-            
-            for part_num in range(1, len(self.tower_parts) + 1):
-                count = sum(1 for memberships in point_part_memberships.values() if part_num in memberships)
-                logger.info(f"Распределение по частям: часть {part_num} = {count} точек")
-        else:
-            for original_idx in original_indices:
-                point_part_memberships[original_idx] = [1]
-                points_list.loc[original_idx, 'tower_part'] = 1
-                points_list.loc[original_idx, 'faces'] = resolve_faces_for_part(1)
-        
-        self.point_part_memberships = point_part_memberships
-        
-        # Сортируем точки по частям и высоте
-        if self.tower_type == 'composite' and len(self.tower_parts) > 1:
-            # Составная башня - сортировка по частям
-            # Вычисляем смещения для глобальных номеров поясов
-            belt_offsets = [0]  # Смещение для первой части = 0
-            for part_idx in range(1, len(self.tower_parts)):
-                prev_faces = self.tower_parts[part_idx - 1].get('faces', 4)
-                belt_offsets.append(belt_offsets[-1] + prev_faces)
-            
-            for part_num in range(1, len(self.tower_parts) + 1):
-                part_indices = [
-                    idx for idx in original_indices
-                    if part_num in point_part_memberships.get(idx, [1])
-                ]
-                if not part_indices:
-                    continue
-                part_points = points_list.loc[part_indices].copy()
-                
-                # Определяем количество поясов для этой части
-                part_idx = part_num - 1
-                if part_idx < len(self.tower_parts):
-                    part_faces = self.tower_parts[part_idx].get('faces', self.belt_count)
-                else:
-                    part_faces = self.belt_count
-                
-                logger.info(f"Часть {part_num}: {len(part_points)} точек, поясов = {part_faces}")
-                
-                # Сортируем точки по высоте
-                part_points_sorted = part_points.sort_values('z')
-                part_indices = part_points_sorted.index.tolist()
-                
-                # Группируем точки по поясам (граням) внутри части используя угловое распределение
-                if len(part_indices) > 0:
-                    # Используем угловое распределение для определения поясов
-                    belts = self._group_points_by_belts(points_list, part_indices, part_faces, station_idx)
-                    
-                    # Распределяем точки по поясам
-                    # ВАЖНО: Для составных башен пояса начинаются с 1 для каждой части (part_belt)
-                    for belt_idx, belt_point_indices in enumerate(belts, start=1):
-                        if belt_idx > part_faces:
-                            break
-                        
-                        # part_belt - номер пояса внутри части (начинается с 1)
-                        part_belt_num = belt_idx
-                        # Глобальный номер пояса для отображения в UI (используется только для индексации списков)
-                        global_belt_num = belt_offsets[part_idx] + belt_idx
-                        
-                        for idx in belt_point_indices:
-                            # Обрабатываем виртуальные индексы (дубликаты точек на границе)
-                            if isinstance(idx, str) and '_part' in idx:
-                                # Извлекаем оригинальный индекс из виртуального
-                                original_idx = int(idx.split('_part')[0])
-                                is_duplicate = True
-                            else:
-                                original_idx = idx
-                                is_duplicate = False
-                            
-                            # Пропускаем точку standing
-                            if original_idx == station_idx:
-                                logger.debug(f"Пропускаем точку standing '{points_list.loc[idx, 'name']}' при добавлении в пояс {belt_idx}")
-                                continue
-                            
-                            points_list.loc[idx, 'assigned'] = True
-                            # Сохраняем part_belt как основной номер пояса для составных башен
-                            points_list.loc[idx, 'belt'] = part_belt_num
-                            points_list.loc[idx, 'part_belt'] = part_belt_num
-                            
-                            row = points_list.loc[idx]
-                            name = row.get('name', f'Точка {original_idx+1}')
-                            z = row.get('z', 0)
-                            
-                            # Для дубликатов добавляем пометку
-                            duplicate_mark = " [Дубликат]" if is_duplicate else ""
-                            item_text = f"{name} (Z = {z:.3f} м) [Ч{part_num}, П{part_belt_num}]{duplicate_mark}"
-                            item = QListWidgetItem(item_text)
-                            # Сохраняем оригинальный индекс (не виртуальный) для связи с raw_data
-                            item.setData(Qt.ItemDataRole.UserRole, original_idx)
-                            self._style_belt_item(item, global_belt_num)
-                            status = 'спорная точка' if is_duplicate or len(point_part_memberships.get(original_idx, [part_num])) > 1 else 'автораспределено'
-                            details = f"Часть {part_num}, пояс {part_belt_num}"
-                            self._set_point_assignment_status(original_idx, status, details)
-                            self._decorate_assignment_item(item, original_idx)
-                            
-                            # Добавляем в соответствующий список поясов (используем global_belt_num для индексации)
-                            belt_list_idx = global_belt_num - 1
-                            if 0 <= belt_list_idx < len(self.belt_lists):
-                                self.belt_lists[belt_list_idx].addItem(item)
-                        
-                        logger.info(f"Часть {part_num}, пояс {part_belt_num} (глобальный индекс {global_belt_num}): {len(belt_point_indices)} точек")
-        else:
-            # Обычная башня - используем угловое распределение для группировки по поясам
-            # Группируем точки по поясам (граням) на основе углового распределения
-            # Для обычной башни логика такая же, как для составной - пояса начинаются с 1
-            belts = self._group_points_by_belts(points_list, original_indices, self.belt_count, station_idx)
-            
-            # Распределяем точки по поясам
-            for belt_idx, belt_point_indices in enumerate(belts, start=1):
-                if belt_idx > self.belt_count:
-                    break
-                
-                # Для обычной башни part_belt = belt (пояса начинаются с 1)
-                part_belt_num = belt_idx
-                
-                for original_idx in belt_point_indices:
-                    # Пропускаем точку standing
-                    if original_idx == station_idx:
-                        logger.debug(f"Пропускаем точку standing '{points_list.loc[original_idx, 'name']}' при добавлении в пояс {belt_idx}")
-                        continue
-                    
-                    points_list.loc[original_idx, 'assigned'] = True
-                    points_list.loc[original_idx, 'belt'] = part_belt_num
-                    points_list.loc[original_idx, 'part_belt'] = part_belt_num
-                    
-                    row = points_list.loc[original_idx]
-                    name = row.get('name', f'Точка {original_idx+1}')
-                    z = row.get('z', 0)
-                    
-                    item_text = f"{name} (Z = {z:.3f} м)"
-                    item = QListWidgetItem(item_text)
-                    item.setData(Qt.ItemDataRole.UserRole, original_idx)
-                    self._style_belt_item(item, part_belt_num)
-                    self._set_point_assignment_status(original_idx, 'автораспределено', f"Пояс {part_belt_num}")
-                    self._decorate_assignment_item(item, original_idx)
-                    
-                    self.belt_lists[part_belt_num - 1].addItem(item)
-                
-                logger.info(f"Пояс {part_belt_num}: {len(belt_point_indices)} точек")
-        
-        assigned_count = points_list['assigned'].sum()
-        unassigned_count = len(points_list) - assigned_count
-        
-        # Логируем нераспределенные точки
-        if unassigned_count > 0:
-            unassigned_indices = points_list[~points_list['assigned']].index.tolist()
-            unassigned_names = points_list.loc[unassigned_indices, 'name'].tolist()
-            logger.warning(f"Остались нераспределенные точки ({unassigned_count}): {unassigned_names}")
-            logger.warning(f"Индексы нераспределенных точек: {unassigned_indices}")
-            for unassigned_idx in unassigned_indices:
-                self._set_point_assignment_status(int(unassigned_idx), 'не назначено', 'Точка не была автоматически распределена')
-        
-        logger.info(f"Автосортировка завершена: {assigned_count} точек распределены по поясам")
+
+        # Если составная башня, но высота раздвоения не задана — автодетект
+        if self.tower_type == 'composite' and not split_heights:
+            try:
+                estimated = estimate_composite_split_height(
+                    source_data,
+                    num_belts=int(self.belt_count or 4),
+                    station_idx=station_idx,
+                )
+                if estimated is not None:
+                    split_heights = [float(estimated)]
+                    # Обновить tower_parts чтобы pipeline получил корректные данные
+                    if len(self.tower_parts) < 2:
+                        default_faces = int(self.belt_count or 4)
+                        self.tower_parts.append({
+                            "part_number": 2,
+                            "shape": "prism",
+                            "faces": default_faces,
+                            "split_height": float(estimated),
+                        })
+                    else:
+                        self.tower_parts[1]['split_height'] = float(estimated)
+                    logger.info(f"Автодетект высоты раздвоения составной башни: {estimated:.3f} м")
+            except Exception as exc:
+                logger.warning(f"Автодетект высоты раздвоения не удался: {exc}")
+
+        # Вызываем unified pipeline
+        result = sort_imported_tower_points(
+            data=source_data,
+            expected_faces=int(self.belt_count or 4),
+            station_idx=station_idx,
+            tower_type=self.tower_type or 'simple',
+            tower_parts=self.tower_parts if self.tower_type == 'composite' else None,
+            split_heights=split_heights,
+            split_height_tolerance=getattr(self, 'split_height_tolerance', 0.5),
+            multi_station=self.multi_station_detected,
+            base_station_idx=station_idx if self.multi_station_detected else None,
+        )
+
+        self._sorting_result = result
+        self.import_audit['sorting_audit'] = result.audit
+
+        # Заполняем UI-списки из результата
+        self._populate_belts_from_sorted_result(result, source_data)
         self._refresh_unassigned_points_list()
         self._refresh_assignment_summary()
+
+    def _try_load_saved_belt_assignments(self) -> bool:
+        """Попытка загрузить сохраненную сортировку. Возвращает True при успехе."""
+        logger.info("Загрузка сохраненной сортировки точек по поясам")
+
+        station_idx = None
+        if hasattr(self, 'station_combo') and self.station_combo.currentIndex() >= 0:
+            station_idx = self.station_combo.currentData()
+
+        belt_assignments = self.saved_settings['belt_assignments']
+        selected_points_df = self.get_selected_points()
+        selected_names = set(selected_points_df['name'].tolist())
+
+        loaded_count = 0
+        for belt_num, point_names in belt_assignments.items():
+            belt_idx = int(belt_num) - 1
+            if belt_idx < 0 or belt_idx >= len(self.belt_lists):
+                continue
+            for point_name in point_names:
+                if point_name not in selected_names:
+                    continue
+                point_row = self.raw_data[self.raw_data['name'] == point_name]
+                if point_row.empty:
+                    continue
+                original_idx = point_row.index[0]
+                if original_idx == station_idx:
+                    continue
+                z = point_row['z'].iloc[0]
+                item = QListWidgetItem(f"{point_name} (Z = {z:.3f} м)")
+                item.setData(Qt.ItemDataRole.UserRole, original_idx)
+                self._style_belt_item(item, int(belt_num))
+                self._set_point_assignment_status(original_idx, 'загружено из сохраненной сортировки')
+                self._decorate_assignment_item(item, original_idx)
+                self.belt_lists[belt_idx].addItem(item)
+                loaded_count += 1
+
+        if loaded_count > 0:
+            logger.info(f"Сохраненная сортировка загружена: {loaded_count} точек")
+            self._refresh_unassigned_points_list()
+            self._refresh_assignment_summary()
+            return True
+
+        logger.warning("Не удалось применить сохраненную сортировку — выполняем автоматическое распределение")
+        for belt_list in self.belt_lists:
+            belt_list.clear()
+        return False
+
+    def _get_multi_station_source_data(self) -> Optional[pd.DataFrame]:
+        """Получить данные для multi-station сортировки."""
+        if not hasattr(self, 'station_combo') or self.station_combo.currentIndex() < 0:
+            return None
+        selected_indices = self._get_selected_indices()
+        if selected_indices:
+            return self.raw_data.loc[[idx for idx in selected_indices if idx in self.raw_data.index]].copy()
+        return self.raw_data.copy()
+
+    def _populate_belts_from_sorted_result(self, result, source_data: pd.DataFrame):
+        """Заполнить UI-списки поясов из результата sorting pipeline."""
+        from core.point_utils import build_flag_mask
+
+        sorted_data = result.data
+
+        # Обновить filtered_data для последующего использования в get_result()
+        self.filtered_data = sorted_data.copy()
+
+        # Заполнить списки из face_track (= belt)
+        belt_col = 'face_track' if 'face_track' in sorted_data.columns else 'belt'
+        belt_values = pd.to_numeric(sorted_data[belt_col], errors='coerce')
+
+        for belt_num in sorted(int(v) for v in belt_values.dropna().astype(int).unique() if int(v) > 0):
+            belt_idx = belt_num - 1
+            if belt_idx < 0 or belt_idx >= len(self.belt_lists):
+                continue
+            belt_points = sorted_data[belt_values.eq(belt_num)].sort_values('z')
+            for point_idx, row in belt_points.iterrows():
+                name = row.get('name', f'Точка {point_idx}')
+                z = float(row.get('z', 0.0))
+
+                # Формируем текст для составных башен
+                tower_part = row.get('tower_part', 1)
+                part_face = row.get('part_face_track', belt_num)
+                if self.tower_type == 'composite' and len(getattr(self, 'tower_parts', [])) > 1:
+                    item_text = f"{name} (Z = {z:.3f} м) [Ч{int(tower_part)}, П{int(part_face)}]"
+                else:
+                    item_text = f"{name} (Z = {z:.3f} м)"
+
+                station_name = row.get('survey_station_name')
+                if station_name:
+                    item_text += f" [{station_name}]"
+
+                item = QListWidgetItem(item_text)
+                item.setData(Qt.ItemDataRole.UserRole, int(point_idx))
+                self._style_belt_item(item, belt_num)
+
+                is_boundary = bool(row.get('is_part_boundary', False))
+                status = 'спорная точка' if is_boundary else 'автораспределено'
+                details = f"Пояс {belt_num}"
+                if self.tower_type == 'composite':
+                    details = f"Часть {int(tower_part)}, пояс {int(part_face)}"
+                self._set_point_assignment_status(int(point_idx), status, details)
+                self._decorate_assignment_item(item, int(point_idx))
+                self.belt_lists[belt_idx].addItem(item)
+
+        # Пометить контрольные, вспомогательные и станционные точки
+        if 'is_control' in sorted_data.columns:
+            for _, row in sorted_data[build_flag_mask(sorted_data, 'is_control')].iterrows():
+                details = f"Контрольный дубль {row.get('survey_station_name') or ''}".strip()
+                self._set_point_assignment_status(int(row.name), 'контрольный дубль', details)
+        if 'is_auxiliary' in sorted_data.columns:
+            for _, row in sorted_data[build_flag_mask(sorted_data, 'is_auxiliary')].iterrows():
+                self._set_point_assignment_status(int(row.name), 'вспомогательная точка', 'Точка исключена из поясов')
+        if 'is_station' in sorted_data.columns:
+            for _, row in sorted_data[build_flag_mask(sorted_data, 'is_station')].iterrows():
+                role = row.get('station_role', '')
+                status = 'базовая стоянка' if role == 'primary' else 'стоянка'
+                self._set_point_assignment_status(int(row.name), status, 'Стояние исключено из поясов')
+
+        # Multi-station summary
+        if self.multi_station_detected:
+            self.multi_station_audit = result.audit
+            if hasattr(self, 'multi_station_summary_label') and self.multi_station_summary_label is not None:
+                self.multi_station_summary_label.setText(
+                    "\n".join(self._build_multi_station_summary_lines())
+                    or "Обнаружено несколько блоков стояния."
+                )
+
+        # Логируем результат
+        assigned_count = int((belt_values > 0).sum())
+        total_working = len(sorted_data[sorted_data.get('is_station', False) != True])
+        logger.info(f"Автосортировка завершена: {assigned_count} из {total_working} точек распределены по поясам")
     
     def get_belt_color(self, belt_num: int) -> QColor:
         """Получить цвет пояса"""
@@ -2519,7 +2444,15 @@ class DataImportWizard(QDialog):
             base['faces'] = resolve_faces_for_part(primary_part)
             base['tower_part_memberships'] = json.dumps(memberships, ensure_ascii=False)
             base['part_belt_assignments'] = json.dumps(entry['part_belts'], ensure_ascii=False)
-            
+
+            # Propagate pipeline columns (face_track, height_level, cw_angle_deg)
+            base['face_track'] = base.get('face_track') or base['belt']
+            base['part_face_track'] = base.get('part_face_track') or base['part_belt']
+            if 'height_level' not in base or not base.get('height_level'):
+                base['height_level'] = 0
+            if 'cw_angle_deg' not in base:
+                base['cw_angle_deg'] = None
+
             result_data.append(base)
         
         # Добавляем точку standing в конец (если есть)
@@ -2563,8 +2496,18 @@ class DataImportWizard(QDialog):
                         f"первые 5 результата: {first_5_result}"
                     )
         
-        # Теперь сбрасываем индексы для создания последовательной нумерации
-        # Это нужно для совместимости с остальным кодом
+        # Сортируем по поясу (face_track) и высоте, чтобы таблица показывала Пояс 1 первым.
+        # Точка стояния (belt=None) окажется в конце (na_position='last').
+        try:
+            sort_col = 'face_track' if 'face_track' in self.filtered_data.columns else 'belt'
+            self.filtered_data['_sk'] = pd.to_numeric(self.filtered_data[sort_col], errors='coerce')
+            self.filtered_data = self.filtered_data.sort_values(
+                by=['_sk', 'z'], ascending=[True, True], na_position='last'
+            ).drop(columns=['_sk'])
+        except Exception:
+            pass
+
+        # Сбрасываем индексы для создания последовательной нумерации
         self.filtered_data = self.filtered_data.reset_index(drop=True)
         
         belt_distribution = self.filtered_data['belt'].value_counts(dropna=True).sort_index()

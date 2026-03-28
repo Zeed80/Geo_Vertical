@@ -85,6 +85,7 @@ class DataTableWidget(QWidget):
     """Виджет для отображения и редактирования данных точек в трех таблицах"""
     
     data_changed = pyqtSignal()
+    data_mutated = pyqtSignal(object, object, str)
     row_selected = pyqtSignal(int)  # Глобальный индекс выбранной строки
     active_station_changed = pyqtSignal(object)
     
@@ -102,6 +103,28 @@ class DataTableWidget(QWidget):
         self._angular_verticality_payload: Optional[Dict[str, Any]] = None
         self._secondary_station_prompted = False
         self.init_ui()
+
+    @staticmethod
+    def _clone_dataframe(data: Optional[pd.DataFrame]) -> pd.DataFrame:
+        return data.copy(deep=True) if isinstance(data, pd.DataFrame) else pd.DataFrame()
+
+    @classmethod
+    def _dataframes_equal(cls, left: Optional[pd.DataFrame], right: Optional[pd.DataFrame]) -> bool:
+        if isinstance(left, pd.DataFrame) and isinstance(right, pd.DataFrame):
+            return left.equals(right)
+        if left is None and right is None:
+            return True
+        return cls._clone_dataframe(left).equals(cls._clone_dataframe(right))
+
+    def _capture_original_data_snapshot(self) -> pd.DataFrame:
+        return self._clone_dataframe(self.original_data)
+
+    def _emit_data_mutation(self, old_data: Optional[pd.DataFrame], description: str) -> None:
+        new_data = self._clone_dataframe(self.original_data)
+        old_snapshot = self._clone_dataframe(old_data)
+        if self._dataframes_equal(old_snapshot, new_data):
+            return
+        self.data_mutated.emit(old_snapshot, new_data, description)
 
     def _invalidate_angular_verticality_cache(self):
         """Сбрасывает кэш payload журнала и вертикальности."""
@@ -814,9 +837,10 @@ class DataTableWidget(QWidget):
             return pd.DataFrame(columns=tower_df.columns if tower_df is not None else None)
         tmp = tower_df.copy()
         try:
-            tmp['belt_num'] = pd.to_numeric(tmp['belt'], errors='coerce')
-            tmp = tmp.sort_values(by=['belt_num', 'z'], ascending=[True, True], na_position='last')
-            tmp = tmp.drop(columns=['belt_num'])
+            sort_col = 'face_track' if 'face_track' in tmp.columns else 'belt'
+            tmp['_sort_key'] = pd.to_numeric(tmp[sort_col], errors='coerce')
+            tmp = tmp.sort_values(by=['_sort_key', 'z'], ascending=[True, True], na_position='last')
+            tmp = tmp.drop(columns=['_sort_key'])
         except Exception:
             tmp = tower_df.copy()
         return tmp
@@ -894,6 +918,7 @@ class DataTableWidget(QWidget):
         if self.original_data is None or self.original_data.empty:
             QMessageBox.warning(self, 'Нет данных', 'Сначала загрузите или создайте точки стояния.')
             return False
+        previous_data = self._capture_original_data_snapshot()
 
         base_station_id = self.primary_station_id
         if base_station_id is None and not self._current_station_data.empty:
@@ -996,6 +1021,7 @@ class DataTableWidget(QWidget):
         self.set_data(updated_data)
         self.secondary_station_id = new_index
         self._update_station_ids()
+        self._emit_data_mutation(previous_data, 'Добавление точки стояния')
         self.data_changed.emit()
         QMessageBox.information(self, 'Точка добавлена', 'Новая точка стояния успешно создана.')
         return True
@@ -2728,6 +2754,7 @@ class DataTableWidget(QWidget):
                 'Чтобы добавлять или редактировать точки, отключите режим угловых измерений.'
             )
             return
+        previous_data = self._capture_original_data_snapshot()
         row = table.rowCount()
         table.insertRow(row)
         
@@ -2755,6 +2782,8 @@ class DataTableWidget(QWidget):
         # Обновляем таблицы и внутренние данные
         new_data = self.get_data()
         self.set_data(new_data)
+        description = 'Добавление точки башни' if table == self.tower_table else 'Добавление точки стояния'
+        self._emit_data_mutation(previous_data, description)
         
         self.data_changed.emit()
     
@@ -2767,6 +2796,7 @@ class DataTableWidget(QWidget):
                 'Удаление точек недоступно в режиме угловых измерений.'
             )
             return
+        previous_data = self._capture_original_data_snapshot()
         selected_rows = set()
         for item in table.selectedItems():
             selected_rows.add(item.row())
@@ -2782,11 +2812,18 @@ class DataTableWidget(QWidget):
         # Обновляем таблицы и внутренние данные
         new_data = self.get_data()
         self.set_data(new_data)
+        row_count = len(selected_rows)
+        if table == self.tower_table:
+            description = f'Удаление точек башни ({row_count})'
+        else:
+            description = f'Удаление точек стояния ({row_count})'
+        self._emit_data_mutation(previous_data, description)
         
         self.data_changed.emit()
     
     def on_station_item_changed(self, item):
         """Обработчик изменения ячейки в таблице точек стояния"""
+        previous_data = self._capture_original_data_snapshot()
         self._invalidate_angular_verticality_cache()
         idx_item = self.station_table.item(item.row(), 0)
         global_idx = None
@@ -2837,10 +2874,12 @@ class DataTableWidget(QWidget):
                 self._current_station_data.at[global_idx, 'name'] = name_value
             self.update_station_combos(self._current_station_data)
         
+        self._emit_data_mutation(previous_data, 'Редактирование точки стояния')
         self.data_changed.emit()
     
     def on_tower_item_changed(self, item):
         """Обработчик изменения ячейки в таблице точек башни"""
+        previous_data = self._capture_original_data_snapshot()
         self._invalidate_angular_verticality_cache()
         table = item.tableWidget() if hasattr(item, 'tableWidget') else None
         if table is None:
@@ -3095,11 +3134,13 @@ class DataTableWidget(QWidget):
             
             # После изменения пояса данные уже обновлены, но _rebuild_cached_tower_data уже вызван выше
             # Вызываем data_changed только один раз
+            self._emit_data_mutation(previous_data, 'Редактирование пояса точки башни')
             self.data_changed.emit()
             return  # Выходим, чтобы не вызывать _rebuild_cached_tower_data и data_changed еще раз
         
         self._rebuild_cached_tower_data()
         
+        self._emit_data_mutation(previous_data, 'Редактирование точки башни')
         self.data_changed.emit()
         
     def clear(self):

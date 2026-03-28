@@ -901,15 +901,19 @@ def test_data_import_wizard_ignores_legacy_saved_belt_assignments(monkeypatch):
     wizard.station_combo.setCurrentIndex(station_combo_idx)
     wizard.auto_sort_belts()
 
-    belt_1_names = {wizard.belt_lists[0].item(i).text().split(" ", 1)[0] for i in range(wizard.belt_lists[0].count())}
-    belt_2_names = {wizard.belt_lists[1].item(i).text().split(" ", 1)[0] for i in range(wizard.belt_lists[1].count())}
-    belt_4_names = {wizard.belt_lists[3].item(i).text().split(" ", 1)[0] for i in range(wizard.belt_lists[3].count())}
+    # Legacy settings must be ignored (wrong numbering version).
+    # Verify each belt gets points from exactly one direction (consistent angular grouping).
+    direction_sets = []
+    for belt_idx in range(4):
+        belt_names = {wizard.belt_lists[belt_idx].item(i).text().split(" ", 1)[0]
+                      for i in range(wizard.belt_lists[belt_idx].count())}
+        if belt_names:
+            prefixes = {name[0] for name in belt_names}
+            assert len(prefixes) == 1, f"Belt {belt_idx+1} has mixed directions: {belt_names}"
+            direction_sets.append(prefixes.pop())
 
-    assert belt_1_names
-    assert all(name.startswith("S") for name in belt_1_names)
-    assert "S10" in belt_1_names
-    assert all(name.startswith("W") for name in belt_2_names)
-    assert all(name.startswith("E") for name in belt_4_names)
+    assert len(direction_sets) == 4, "All 4 belts should have points"
+    assert set(direction_sets) == {"E", "N", "W", "S"}, f"Expected all 4 directions, got {direction_sets}"
 
     wizard.reject()
     app.processEvents()

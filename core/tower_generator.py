@@ -1518,15 +1518,25 @@ def _resolve_faces_from_imported_data(
     if explicit_faces is not None:
         return explicit_faces
 
-    if belt_column in data.columns:
-        belt_values = pd.to_numeric(data[belt_column], errors='coerce').dropna()
-        belt_values = belt_values[belt_values > 0]
-        if not belt_values.empty:
-            unique_belts = sorted({int(value) for value in belt_values})
-            if unique_belts:
-                return max(3, max(len(unique_belts), max(unique_belts)))
+    for col in ('face_track', 'part_face_track', belt_column):
+        if col in data.columns:
+            values = pd.to_numeric(data[col], errors='coerce').dropna()
+            values = values[values > 0]
+            if not values.empty:
+                unique_vals = sorted({int(v) for v in values})
+                if unique_vals:
+                    return max(3, max(len(unique_vals), max(unique_vals)))
 
     return 4
+
+
+def _count_levels_from_data(part_data: pd.DataFrame) -> int:
+    """Определяет количество уровней из колонки height_level или по данным."""
+    if 'height_level' in part_data.columns:
+        hl = pd.to_numeric(part_data['height_level'], errors='coerce').dropna()
+        if not hl.empty:
+            return max(1, int(hl.nunique()))
+    return 1
 
 
 def create_blueprint_from_imported_data(
@@ -1639,7 +1649,7 @@ def create_blueprint_from_imported_data(
                     shape=shape,
                     faces=faces,
                     height=max(height, 1.0),
-                    levels=1,
+                    levels=_count_levels_from_data(part_data),
                     base_size=max(base_size, 0.5),
                     top_size=max(top_size, 0.1) if shape == 'truncated_pyramid' else max(base_size, 0.5),
                 )
@@ -1685,7 +1695,7 @@ def create_blueprint_from_imported_data(
                     shape=shape,
                     faces=faces,
                     height=max(height, 1.0),
-                    levels=1,
+                    levels=_count_levels_from_data(part_data),
                     base_size=max(base_size, 0.5),
                     top_size=max(base_size, 0.5),
                 )
@@ -1708,7 +1718,7 @@ def create_blueprint_from_imported_data(
                 shape="prism",
                 faces=faces,
                 height=max(height, 1.0),
-                levels=1,
+                levels=_count_levels_from_data(tower_data),
                 base_size=max(base_size, 0.5),
                 top_size=max(base_size, 0.5),
             )

@@ -214,6 +214,14 @@ class UndoManager:
                     # Для DataChangeCommand сохраняем данные
                     cmd_dict['old_data'] = cmd.old_data
                     cmd_dict['new_data'] = cmd.new_data
+                elif isinstance(cmd, EditorStateCommand):
+                    cmd_dict['old_state'] = cmd.old_state
+                    cmd_dict['new_state'] = cmd.new_state
+                    cmd_dict['skip_initial_execute'] = cmd._skip_initial_execute
+                elif isinstance(cmd, MainWindowStateCommand):
+                    cmd_dict['old_state'] = cmd.old_state
+                    cmd_dict['new_state'] = cmd.new_state
+                    cmd_dict['skip_initial_execute'] = cmd._skip_initial_execute
                 elif isinstance(cmd, RowAddCommand):
                     # Для RowAddCommand сохраняем данные строки
                     cmd_dict['row_data'] = cmd.row_data
@@ -347,6 +355,38 @@ class UndoManager:
                     logger.warning("DataChangeCommand не может быть восстановлена при загрузке проекта")
                     return None
 
+                elif cmd_type == 'EditorStateCommand':
+                    if main_window_ref is None:
+                        logger.warning("Не удалось восстановить EditorStateCommand: нет ссылки на main_window")
+                        return None
+
+                    cmd = EditorStateCommand.__new__(EditorStateCommand)
+                    cmd.main_window = main_window_ref
+                    cmd.old_state = cmd_dict.get('old_state') or {}
+                    cmd.new_state = cmd_dict.get('new_state') or {}
+                    if hasattr(main_window_ref, '_normalize_editor_undo_state'):
+                        cmd.old_state = main_window_ref._normalize_editor_undo_state(cmd.old_state)
+                        cmd.new_state = main_window_ref._normalize_editor_undo_state(cmd.new_state)
+                    cmd.description = cmd_dict.get('description', 'Изменение в 3D-редакторе')
+                    cmd._skip_initial_execute = bool(cmd_dict.get('skip_initial_execute', False))
+                    return cmd
+
+                elif cmd_type == 'MainWindowStateCommand':
+                    if main_window_ref is None:
+                        logger.warning("Не удалось восстановить MainWindowStateCommand: нет ссылки на main_window")
+                        return None
+
+                    cmd = MainWindowStateCommand.__new__(MainWindowStateCommand)
+                    cmd.main_window = main_window_ref
+                    cmd.old_state = cmd_dict.get('old_state') or {}
+                    cmd.new_state = cmd_dict.get('new_state') or {}
+                    if hasattr(main_window_ref, '_compose_main_window_undo_state'):
+                        cmd.old_state = main_window_ref._compose_main_window_undo_state(cmd.old_state)
+                        cmd.new_state = main_window_ref._compose_main_window_undo_state(cmd.new_state)
+                    cmd.description = cmd_dict.get('description', 'Изменение состояния проекта')
+                    cmd._skip_initial_execute = bool(cmd_dict.get('skip_initial_execute', False))
+                    return cmd
+
                 elif cmd_type == 'RowAddCommand':
                     # Аналогично для RowAddCommand
                     logger.warning("RowAddCommand не может быть восстановлена при загрузке проекта")
@@ -442,6 +482,92 @@ class DataChangeCommand(Command):
 
     def get_description(self) -> str:
         """Возвращает описание команды"""
+        return self.description
+
+
+class EditorStateCommand(Command):
+    """Команда для полного undo/redo состояния 3D-редактора."""
+
+    def __init__(
+        self,
+        main_window,
+        old_state: dict[str, Any],
+        new_state: dict[str, Any],
+        description: str = "Изменение в 3D-редакторе",
+        skip_initial_execute: bool = False,
+    ):
+        self.main_window = main_window
+        self.old_state = copy.deepcopy(old_state) if old_state is not None else {}
+        self.new_state = copy.deepcopy(new_state) if new_state is not None else {}
+        self.description = description
+        self._skip_initial_execute = bool(skip_initial_execute)
+
+    def execute(self) -> bool:
+        """Применяет новое состояние или пропускает первичное выполнение."""
+        try:
+            if self._skip_initial_execute:
+                self._skip_initial_execute = False
+                return True
+            self.main_window._apply_editor_undo_state(copy.deepcopy(self.new_state))
+            return True
+        except Exception as e:
+            logger.error(f"Ошибка при применении EditorStateCommand: {e}", exc_info=True)
+            return False
+
+    def undo(self) -> bool:
+        """Восстанавливает предыдущее состояние редактора."""
+        try:
+            self.main_window._apply_editor_undo_state(copy.deepcopy(self.old_state))
+            return True
+        except Exception as e:
+            logger.error(f"Ошибка при undo EditorStateCommand: {e}", exc_info=True)
+            return False
+
+    def get_description(self) -> str:
+        """Возвращает описание команды."""
+        return self.description
+
+
+class MainWindowStateCommand(Command):
+    """Команда для serializable состояния главного окна и секционной подсистемы."""
+
+    def __init__(
+        self,
+        main_window,
+        old_state: dict[str, Any],
+        new_state: dict[str, Any],
+        description: str = "Изменение состояния проекта",
+        skip_initial_execute: bool = False,
+    ):
+        self.main_window = main_window
+        self.old_state = copy.deepcopy(old_state) if old_state is not None else {}
+        self.new_state = copy.deepcopy(new_state) if new_state is not None else {}
+        self.description = description
+        self._skip_initial_execute = bool(skip_initial_execute)
+
+    def execute(self) -> bool:
+        """Применяет новое состояние проекта."""
+        try:
+            if self._skip_initial_execute:
+                self._skip_initial_execute = False
+                return True
+            self.main_window._apply_main_window_undo_state(copy.deepcopy(self.new_state))
+            return True
+        except Exception as e:
+            logger.error(f"Ошибка при применении MainWindowStateCommand: {e}", exc_info=True)
+            return False
+
+    def undo(self) -> bool:
+        """Восстанавливает предыдущее состояние проекта."""
+        try:
+            self.main_window._apply_main_window_undo_state(copy.deepcopy(self.old_state))
+            return True
+        except Exception as e:
+            logger.error(f"Ошибка при undo MainWindowStateCommand: {e}", exc_info=True)
+            return False
+
+    def get_description(self) -> str:
+        """Возвращает описание команды."""
         return self.description
 
 

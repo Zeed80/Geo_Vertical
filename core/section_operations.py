@@ -13,11 +13,15 @@ from core.point_utils import (
     build_is_station_mask as _build_is_station_mask,
     build_working_tower_mask as _build_working_tower_mask,
 )
+from core.section_state import SECTION_BUILD_HEIGHT_TOLERANCE
 
 logger = logging.getLogger(__name__)
 
 
-def find_section_levels(data: pd.DataFrame, height_tolerance: float = 0.3) -> list[float]:
+def _legacy_find_section_levels(
+    data: pd.DataFrame,
+    height_tolerance: float = SECTION_BUILD_HEIGHT_TOLERANCE,
+) -> list[float]:
     """
     Находит уровни секций по высотам точек на всех поясах
 
@@ -68,8 +72,11 @@ def find_section_levels(data: pd.DataFrame, height_tolerance: float = 0.3) -> li
     return section_levels
 
 
-def add_missing_points_for_sections(data: pd.DataFrame, section_levels: list[float],
-                                    height_tolerance: float = 0.3) -> pd.DataFrame:
+def _legacy_add_missing_points_for_sections(
+    data: pd.DataFrame,
+    section_levels: list[float],
+    height_tolerance: float = SECTION_BUILD_HEIGHT_TOLERANCE,
+) -> pd.DataFrame:
     """
     Добавляет недостающие точки на поясах для всех секций
 
@@ -202,8 +209,11 @@ def add_missing_points_for_sections(data: pd.DataFrame, section_levels: list[flo
     return result_data
 
 
-def get_section_lines(data: pd.DataFrame, section_levels: list[float],
-                      height_tolerance: float = 0.3) -> list[dict]:
+def _legacy_get_section_lines(
+    data: pd.DataFrame,
+    section_levels: list[float],
+    height_tolerance: float = SECTION_BUILD_HEIGHT_TOLERANCE,
+) -> list[dict]:
     """
     Получить линии секций для визуализации
 
@@ -450,57 +460,141 @@ def _iter_section_groups(data: pd.DataFrame) -> list[tuple[int | None, pd.DataFr
     return groups or [(None, data.copy())]
 
 
-def _build_section_entries(data: pd.DataFrame, base_tolerance: float = 0.3) -> list[dict]:
+def _build_section_entries(
+    data: pd.DataFrame,
+    base_tolerance: float = SECTION_BUILD_HEIGHT_TOLERANCE,
+) -> list[dict]:
+    """Build section entries by grouping points at each height level.
+
+    Uses ``height_level`` column when available (from sorting pipeline),
+    otherwise falls back to rank-based iteration over belt tracks.
+
+    Improvements over previous implementation:
+    - Groups by height_level instead of rank — handles unequal point counts per belt
+    - Tolerance formula: ``max(base, spread * 1.5)`` (not ``0.35 + spread/2``)
+    - Merge uses ``min(tol_a, tol_b)`` to prevent transitivity issues
+    - Recalculates tolerance after each merge
+    """
     working = _section_working_data(data)
-    if working.empty or 'belt' not in working.columns or 'z' not in working.columns:
+    if working.empty or 'z' not in working.columns:
+        return []
+
+    # Determine belt column: prefer face_track, fall back to belt
+    belt_col = 'belt'
+    if 'face_track' in working.columns:
+        ft_vals = pd.to_numeric(working['face_track'], errors='coerce').dropna()
+        if not ft_vals.empty and ft_vals.max() > 0:
+            belt_col = 'face_track'
+
+    if belt_col not in working.columns:
         return []
 
     entries: list[dict] = []
     for part_num, group in _iter_section_groups(working):
-        numeric_belts = pd.to_numeric(group['belt'], errors='coerce')
-        group = group.loc[numeric_belts.notna()].copy()
+        numeric_belts = pd.to_numeric(group[belt_col], errors='coerce')
+        group = group.loc[numeric_belts.notna() & (numeric_belts > 0)].copy()
         if group.empty:
             continue
-        group['belt'] = numeric_belts.loc[group.index].astype(int)
+        group[belt_col] = numeric_belts.loc[group.index].astype(int)
 
-        belts = sorted(int(value) for value in group['belt'].unique())
-        tracks = {
-            belt: group[group['belt'] == belt].sort_values('z')
-            for belt in belts
-        }
-        max_len = max((len(track) for track in tracks.values()), default=0)
-
-        for rank in range(max_len):
-            rows: dict[Any, pd.Series] = {}
-            heights: list[float] = []
-            belt_nums: set[int] = set()
-
-            for belt_num, track in tracks.items():
-                if rank >= len(track):
-                    continue
-                row = track.iloc[rank]
-                rows[row.name] = row
-                heights.append(float(row['z']))
-                belt_nums.add(int(belt_num))
-
-            if not rows:
+        # --- height_level-based grouping (preferred) ---
+        if 'height_level' in group.columns:
+            hl_vals = pd.to_numeric(group['height_level'], errors='coerce')
+            valid_hl = hl_vals.notna() & (hl_vals > 0)
+            if valid_hl.any():
+                entries.extend(
+                    _entries_from_height_levels(group.loc[valid_hl], belt_col, part_num, base_tolerance)
+                )
                 continue
 
-            spread = (max(heights) - min(heights)) if len(heights) > 1 else 0.0
-            entries.append(
-                {
-                    'height': float(np.mean(heights)),
-                    'tolerance': max(base_tolerance, 0.35 + spread / 2.0),
-                    'parts': {int(part_num)} if part_num is not None else set(),
-                    'rows': rows,
-                    'belt_nums': belt_nums,
-                }
-            )
+        # --- fallback: rank-based iteration (legacy behaviour) ---
+        entries.extend(
+            _entries_from_rank_iteration(group, belt_col, part_num, base_tolerance)
+        )
 
     if not entries:
         return []
 
-    entries.sort(key=lambda entry: entry['height'])
+    # Sort by height and merge nearby entries
+    entries.sort(key=lambda e: e['height'])
+    merged = _merge_section_entries(entries, base_tolerance)
+
+    for entry in merged:
+        entry['parts'] = sorted(int(v) for v in entry['parts'])
+        entry['belt_nums'] = sorted(int(v) for v in entry['belt_nums'])
+
+    return merged
+
+
+def _entries_from_height_levels(
+    group: pd.DataFrame,
+    belt_col: str,
+    part_num: int | None,
+    base_tolerance: float,
+) -> list[dict]:
+    """Build section entries using height_level column."""
+    hl_series = pd.to_numeric(group['height_level'], errors='coerce').astype(int)
+    entries: list[dict] = []
+    for level in sorted(hl_series.unique()):
+        level_points = group[hl_series == level]
+        rows = {idx: level_points.loc[idx] for idx in level_points.index}
+        heights = [float(r['z']) for r in rows.values()]
+        belt_nums = {int(r[belt_col]) for r in rows.values()}
+        spread = (max(heights) - min(heights)) if len(heights) > 1 else 0.0
+        entries.append({
+            'height': float(np.mean(heights)),
+            'tolerance': max(base_tolerance, spread * 1.5),
+            'parts': {int(part_num)} if part_num is not None else set(),
+            'rows': rows,
+            'belt_nums': belt_nums,
+        })
+    return entries
+
+
+def _entries_from_rank_iteration(
+    group: pd.DataFrame,
+    belt_col: str,
+    part_num: int | None,
+    base_tolerance: float,
+) -> list[dict]:
+    """Legacy fallback: build entries by iterating ranks across belt tracks."""
+    from typing import Any
+
+    belts = sorted(int(v) for v in group[belt_col].unique())
+    tracks = {belt: group[group[belt_col] == belt].sort_values('z') for belt in belts}
+    max_len = max((len(t) for t in tracks.values()), default=0)
+    entries: list[dict] = []
+
+    for rank in range(max_len):
+        rows: dict[Any, pd.Series] = {}
+        heights: list[float] = []
+        belt_nums: set[int] = set()
+        for belt_num, track in tracks.items():
+            if rank >= len(track):
+                continue
+            row = track.iloc[rank]
+            rows[row.name] = row
+            heights.append(float(row['z']))
+            belt_nums.add(int(belt_num))
+        if not rows:
+            continue
+        spread = (max(heights) - min(heights)) if len(heights) > 1 else 0.0
+        entries.append({
+            'height': float(np.mean(heights)),
+            'tolerance': max(base_tolerance, 0.35 + spread / 2.0),
+            'parts': {int(part_num)} if part_num is not None else set(),
+            'rows': rows,
+            'belt_nums': belt_nums,
+        })
+    return entries
+
+
+def _merge_section_entries(entries: list[dict], base_tolerance: float) -> list[dict]:
+    """Merge entries that are within tolerance of each other.
+
+    Uses ``max(tol_a, tol_b)`` for merge decision.
+    Recalculates tolerance after each merge based on actual spread.
+    """
     merged: list[dict] = []
     for entry in entries:
         if not merged:
@@ -513,16 +607,16 @@ def _build_section_entries(data: pd.DataFrame, base_tolerance: float = 0.3) -> l
             merged.append(entry)
             continue
 
+        # Merge into current
         current['rows'].update(entry['rows'])
         current['parts'].update(entry['parts'])
         current['belt_nums'].update(entry['belt_nums'])
-        current['tolerance'] = max(float(current['tolerance']), float(entry['tolerance']))
+
+        # Recalculate height and tolerance from merged data
         merged_heights = [float(row['z']) for row in current['rows'].values()]
         current['height'] = float(np.mean(merged_heights))
-
-    for entry in merged:
-        entry['parts'] = sorted(int(value) for value in entry['parts'])
-        entry['belt_nums'] = sorted(int(value) for value in entry['belt_nums'])
+        spread = (max(merged_heights) - min(merged_heights)) if len(merged_heights) > 1 else 0.0
+        current['tolerance'] = max(base_tolerance, spread * 1.5)
 
     return merged
 
@@ -531,7 +625,7 @@ def _resolve_requested_section_entries(
     data: pd.DataFrame,
     section_levels: list[float],
     *,
-    base_tolerance: float = 0.3,
+    base_tolerance: float = SECTION_BUILD_HEIGHT_TOLERANCE,
 ) -> list[dict]:
     derived_entries = _build_section_entries(data, base_tolerance=base_tolerance)
     if not section_levels:
@@ -579,7 +673,10 @@ def _resolve_requested_section_entries(
     return matched_entries
 
 
-def find_section_levels(data: pd.DataFrame, height_tolerance: float = 0.3) -> list[float]:
+def find_section_levels(
+    data: pd.DataFrame,
+    height_tolerance: float = SECTION_BUILD_HEIGHT_TOLERANCE,
+) -> list[float]:
     """Find section levels using vertical belt tracks instead of raw z clustering."""
     entries = _build_section_entries(data, base_tolerance=height_tolerance)
     levels = [float(entry['height']) for entry in entries]
@@ -619,8 +716,11 @@ def find_section_levels(data: pd.DataFrame, height_tolerance: float = 0.3) -> li
     return section_levels
 
 
-def add_missing_points_for_sections(data: pd.DataFrame, section_levels: list[float],
-                                    height_tolerance: float = 0.3) -> pd.DataFrame:
+def add_missing_points_for_sections(
+    data: pd.DataFrame,
+    section_levels: list[float],
+    height_tolerance: float = SECTION_BUILD_HEIGHT_TOLERANCE,
+) -> pd.DataFrame:
     """Add missing section points using belt tracks and tower-part aware interpolation."""
     if data.empty or not section_levels:
         return data.copy()
@@ -723,8 +823,11 @@ def add_missing_points_for_sections(data: pd.DataFrame, section_levels: list[flo
     return result_data
 
 
-def get_section_lines(data: pd.DataFrame, section_levels: list[float],
-                      height_tolerance: float = 0.3) -> list[dict]:
+def get_section_lines(
+    data: pd.DataFrame,
+    section_levels: list[float],
+    height_tolerance: float = SECTION_BUILD_HEIGHT_TOLERANCE,
+) -> list[dict]:
     """Build section lines from belt tracks with composite-tower awareness."""
     if data.empty or not section_levels:
         return []

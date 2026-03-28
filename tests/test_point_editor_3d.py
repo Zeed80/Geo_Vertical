@@ -110,6 +110,10 @@ class _EditorAddSectionStub:
         self._get_next_point_index = MethodType(PointEditor3DWidget._get_next_point_index, self)
         self._build_is_station_mask = PointEditor3DWidget._build_is_station_mask
         self._validate_new_section_height = PointEditor3DWidget._validate_new_section_height
+        self._current_section_heights = MethodType(PointEditor3DWidget._current_section_heights, self)
+        self._resolve_section_levels = MethodType(PointEditor3DWidget._resolve_section_levels, self)
+        self._rebuild_section_data = MethodType(PointEditor3DWidget._rebuild_section_data, self)
+        self._refresh_after_section_mutation = MethodType(PointEditor3DWidget._refresh_after_section_mutation, self)
 
     @contextmanager
     def undo_transaction(self, _description):
@@ -123,6 +127,9 @@ class _EditorAddSectionStub:
 
     def update_3d_view(self):
         return None
+
+    def set_section_lines(self, section_data):
+        self.section_data = [dict(section) for section in section_data]
 
     def update_section_lines(self):
         return None
@@ -174,6 +181,202 @@ def test_add_section_rebuilds_section_data_and_preserves_point_schema():
     assert not new_rows['is_control'].any()
     assert any(abs(section['height'] - 20.0) < 1e-6 and len(section['points']) == 4 for section in editor.section_data)
     assert editor.data_changed.calls == 1
+
+
+class _EditorDeleteSectionStub:
+    def __init__(self, data: pd.DataFrame, section_data: list[dict]):
+        self.data = data.copy(deep=True)
+        self.section_data = [dict(section) for section in section_data]
+        self.index_manager = _IndexManagerStub()
+        self.info_label = _LabelStub()
+        self.data_changed = _SignalStub()
+        self.show_central_axis = False
+        self.section_deletion_mode = True
+        self._current_section_heights = MethodType(PointEditor3DWidget._current_section_heights, self)
+        self._resolve_section_levels = MethodType(PointEditor3DWidget._resolve_section_levels, self)
+        self._rebuild_section_data = MethodType(PointEditor3DWidget._rebuild_section_data, self)
+
+    @contextmanager
+    def undo_transaction(self, _description):
+        class _Tx:
+            committed = False
+
+            def commit(self_inner):
+                self_inner.committed = True
+
+        yield _Tx()
+
+    def set_section_lines(self, section_data):
+        self.section_data = [dict(section) for section in section_data]
+
+    def update_3d_view(self):
+        return None
+
+    def update_all_indices(self):
+        return None
+
+    def update_section_lines(self):
+        return None
+
+    def update_central_axis(self):
+        return None
+
+
+def test_delete_section_removes_only_generated_points():
+    rows = []
+    point_index = 1
+    for z in (0.0, 10.0):
+        for belt, (x, y) in enumerate(((0.0, 0.0), (2.0, 0.0), (2.0, 2.0), (0.0, 2.0)), start=1):
+            rows.append(
+                {
+                    'name': f'P{point_index}',
+                    'x': x,
+                    'y': y,
+                    'z': z,
+                    'belt': belt,
+                    'point_index': point_index,
+                    'is_station': False,
+                    'is_section_generated': False,
+                }
+            )
+            point_index += 1
+
+    for belt, (x, y) in enumerate(((0.0, 0.0), (2.0, 0.0), (2.0, 2.0), (0.0, 2.0)), start=1):
+        rows.append(
+            {
+                'name': f'S5_B{belt}',
+                'x': x + 0.5,
+                'y': y + 0.5,
+                'z': 5.0,
+                'belt': belt,
+                'point_index': point_index,
+                'is_station': False,
+                'is_section_generated': True,
+            }
+        )
+        point_index += 1
+
+    data = pd.DataFrame(rows)
+    section_data = get_section_lines(data, [0.0, 5.0, 10.0], height_tolerance=0.3)
+    editor = _EditorDeleteSectionStub(data, section_data)
+
+    PointEditor3DWidget.delete_section(editor, 5.0)
+
+    assert editor.section_deletion_mode is False
+    assert editor.data_changed.calls == 1
+    assert len(editor.data) == 8
+    assert not editor.data['is_section_generated'].fillna(False).any()
+    assert [round(section['height'], 3) for section in editor.section_data] == [0.0, 10.0]
+
+
+class _EditorProjectSectionStub:
+    def __init__(self, data: pd.DataFrame, section_data: list[dict]):
+        self.data = data.copy(deep=True)
+        self.section_data = [dict(section) for section in section_data]
+        self.index_manager = _IndexManagerStub()
+        self.info_label = _LabelStub()
+        self.data_changed = _SignalStub()
+        self.point_modified = _SignalStub()
+        self.show_central_axis = False
+        self.pending_point_idx = 0
+        self.section_selection_mode = True
+        self._build_is_station_mask = PointEditor3DWidget._build_is_station_mask
+        self._legacy_project_point_to_section_level = MethodType(
+            PointEditor3DWidget._legacy_project_point_to_section_level,
+            self,
+        )
+        self._current_section_heights = MethodType(PointEditor3DWidget._current_section_heights, self)
+        self._resolve_section_levels = MethodType(PointEditor3DWidget._resolve_section_levels, self)
+        self._rebuild_section_data = MethodType(PointEditor3DWidget._rebuild_section_data, self)
+
+    @contextmanager
+    def undo_transaction(self, _description):
+        class _Tx:
+            committed = False
+
+            def commit(self_inner):
+                self_inner.committed = True
+
+        yield _Tx()
+
+    def set_section_lines(self, section_data):
+        self.section_data = [dict(section) for section in section_data]
+
+    def update_3d_view(self):
+        return None
+
+    def update_all_indices(self):
+        return None
+
+    def update_section_lines(self):
+        return None
+
+    def update_central_axis(self):
+        return None
+
+
+def test_project_point_to_section_level_does_not_restore_removed_empty_section():
+    rows = [
+        {
+            'name': 'P1',
+            'x': 0.0,
+            'y': 0.0,
+            'z': 5.0,
+            'belt': 1,
+            'point_index': 1,
+            'is_station': False,
+            'is_section_generated': False,
+        },
+        {
+            'name': 'P2',
+            'x': 0.0,
+            'y': 0.0,
+            'z': 10.0,
+            'belt': 1,
+            'point_index': 2,
+            'is_station': False,
+            'is_section_generated': False,
+        },
+    ]
+    for point_index, belt in enumerate((2, 3, 4), start=3):
+        rows.append(
+            {
+                'name': f'P{point_index}',
+                'x': float(belt),
+                'y': 0.0,
+                'z': 10.0,
+                'belt': belt,
+                'point_index': point_index,
+                'is_station': False,
+                'is_section_generated': False,
+            }
+        )
+    for point_index, belt in enumerate((2, 3, 4), start=6):
+        rows.append(
+            {
+                'name': f'S5_B{belt}',
+                'x': float(belt) + 0.5,
+                'y': 0.5,
+                'z': 5.0,
+                'belt': belt,
+                'point_index': point_index,
+                'is_station': False,
+                'is_section_generated': True,
+            }
+        )
+
+    data = pd.DataFrame(rows)
+    section_data = get_section_lines(data, [5.0, 10.0], height_tolerance=0.3)
+    editor = _EditorProjectSectionStub(data, section_data)
+
+    PointEditor3DWidget.project_point_to_section_level(editor, 10.0)
+
+    assert editor.section_selection_mode is False
+    assert editor.pending_point_idx is None
+    assert editor.point_modified.calls == 1
+    assert editor.data_changed.calls >= 1
+    assert (editor.data['z'] == 5.0).sum() == 0
+    assert [round(section['height'], 3) for section in editor.section_data] == [10.0]
 
 
 class _DataTableEditorStub:

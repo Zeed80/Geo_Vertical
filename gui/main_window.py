@@ -35,6 +35,11 @@ from core.belt_operations import estimate_belt_count_from_heights, auto_assign_b
 from core.planar_orientation import BELT_NUMBERING_VERSION
 from core.point_utils import build_working_tower_mask
 from core.section_operations import find_section_levels, add_missing_points_for_sections, get_section_lines
+from core.section_state import (
+    SECTION_BUILD_HEIGHT_TOLERANCE,
+    build_section_generated_mask,
+    deduplicate_section_heights,
+)
 from utils.coordinate_systems import CoordinateSystemManager, get_common_epsg_list
 from core.services import ProjectManager, CalculationService
 from core.tower_generator import TowerBlueprint, generate_tower_data
@@ -68,6 +73,8 @@ from core.exceptions import (
 )
 
 logger = logging.getLogger(__name__)
+
+_UNDO_STATE_UNSET = object()
 
 
 class MainWindow(QMainWindow):
@@ -124,6 +131,7 @@ class MainWindow(QMainWindow):
         self.autosave_path = None  # Путь для автосохранения
         self._suspend_data_sync = False  # Флаг предотвращения рекурсии при синхронизации данных
         
+        self._skip_next_table_data_changed = False
         self.init_ui()
         self.load_theme_settings()
         self.load_window_geometry()  # Загружаем сохраненные настройки окна
@@ -155,6 +163,46 @@ class MainWindow(QMainWindow):
     def _clone_dataframe(dataframe: Optional[pd.DataFrame]) -> Optional[pd.DataFrame]:
         return dataframe.copy(deep=True) if isinstance(dataframe, pd.DataFrame) else None
 
+    def _derive_original_data_before_sections(
+        self,
+        data: Optional[pd.DataFrame],
+        section_data=None,
+    ) -> Optional[pd.DataFrame]:
+        if data is None or not isinstance(data, pd.DataFrame) or data.empty:
+            return None
+
+        section_generated_mask = build_section_generated_mask(data)
+        has_active_sections = bool(section_data) or bool(section_generated_mask.any())
+        if not has_active_sections:
+            return None
+
+        return data.loc[~section_generated_mask].copy(deep=True).reset_index(drop=True)
+
+    def _normalize_editor_undo_state(self, state: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+        normalized_state = copy.deepcopy(state or {})
+        data_snapshot = normalized_state.get('data')
+        if not isinstance(data_snapshot, pd.DataFrame):
+            data_snapshot = self._clone_dataframe(self.raw_data)
+        if not isinstance(data_snapshot, pd.DataFrame):
+            data_snapshot = pd.DataFrame()
+        else:
+            data_snapshot = data_snapshot.copy(deep=True)
+
+        section_data = self._clone_section_data(normalized_state.get('section_data'))
+        normalized_state['data'] = data_snapshot
+        normalized_state['section_data'] = section_data
+        normalized_state['xy_plane_state'] = copy.deepcopy(normalized_state.get('xy_plane_state'))
+        normalized_state['show_central_axis'] = bool(normalized_state.get('show_central_axis', False))
+        normalized_state['point_index_counter'] = normalized_state.get(
+            'point_index_counter',
+            getattr(self.editor_3d, 'point_index_counter', 0) if self.editor_3d is not None else 0,
+        )
+        normalized_state['original_data_before_sections'] = self._derive_original_data_before_sections(
+            data_snapshot,
+            section_data,
+        )
+        return normalized_state
+
     def _set_editor_section_data(self, section_data) -> None:
         if self.editor_3d is None:
             return
@@ -162,6 +210,608 @@ class MainWindow(QMainWindow):
             self.editor_3d.set_section_lines(self._clone_section_data(section_data))
         else:
             self.editor_3d.section_data = self._clone_section_data(section_data)
+
+    def _capture_editor_undo_state(self) -> Dict[str, Any]:
+        if self.editor_3d is not None and hasattr(self.editor_3d, 'capture_state'):
+            state = copy.deepcopy(self.editor_3d.capture_state() or {})
+        else:
+            state = {}
+        return self._normalize_editor_undo_state(state)
+
+    def _capture_main_window_undo_state(self) -> Dict[str, Any]:
+        state = {
+            'raw_data': self._clone_dataframe(self.raw_data),
+            'processed_data': copy.deepcopy(self.processed_data),
+            'epsg_code': self.epsg_code,
+            'import_context': copy.deepcopy(self.import_context),
+            'import_diagnostics': copy.deepcopy(self.import_diagnostics),
+            'transformation_audit': copy.deepcopy(self.transformation_audit),
+            'current_file_path': self.current_file_path,
+            'original_data_before_sections': self._clone_dataframe(self.original_data_before_sections),
+            'height_tolerance': self.height_tolerance,
+            'center_method': self.center_method,
+            'expected_belt_count': self.expected_belt_count,
+            'tower_faces_count': self.tower_faces_count,
+            'tower_blueprint_state': self._tower_blueprint.to_dict() if self._tower_blueprint else None,
+            'editor_state': self._capture_editor_undo_state(),
+        }
+        return self._compose_main_window_undo_state(state)
+
+    def _compose_main_window_undo_state(
+        self,
+        base_state: Optional[Dict[str, Any]] = None,
+        *,
+        raw_data: Any = _UNDO_STATE_UNSET,
+        processed_data: Any = _UNDO_STATE_UNSET,
+        epsg_code: Any = _UNDO_STATE_UNSET,
+        import_context: Any = _UNDO_STATE_UNSET,
+        import_diagnostics: Any = _UNDO_STATE_UNSET,
+        transformation_audit: Any = _UNDO_STATE_UNSET,
+        current_file_path: Any = _UNDO_STATE_UNSET,
+        original_data_before_sections: Any = _UNDO_STATE_UNSET,
+        height_tolerance: Any = _UNDO_STATE_UNSET,
+        center_method: Any = _UNDO_STATE_UNSET,
+        expected_belt_count: Any = _UNDO_STATE_UNSET,
+        tower_faces_count: Any = _UNDO_STATE_UNSET,
+        tower_blueprint_state: Any = _UNDO_STATE_UNSET,
+        section_data: Any = _UNDO_STATE_UNSET,
+        xy_plane_state: Any = _UNDO_STATE_UNSET,
+        show_central_axis: Any = _UNDO_STATE_UNSET,
+    ) -> Dict[str, Any]:
+        state = copy.deepcopy(base_state or {})
+        editor_state = copy.deepcopy(state.get('editor_state') or {})
+
+        if raw_data is not _UNDO_STATE_UNSET:
+            raw_snapshot = self._clone_dataframe(raw_data)
+            state['raw_data'] = raw_snapshot if raw_snapshot is not None else pd.DataFrame()
+            editor_state['data'] = (
+                self._clone_dataframe(raw_snapshot) if raw_snapshot is not None else pd.DataFrame()
+            )
+        else:
+            raw_snapshot = state.get('raw_data')
+            if isinstance(raw_snapshot, pd.DataFrame):
+                state['raw_data'] = raw_snapshot.copy(deep=True)
+            else:
+                state['raw_data'] = pd.DataFrame()
+            if 'data' not in editor_state:
+                editor_state['data'] = state['raw_data'].copy(deep=True)
+            elif isinstance(editor_state.get('data'), pd.DataFrame):
+                editor_state['data'] = editor_state['data'].copy(deep=True)
+            else:
+                editor_state['data'] = state['raw_data'].copy(deep=True)
+
+        if processed_data is not _UNDO_STATE_UNSET:
+            state['processed_data'] = copy.deepcopy(processed_data)
+        else:
+            state['processed_data'] = copy.deepcopy(state.get('processed_data'))
+
+        if epsg_code is not _UNDO_STATE_UNSET:
+            state['epsg_code'] = epsg_code
+        if import_context is not _UNDO_STATE_UNSET:
+            state['import_context'] = copy.deepcopy(import_context)
+        else:
+            state['import_context'] = copy.deepcopy(state.get('import_context'))
+        if import_diagnostics is not _UNDO_STATE_UNSET:
+            state['import_diagnostics'] = copy.deepcopy(import_diagnostics)
+        else:
+            state['import_diagnostics'] = copy.deepcopy(state.get('import_diagnostics'))
+        if transformation_audit is not _UNDO_STATE_UNSET:
+            state['transformation_audit'] = copy.deepcopy(transformation_audit)
+        else:
+            state['transformation_audit'] = copy.deepcopy(state.get('transformation_audit'))
+        if current_file_path is not _UNDO_STATE_UNSET:
+            state['current_file_path'] = current_file_path
+        if height_tolerance is not _UNDO_STATE_UNSET:
+            state['height_tolerance'] = height_tolerance
+        if center_method is not _UNDO_STATE_UNSET:
+            state['center_method'] = center_method
+        if expected_belt_count is not _UNDO_STATE_UNSET:
+            state['expected_belt_count'] = expected_belt_count
+        if tower_faces_count is not _UNDO_STATE_UNSET:
+            state['tower_faces_count'] = tower_faces_count
+        if tower_blueprint_state is not _UNDO_STATE_UNSET:
+            state['tower_blueprint_state'] = copy.deepcopy(tower_blueprint_state)
+        else:
+            state['tower_blueprint_state'] = copy.deepcopy(state.get('tower_blueprint_state'))
+
+        if section_data is not _UNDO_STATE_UNSET:
+            editor_state['section_data'] = self._clone_section_data(section_data)
+        else:
+            editor_state['section_data'] = self._clone_section_data(editor_state.get('section_data'))
+        if xy_plane_state is not _UNDO_STATE_UNSET:
+            editor_state['xy_plane_state'] = copy.deepcopy(xy_plane_state)
+        else:
+            editor_state['xy_plane_state'] = copy.deepcopy(editor_state.get('xy_plane_state'))
+        if show_central_axis is not _UNDO_STATE_UNSET:
+            editor_state['show_central_axis'] = bool(show_central_axis)
+        else:
+            editor_state['show_central_axis'] = bool(editor_state.get('show_central_axis', False))
+        editor_state['point_index_counter'] = editor_state.get(
+            'point_index_counter',
+            getattr(self.editor_3d, 'point_index_counter', 0) if self.editor_3d is not None else 0,
+        )
+        if original_data_before_sections is not _UNDO_STATE_UNSET:
+            state['original_data_before_sections'] = self._clone_dataframe(original_data_before_sections)
+        else:
+            state['original_data_before_sections'] = self._derive_original_data_before_sections(
+                state.get('raw_data'),
+                editor_state.get('section_data'),
+            )
+        state['editor_state'] = editor_state
+        return state
+
+    def _execute_main_window_state_command(
+        self,
+        *,
+        description: str,
+        old_state: Dict[str, Any],
+        new_state: Dict[str, Any],
+    ) -> bool:
+        from core.undo_manager import MainWindowStateCommand
+
+        command = MainWindowStateCommand(self, old_state, new_state, description=description)
+        success = self.undo_manager.execute_command(command)
+        self._update_undo_redo_actions()
+        return success
+
+    def _apply_editor_undo_state(self, state: Dict[str, Any]) -> None:
+        normalized_state = self._normalize_editor_undo_state(state)
+        data_snapshot = normalized_state['data']
+        editor_state = {
+            'data': data_snapshot,
+            'section_data': self._clone_section_data(normalized_state.get('section_data')),
+            'show_central_axis': bool(normalized_state.get('show_central_axis', False)),
+            'point_index_counter': normalized_state.get('point_index_counter'),
+            'xy_plane_state': copy.deepcopy(normalized_state.get('xy_plane_state')),
+        }
+
+        if self.editor_3d is not None and hasattr(self.editor_3d, 'restore_state'):
+            with self._suspend_data_change_handlers():
+                self.editor_3d.restore_state(editor_state)
+                restored_data = self.editor_3d.get_data() if hasattr(self.editor_3d, 'get_data') else data_snapshot
+                self.raw_data = (
+                    restored_data.copy(deep=True)
+                    if isinstance(restored_data, pd.DataFrame)
+                    else pd.DataFrame()
+                )
+                if hasattr(self, 'data_table'):
+                    self.data_table.set_data(self.raw_data)
+        else:
+            self.raw_data = data_snapshot.copy(deep=True)
+
+        self.original_data_before_sections = self._clone_dataframe(normalized_state.get('original_data_before_sections'))
+        self.processed_data = None
+        if hasattr(self, 'data_table') and hasattr(self.data_table, 'set_processed_results'):
+            self.data_table.set_processed_results(None)
+        self.update_analysis_widgets()
+        self.update_export_actions_state()
+        self._update_undo_redo_actions()
+
+    def _apply_main_window_undo_state(self, state: Dict[str, Any]) -> None:
+        normalized_state = self._compose_main_window_undo_state(state)
+        blueprint_state = normalized_state.get('tower_blueprint_state')
+        if blueprint_state:
+            try:
+                self._tower_blueprint = TowerBlueprint.from_dict(blueprint_state)
+            except Exception:
+                self._tower_blueprint = None
+        else:
+            self._tower_blueprint = None
+
+        self.processed_data = copy.deepcopy(normalized_state.get('processed_data'))
+        self.epsg_code = normalized_state.get('epsg_code')
+        self.import_context = copy.deepcopy(normalized_state.get('import_context'))
+        self.import_diagnostics = copy.deepcopy(normalized_state.get('import_diagnostics'))
+        self.transformation_audit = copy.deepcopy(normalized_state.get('transformation_audit'))
+        self.current_file_path = normalized_state.get('current_file_path')
+        self.original_data_before_sections = self._clone_dataframe(
+            normalized_state.get('original_data_before_sections')
+        )
+        self.height_tolerance = normalized_state.get('height_tolerance', self.height_tolerance)
+        self.center_method = normalized_state.get('center_method', self.center_method)
+        self.expected_belt_count = normalized_state.get('expected_belt_count')
+        self.tower_faces_count = normalized_state.get('tower_faces_count')
+
+        if hasattr(self, 'epsg_combo'):
+            self.epsg_combo.blockSignals(True)
+            try:
+                target_index = -1
+                if self.epsg_code is not None:
+                    for idx in range(self.epsg_combo.count()):
+                        if self.epsg_combo.itemData(idx) == self.epsg_code:
+                            target_index = idx
+                            break
+                if target_index >= 0:
+                    self.epsg_combo.setCurrentIndex(target_index)
+            finally:
+                self.epsg_combo.blockSignals(False)
+
+        self.project_manager.current_file_path = self.current_file_path
+        self.project_manager.import_context = self.import_context
+        self.project_manager.import_diagnostics = self.import_diagnostics
+        self.project_manager.transformation_audit = self.transformation_audit
+        self.project_manager.tower_builder_state = blueprint_state
+
+        raw_data = normalized_state.get('raw_data')
+        raw_snapshot = raw_data.copy(deep=True) if isinstance(raw_data, pd.DataFrame) else pd.DataFrame()
+        editor_state = copy.deepcopy(normalized_state.get('editor_state') or {})
+        editor_state['data'] = raw_snapshot.copy(deep=True)
+
+        with self._suspend_data_change_handlers():
+            if self.editor_3d is not None and hasattr(self.editor_3d, 'restore_state'):
+                self.editor_3d.restore_state(editor_state)
+                restored_data = self.editor_3d.get_data() if hasattr(self.editor_3d, 'get_data') else raw_snapshot
+                self.raw_data = (
+                    restored_data.copy(deep=True)
+                    if isinstance(restored_data, pd.DataFrame)
+                    else pd.DataFrame()
+                )
+            else:
+                self.raw_data = raw_snapshot.copy(deep=True)
+                if self.editor_3d is not None and hasattr(self.editor_3d, 'set_data'):
+                    self.editor_3d.set_data(self.raw_data, preserve_history=True)
+                if self.editor_3d is not None:
+                    self._set_editor_section_data(editor_state.get('section_data'))
+            if hasattr(self, 'data_table'):
+                self.data_table.set_data(self.raw_data)
+
+        if self.belt_count_spin is not None:
+            if self.raw_data is not None and not self.raw_data.empty and 'belt' in self.raw_data.columns:
+                belt_series = self.raw_data['belt'].dropna()
+                belt_count = int(belt_series.nunique()) if not belt_series.empty else None
+            else:
+                belt_count = None
+            if belt_count is None:
+                belt_count = (
+                    int(self.expected_belt_count)
+                    if self.expected_belt_count is not None
+                    else int(self.belt_count_spin.value())
+                )
+            self.belt_count_spin.blockSignals(True)
+            self.belt_count_spin.setValue(belt_count)
+            self.belt_count_spin.blockSignals(False)
+
+        if hasattr(self.editor_3d, 'set_tower_builder_blueprint'):
+            self.editor_3d.set_tower_builder_blueprint(self._tower_blueprint)
+
+        self.save_project_btn.setEnabled(self.raw_data is not None and not self.raw_data.empty)
+        self._apply_processed_results_to_widgets()
+        self.update_export_actions_state()
+
+        if self.full_report_tab is not None:
+            self.full_report_tab.set_source_data(
+                self.raw_data,
+                self.processed_data,
+                self.import_context,
+                self.import_diagnostics,
+                project_path=self.project_manager.current_project_path,
+                tower_blueprint=self._tower_blueprint,
+            )
+
+        if (
+            self.raw_data is not None
+            and not self.raw_data.empty
+            and hasattr(self.editor_3d, 'update_central_axis')
+            and getattr(self.editor_3d, 'show_central_axis', False)
+        ):
+            self.editor_3d.update_central_axis()
+
+        self._update_undo_redo_actions()
+
+    @staticmethod
+    def _history_command_restores_full_window_state(command: Any) -> bool:
+        return getattr(command, '__class__', None).__name__ in {
+            'EditorStateCommand',
+            'MainWindowStateCommand',
+        }
+
+    def _sync_widgets_after_history_navigation(self) -> None:
+        if self.raw_data is not None:
+            self.data_table.set_data(self.raw_data)
+            if hasattr(self.editor_3d, 'set_data'):
+                self.editor_3d.set_data(self.raw_data, preserve_history=True)
+            if hasattr(self.editor_3d, 'section_data') and self.editor_3d.section_data:
+                if hasattr(self.editor_3d, 'set_section_lines'):
+                    self.editor_3d.set_section_lines(self.editor_3d.section_data)
+            self.update_export_actions_state()
+            if hasattr(self, 'verticality_widget'):
+                self.verticality_widget.set_data(self.raw_data, self.processed_data)
+            if hasattr(self, 'straightness_widget'):
+                self.straightness_widget.set_data(self.raw_data, self.processed_data)
+        else:
+            self.data_table.set_data(pd.DataFrame())
+            if hasattr(self.editor_3d, 'set_data'):
+                self.editor_3d.set_data(pd.DataFrame(), preserve_history=True)
+            if hasattr(self.editor_3d, 'set_section_lines'):
+                self.editor_3d.set_section_lines([])
+            if hasattr(self, 'verticality_widget'):
+                self.verticality_widget.set_data(None, None)
+            if hasattr(self, 'straightness_widget'):
+                self.straightness_widget.set_data(None, None)
+
+    @staticmethod
+    def _extract_section_heights(section_data) -> list[float]:
+        heights: list[float] = []
+        for section in section_data or []:
+            try:
+                heights.append(float(section.get('height')))
+            except (AttributeError, TypeError, ValueError):
+                continue
+        return deduplicate_section_heights(
+            heights,
+            tolerance=SECTION_BUILD_HEIGHT_TOLERANCE,
+        )
+
+    def _resolve_section_levels_for_data(self, data: Optional[pd.DataFrame], section_data=None) -> list[float]:
+        if data is None or data.empty:
+            return []
+
+        preferred_levels = self._extract_section_heights(section_data)
+        detected_levels = deduplicate_section_heights(
+            find_section_levels(data, height_tolerance=SECTION_BUILD_HEIGHT_TOLERANCE),
+            tolerance=SECTION_BUILD_HEIGHT_TOLERANCE,
+        )
+
+        if preferred_levels and detected_levels and len(preferred_levels) == len(detected_levels):
+            return detected_levels
+        if preferred_levels:
+            return preferred_levels
+        return detected_levels
+
+    def _rebuild_section_data_from_data(self, data: Optional[pd.DataFrame], section_data=None):
+        if data is None or data.empty:
+            return []
+
+        section_levels = self._resolve_section_levels_for_data(data, section_data)
+        if not section_levels:
+            return []
+
+        return get_section_lines(
+            data,
+            section_levels,
+            height_tolerance=SECTION_BUILD_HEIGHT_TOLERANCE,
+        )
+
+    def _collect_section_data_for_persistence(self):
+        if self.raw_data is None or self.raw_data.empty or self.editor_3d is None:
+            return []
+        current_sections = getattr(self.editor_3d, 'section_data', []) or []
+        if not current_sections:
+            return []
+        return self._rebuild_section_data_from_data(self.raw_data, current_sections)
+
+    def _restore_section_state_from_project(self, project_data: Dict[str, Any]) -> None:
+        serialized_sections = project_data.get('section_data') or []
+        if not serialized_sections:
+            self._set_editor_section_data([])
+            logger.info("В проекте нет сохраненных секций, секционное состояние очищено")
+            return
+        rebuilt_sections = self._rebuild_section_data_from_data(self.raw_data, serialized_sections)
+        self._set_editor_section_data(rebuilt_sections)
+        logger.info(
+            "Восстановлено %s секций после нормализации состояния проекта",
+            len(rebuilt_sections),
+        )
+
+    def _restore_undo_history_from_project(self, project_data: Dict[str, Any]) -> None:
+        undo_history = project_data.get('undo_history')
+        if undo_history and self.raw_data is not None and not self.raw_data.empty:
+            logger.info(
+                "Восстановление истории undo/redo из проекта: undo_stack=%s, redo_stack=%s",
+                len(undo_history.get('undo_stack', [])),
+                len(undo_history.get('redo_stack', [])),
+            )
+            if self.undo_manager.deserialize(undo_history, self):
+                logger.info(
+                    "История успешно восстановлена: can_undo=%s, can_redo=%s",
+                    self.undo_manager.can_undo(),
+                    self.undo_manager.can_redo(),
+                )
+            else:
+                logger.warning("Не удалось восстановить историю undo/redo")
+                self.undo_manager.clear()
+        else:
+            self.undo_manager.clear()
+        self._update_undo_redo_actions()
+
+    def _build_tower_blueprint_from_data(self, data: Optional[pd.DataFrame]) -> Optional[TowerBlueprint]:
+        if data is None or data.empty:
+            return None
+
+        from core.tower_generator import create_blueprint_from_imported_data
+
+        instrument_distance = 60.0
+        instrument_angle_deg = 0.0
+        instrument_height = 1.7
+
+        if 'is_station' in data.columns:
+            station_data = data[data['is_station'] == True]
+            if not station_data.empty:
+                station = station_data.iloc[0]
+                tower_data = data[build_working_tower_mask(data)]
+                if not tower_data.empty:
+                    tower_center = tower_data[['x', 'y']].mean()
+                    station_xy = np.array([station['x'], station['y']])
+                    center_xy = np.array([tower_center['x'], tower_center['y']])
+                    diff = station_xy - center_xy
+                    instrument_distance = float(np.linalg.norm(diff))
+                    instrument_angle_deg = float(np.degrees(np.arctan2(diff[1], diff[0])))
+                    instrument_height = float(station.get('z', 1.7))
+
+        tower_parts_info = None
+        if 'tower_part' in data.columns:
+            unique_parts = sorted(data['tower_part'].dropna().unique())
+            if len(unique_parts) > 1:
+                parts = []
+                for part_num in unique_parts:
+                    part_data = data[data['tower_part'] == part_num]
+                    if part_data.empty:
+                        continue
+
+                    faces = int(part_data['belt'].nunique()) if 'belt' in part_data.columns else 4
+                    if 'faces' in part_data.columns:
+                        unique_faces = part_data['faces'].dropna().unique()
+                        if len(unique_faces) > 0:
+                            faces = int(unique_faces[0])
+
+                    parts.append(
+                        {
+                            'part_number': int(part_num),
+                            'shape': 'prism',
+                            'faces': faces,
+                        }
+                    )
+
+                if parts:
+                    part_1_data = data[data['tower_part'] == 1]
+                    split_height = float(part_1_data['z'].max()) if not part_1_data.empty else None
+                    tower_parts_info = {
+                        'split_height': split_height,
+                        'parts': parts,
+                    }
+
+        return create_blueprint_from_imported_data(
+            data,
+            tower_parts_info=tower_parts_info,
+            instrument_distance=instrument_distance,
+            instrument_angle_deg=instrument_angle_deg,
+            instrument_height=instrument_height,
+            base_rotation_deg=0.0,
+            default_faces=self.tower_faces_count or self.expected_belt_count,
+        )
+
+    def _apply_processed_results_to_widgets(self) -> None:
+        raw_data = self.raw_data if self.raw_data is not None and not self.raw_data.empty else None
+        if self.processed_data is not None and raw_data is not None:
+            try:
+                self.verticality_widget.set_data(raw_data, self.processed_data)
+                self.straightness_widget.set_data(raw_data, self.processed_data)
+                if hasattr(self.editor_3d, 'set_processed_results'):
+                    self.editor_3d.set_processed_results(self.processed_data)
+                if hasattr(self.data_table, 'set_processed_results'):
+                    self.data_table.set_processed_results(self.processed_data)
+                return
+            except (CalculationError, AttributeError, KeyError, ValueError) as calc_exc:
+                logger.warning(f"Не удалось восстановить данные анализа: {calc_exc}")
+                self.processed_data = None
+
+        self.verticality_widget.set_data(raw_data, None)
+        self.straightness_widget.set_data(raw_data, None)
+        if hasattr(self.editor_3d, 'set_processed_results'):
+            self.editor_3d.set_processed_results(None)
+        if hasattr(self.data_table, 'set_processed_results'):
+            self.data_table.set_processed_results(None)
+
+    def _apply_loaded_project_data(
+        self,
+        project_data: Dict[str, Any],
+        *,
+        file_path: str,
+        status_message: str,
+        status_timeout: int,
+        update_window_title: bool,
+    ) -> None:
+        full_report_state = project_data.get('full_report_state', {})
+        blueprint_state = project_data.get('tower_builder_state')
+        if blueprint_state:
+            try:
+                self._tower_blueprint = TowerBlueprint.from_dict(blueprint_state)
+            except Exception:
+                self._tower_blueprint = None
+        else:
+            self._tower_blueprint = None
+        self.project_manager.tower_builder_state = blueprint_state
+
+        self.raw_data = project_data.get('raw_data')
+        self.processed_data = project_data.get('processed_data')
+        self.epsg_code = project_data.get('epsg_code')
+        self.import_context = project_data.get('import_context')
+        self.import_diagnostics = project_data.get('import_diagnostics')
+        self.transformation_audit = project_data.get('transformation_audit')
+        self.current_file_path = project_data.get('current_file_path')
+        self.original_data_before_sections = project_data.get('original_data_before_sections')
+        self.project_manager.current_file_path = self.current_file_path
+        self.project_manager.import_context = self.import_context
+        self.project_manager.import_diagnostics = self.import_diagnostics
+        self.project_manager.transformation_audit = self.transformation_audit
+        self.height_tolerance = project_data.get('height_tolerance', 0.1)
+        self.center_method = project_data.get('center_method', 'mean')
+        self.expected_belt_count = project_data.get('expected_belt_count')
+        self.tower_faces_count = project_data.get('tower_faces_count')
+
+        has_raw_data = self.raw_data is not None and not self.raw_data.empty
+        if has_raw_data:
+            if 'belt' in self.raw_data.columns:
+                belt_count = self.raw_data['belt'].nunique()
+                self.belt_count_spin.blockSignals(True)
+                self.belt_count_spin.setValue(belt_count)
+                self.belt_count_spin.blockSignals(False)
+                self.expected_belt_count = belt_count
+                logger.info(f"Р’РѕСЃСЃС‚Р°РЅРѕРІР»РµРЅРѕ РєРѕР»РёС‡РµСЃС‚РІРѕ РїРѕСЏСЃРѕРІ: {belt_count}")
+
+            self.data_table.set_data(self.raw_data)
+            self.editor_3d.set_data(self.raw_data)
+            if 'xy_plane_state' in project_data and hasattr(self.editor_3d, 'set_xy_plane_state'):
+                self.editor_3d.set_xy_plane_state(project_data.get('xy_plane_state'))
+
+            self._restore_undo_history_from_project(project_data)
+            self._restore_section_state_from_project(project_data)
+            self.original_data_before_sections = self._derive_original_data_before_sections(
+                self.raw_data,
+                getattr(self.editor_3d, 'section_data', []) if self.editor_3d is not None else [],
+            )
+            self.save_project_btn.setEnabled(True)
+
+            if self._tower_blueprint is None:
+                try:
+                    self._tower_blueprint = self._build_tower_blueprint_from_data(self.raw_data)
+                    if self._tower_blueprint is not None:
+                        self.project_manager.tower_builder_state = self._tower_blueprint.to_dict()
+                        logger.info(
+                            "РЎРѕР·РґР°РЅ blueprint РёР· РґР°РЅРЅС‹С… РїСЂРѕРµРєС‚Р°: %s С‡Р°СЃС‚РµР№",
+                            len(self._tower_blueprint.segments),
+                        )
+                except Exception as exc:
+                    logger.warning(f"Не удалось создать blueprint из данных проекта: {exc}")
+                    self._tower_blueprint = None
+        else:
+            self.original_data_before_sections = None
+            self.data_table.set_data(pd.DataFrame())
+            self.editor_3d.set_data(pd.DataFrame())
+            self._set_editor_section_data([])
+            self.undo_manager.clear()
+            self._update_undo_redo_actions()
+            self.save_project_btn.setEnabled(False)
+
+        if hasattr(self.editor_3d, 'set_tower_builder_blueprint'):
+            self.editor_3d.set_tower_builder_blueprint(self._tower_blueprint)
+        if hasattr(self.editor_3d, 'hide_tower_builder_tab'):
+            self.editor_3d.hide_tower_builder_tab()
+
+        self._apply_processed_results_to_widgets()
+        self.update_export_actions_state()
+        if has_raw_data and hasattr(self.editor_3d, 'update_central_axis') and getattr(self.editor_3d, 'show_central_axis', False):
+            self.editor_3d.update_central_axis()
+
+        if update_window_title:
+            project_name = os.path.basename(file_path)
+            self.setWindowTitle(f'GeoVertical Analyzer - {project_name}')
+
+        self.statusBar.showMessage(status_message, status_timeout)
+
+        if self.full_report_tab is not None:
+            if full_report_state:
+                self.full_report_tab.load_state(full_report_state)
+            else:
+                self.full_report_tab.clear_form()
+            self.full_report_tab.set_source_data(
+                self.raw_data,
+                self.processed_data,
+                self.import_context,
+                self.import_diagnostics,
+                project_path=self.project_manager.current_project_path,
+                tower_blueprint=self._tower_blueprint,
+            )
 
     def _rebuild_active_sections_from_raw_data(self) -> None:
         if self.editor_3d is None:
@@ -175,11 +825,7 @@ class MainWindow(QMainWindow):
             self._set_editor_section_data([])
             return
 
-        section_levels = find_section_levels(self.raw_data, height_tolerance=0.3)
-        rebuilt_sections = (
-            get_section_lines(self.raw_data, section_levels, height_tolerance=0.3)
-            if section_levels else []
-        )
+        rebuilt_sections = self._rebuild_section_data_from_data(self.raw_data, current_sections)
         self._set_editor_section_data(rebuilt_sections)
 
     def init_ui(self):
@@ -615,6 +1261,7 @@ class MainWindow(QMainWindow):
         
         # Таблица данных (с передачей ссылки на 3D редактор для секций)
         self.data_table = DataTableWidget(editor_3d=self.editor_3d)
+        self.data_table.data_mutated.connect(self.on_table_data_mutated)
         self.data_table.data_changed.connect(self.on_table_data_changed)
         self.data_table.row_selected.connect(self.on_table_point_selected)
         self.data_table.active_station_changed.connect(self.on_active_station_changed)
@@ -911,6 +1558,7 @@ class MainWindow(QMainWindow):
         
         try:
             self.statusBar.showMessage('Создание секций...')
+            old_state = self._capture_main_window_undo_state()
 
             old_section_data = self._clone_section_data(
                 getattr(self.editor_3d, 'section_data', []) if self.editor_3d is not None else []
@@ -918,7 +1566,10 @@ class MainWindow(QMainWindow):
             old_snapshot = self._clone_dataframe(self.original_data_before_sections)
              
             # 1. Находим уровни секций
-            section_levels = find_section_levels(self.raw_data, height_tolerance=0.3)
+            section_levels = find_section_levels(
+                self.raw_data,
+                height_tolerance=SECTION_BUILD_HEIGHT_TOLERANCE,
+            )
             
             if not section_levels:
                 QMessageBox.warning(self, 'Предупреждение', 
@@ -928,46 +1579,44 @@ class MainWindow(QMainWindow):
             # 2. Добавляем недостающие точки
             initial_count = len(self.raw_data)
             data_with_sections = add_missing_points_for_sections(
-                self.raw_data, section_levels, height_tolerance=0.3
+                self.raw_data,
+                section_levels,
+                height_tolerance=SECTION_BUILD_HEIGHT_TOLERANCE,
             )
             added_count = len(data_with_sections) - initial_count
-            section_lines = get_section_lines(data_with_sections, section_levels, height_tolerance=0.3)
-             
-            # 3. Обновляем данные через команду
-            from core.undo_manager import DataChangeCommand
-             
-            old_data = self.raw_data.copy(deep=True) if self.raw_data is not None else pd.DataFrame()
-            new_data = data_with_sections.copy(deep=True)
-            new_snapshot = old_data.copy(deep=True)
-             
-            def data_getter():
-                return self.raw_data if self.raw_data is not None else pd.DataFrame()
-             
-            def data_setter(data):
-                self.raw_data = data
-                with self._suspend_data_change_handlers():
-                    if hasattr(self, 'data_table'):
-                        self.data_table.set_data(data)
-                    if hasattr(self, 'editor_3d'):
-                        self.editor_3d.set_data(data)
-
-            def apply_section_state(section_state, snapshot_state):
-                self._set_editor_section_data(section_state)
-                self.original_data_before_sections = self._clone_dataframe(snapshot_state)
-             
-            create_sections_command = DataChangeCommand(
-                data_getter,
-                data_setter,
-                old_data,
-                new_data,
-                f"Создание секций ({len(section_levels)} секций, добавлено {added_count} точек)",
-                post_execute=lambda: apply_section_state(section_lines, new_snapshot),
-                post_undo=lambda: apply_section_state(old_section_data, old_snapshot),
+            section_lines = get_section_lines(
+                data_with_sections,
+                section_levels,
+                height_tolerance=SECTION_BUILD_HEIGHT_TOLERANCE,
             )
             
-            # Выполняем команду через undo_manager
-            self.undo_manager.execute_command(create_sections_command)
-            self._update_undo_redo_actions()
+            # 3. Обновляем данные через serializable snapshot-команду
+            new_data = data_with_sections.copy(deep=True)
+            new_snapshot = (
+                old_state.get('raw_data').copy(deep=True)
+                if isinstance(old_state.get('raw_data'), pd.DataFrame)
+                else pd.DataFrame()
+            )
+            new_state = self._compose_main_window_undo_state(
+                old_state,
+                raw_data=new_data,
+                processed_data=None,
+                original_data_before_sections=new_snapshot,
+                section_data=section_lines,
+            )
+            old_state = self._compose_main_window_undo_state(
+                old_state,
+                section_data=old_section_data,
+                original_data_before_sections=old_snapshot,
+            )
+
+            if not self._execute_main_window_state_command(
+                description=f"Создание секций ({len(section_levels)} секций, добавлено {added_count} точек)",
+                old_state=old_state,
+                new_state=new_state,
+            ):
+                raise RuntimeError('Не удалось добавить создание секций в историю undo/redo')
+
             self.has_unsaved_changes = True  # Отмечаем изменения
             
             # Метод удаления секций доступен через 3D редактор
@@ -999,6 +1648,7 @@ class MainWindow(QMainWindow):
     
     def remove_sections(self):
         """Удалить добавленные точки секций без отката остальных правок."""
+        old_state = self._capture_main_window_undo_state()
         current_sections = self._clone_section_data(
             getattr(self.editor_3d, 'section_data', []) if self.editor_3d is not None else []
         )
@@ -1010,57 +1660,34 @@ class MainWindow(QMainWindow):
             return
 
         try:
-            section_generated_mask = pd.Series(False, index=old_data.index)
-            if 'is_section_generated' in old_data.columns:
-                section_generated_mask = (
-                    old_data['is_section_generated']
-                    .map(lambda value: bool(value) if pd.notna(value) else False)
-                    .astype(bool)
-                )
-
-            if not section_generated_mask.any() and 'name' in old_data.columns:
-                legacy_mask = old_data['name'].fillna('').astype(str).str.match(
-                    r'^S\d+(?:_P\d+)?_B\d+$',
-                    na=False,
-                )
-                section_generated_mask = legacy_mask.astype(bool)
+            section_generated_mask = build_section_generated_mask(old_data)
 
             if not current_sections and not section_generated_mask.any() and old_snapshot is None:
                 QMessageBox.warning(self, 'Предупреждение', 'Нет активных секций для удаления')
                 return
 
-            from core.undo_manager import DataChangeCommand
-
             removed_points_count = int(section_generated_mask.sum())
             new_data = old_data.loc[~section_generated_mask].copy(deep=True).reset_index(drop=True)
-
-            def data_getter():
-                return self.raw_data if self.raw_data is not None else pd.DataFrame()
-
-            def data_setter(data):
-                self.raw_data = data
-                with self._suspend_data_change_handlers():
-                    if hasattr(self, 'data_table'):
-                        self.data_table.set_data(data)
-                    if hasattr(self, 'editor_3d'):
-                        self.editor_3d.set_data(data)
-
-            def apply_section_state(section_state, snapshot_state):
-                self._set_editor_section_data(section_state)
-                self.original_data_before_sections = self._clone_dataframe(snapshot_state)
-
-            remove_sections_command = DataChangeCommand(
-                data_getter,
-                data_setter,
-                old_data,
-                new_data,
-                f"Удаление секций ({removed_points_count} точек)",
-                post_execute=lambda: apply_section_state([], None),
-                post_undo=lambda: apply_section_state(current_sections, old_snapshot),
+            old_state = self._compose_main_window_undo_state(
+                old_state,
+                section_data=current_sections,
+                original_data_before_sections=old_snapshot,
+            )
+            new_state = self._compose_main_window_undo_state(
+                old_state,
+                raw_data=new_data,
+                processed_data=None,
+                section_data=[],
+                original_data_before_sections=None,
             )
 
-            self.undo_manager.execute_command(remove_sections_command)
-            self._update_undo_redo_actions()
+            if not self._execute_main_window_state_command(
+                description=f"Удаление секций ({removed_points_count} точек)",
+                old_state=old_state,
+                new_state=new_state,
+            ):
+                raise RuntimeError('Не удалось добавить удаление секций в историю undo/redo')
+
             self.has_unsaved_changes = True
 
             if hasattr(self.editor_3d, 'remove_sections_action'):
@@ -1095,7 +1722,7 @@ class MainWindow(QMainWindow):
         from PyQt6.QtWidgets import QProgressDialog
         
         self.statusBar.showMessage(f'Загрузка {file_path}...')
-        self.current_file_path = file_path
+        old_state = self._capture_main_window_undo_state()
         
         # Создаем поток загрузки
         self.load_thread = DataLoadThread(file_path, self)
@@ -1111,7 +1738,12 @@ class MainWindow(QMainWindow):
         self.load_thread.progress.connect(progress_dialog.setValue)
         self.load_thread.progress.connect(lambda p, m: progress_dialog.setLabelText(m))
         self.load_thread.data_loaded_detailed.connect(
-            lambda loaded: self._on_data_loaded_async(loaded, progress_dialog)
+            lambda loaded, import_file_path=file_path, previous_state=old_state: self._on_data_loaded_async(
+                loaded,
+                progress_dialog,
+                import_file_path,
+                previous_state,
+            )
         )
         self.load_thread.error.connect(lambda msg: self._on_load_error_async(msg, progress_dialog))
         self.load_thread.finished.connect(progress_dialog.reset)
@@ -1123,43 +1755,47 @@ class MainWindow(QMainWindow):
         self.load_thread.start()
         progress_dialog.exec()
     
-    def _on_data_loaded_async(self, loaded: LoadedSurveyData, progress_dialog):
+    def _on_data_loaded_async(
+        self,
+        loaded: LoadedSurveyData,
+        progress_dialog,
+        import_file_path: str,
+        previous_state: Dict[str, Any],
+    ):
         """Обработка успешной загрузки данных"""
         progress_dialog.setValue(100)
         progress_dialog.close()
-        self._process_loaded_data(loaded)
+        self._process_loaded_data(loaded, import_file_path=import_file_path, old_state=previous_state)
     
     def _on_load_error_async(self, error_message: str, progress_dialog):
         """Обработка ошибки загрузки"""
         progress_dialog.close()
         QMessageBox.critical(self, 'Ошибка загрузки', f'Ошибка загрузки файла:\n{error_message}')
         self.statusBar.showMessage('Ошибка загрузки')
-        self.current_file_path = None
-        self.import_context = None
-        self.import_diagnostics = None
-        self.transformation_audit = None
     
     def _load_file_sync(self, file_path: str):
         """Синхронная загрузка файла (старый метод)"""
         try:
             self.statusBar.showMessage(f'Загрузка {file_path}...')
-            self.current_file_path = file_path
+            old_state = self._capture_main_window_undo_state()
             
             # Загружаем данные
             loaded = load_survey_data(file_path)
             
-            self._process_loaded_data(loaded)
+            self._process_loaded_data(loaded, import_file_path=file_path, old_state=old_state)
             
         except (DataLoadError, FileFormatError, DataValidationError, IOError, OSError) as e:
             logger.error(f"Ошибка загрузки файла: {e}", exc_info=True)
             QMessageBox.critical(self, 'Ошибка', f'Ошибка загрузки файла:\n{str(e)}')
             self.statusBar.showMessage('Ошибка загрузки')
-            self.current_file_path = None
-            self.import_context = None
-            self.import_diagnostics = None
-            self.transformation_audit = None
     
-    def _process_loaded_data(self, loaded: LoadedSurveyData):
+    def _process_loaded_data(
+        self,
+        loaded: LoadedSurveyData,
+        *,
+        import_file_path: str,
+        old_state: Dict[str, Any],
+    ):
         """Обработка загруженных данных (общий метод для синхронной и асинхронной загрузки)"""
         try:
             data = loaded.data
@@ -1171,7 +1807,7 @@ class MainWindow(QMainWindow):
                 return
             
             # Загружаем сохраненные настройки сортировки (если есть)
-            saved_settings = self.load_sorting_settings(self.current_file_path)
+            saved_settings = self.load_sorting_settings(import_file_path)
             
             if saved_settings:
                 logger.info("Найдены сохраненные настройки сортировки")
@@ -1193,44 +1829,28 @@ class MainWindow(QMainWindow):
                                       'Нет данных после обработки')
                     return
                 
-                # Сохраняем EPSG код и путь (данные будут установлены командой)
-                self.epsg_code = epsg_code
-                self.import_context = loaded.to_context_dict()
-                self.import_diagnostics = loaded.diagnostics.to_dict()
-                self.transformation_audit = None
-                # Синхронизируем с project_manager
-                self.project_manager.current_file_path = self.current_file_path
-                self.project_manager.import_context = self.import_context
-                self.project_manager.import_diagnostics = self.import_diagnostics
-                
-                # Устанавливаем EPSG в комбобокс
-                if epsg_code:
-                    for i in range(self.epsg_combo.count()):
-                        if self.epsg_combo.itemData(i) == epsg_code:
-                            self.epsg_combo.setCurrentIndex(i)
-                            break
-                
                 # Получаем количество поясов из настроек мастера импорта
                 sorting_settings = wizard.get_cached_sorting_settings()
                 import_audit = wizard.get_import_audit()
-                if self.import_context is None:
-                    self.import_context = {}
-                self.import_context['wizard_audit'] = import_audit
-                self.import_context['sorting_settings'] = sorting_settings or {}
-                if self.import_diagnostics is not None:
-                    self.import_diagnostics['details'] = self.import_diagnostics.get('details', {})
-                    self.import_diagnostics['details']['wizard_audit'] = import_audit
-                    self.import_diagnostics['belt_summary'] = import_audit.get(
+                new_import_context = loaded.to_context_dict() or {}
+                new_import_diagnostics = loaded.diagnostics.to_dict()
+                new_transformation_audit = None
+                new_import_context['wizard_audit'] = import_audit
+                new_import_context['sorting_settings'] = sorting_settings or {}
+                if new_import_diagnostics is not None:
+                    new_import_diagnostics['details'] = new_import_diagnostics.get('details', {})
+                    new_import_diagnostics['details']['wizard_audit'] = import_audit
+                    new_import_diagnostics['belt_summary'] = import_audit.get(
                         'belt_summary',
-                        self.import_diagnostics.get('belt_summary', {}),
+                        new_import_diagnostics.get('belt_summary', {}),
                     )
-                    self.import_diagnostics['tower_part_summary'] = import_audit.get(
+                    new_import_diagnostics['tower_part_summary'] = import_audit.get(
                         'tower_part_summary',
-                        self.import_diagnostics.get('tower_part_summary', {}),
+                        new_import_diagnostics.get('tower_part_summary', {}),
                     )
-                    self.import_diagnostics['standing_point_candidates'] = import_audit.get(
+                    new_import_diagnostics['standing_point_candidates'] = import_audit.get(
                         'standing_candidates',
-                        self.import_diagnostics.get('standing_point_candidates', []),
+                        new_import_diagnostics.get('standing_point_candidates', []),
                     )
                 if sorting_settings and 'belt_count' in sorting_settings:
                     belt_count = sorting_settings['belt_count']
@@ -1244,12 +1864,11 @@ class MainWindow(QMainWindow):
                         belt_count = 4  # Значение по умолчанию
                     logger.info(f"Количество поясов определено как максимальный номер пояса: {belt_count}")
                     
-                self.belt_count_spin.setValue(belt_count)
-                self.expected_belt_count = belt_count
-                self._show_import_diagnostics_summary(loaded)
-                
-                # Определяем количество граней башни
-                self._determine_tower_faces(processed_data)
+                new_expected_belt_count = belt_count
+                new_tower_faces_count = self._infer_tower_faces_count(
+                    processed_data,
+                    expected_belt_count=new_expected_belt_count,
+                )
                 
                 # Создаем blueprint из импортированных данных, если башня составная
                 # Создаем blueprint из импортированных данных для конструктора
@@ -1321,49 +1940,45 @@ class MainWindow(QMainWindow):
                     instrument_angle_deg=instrument_angle_deg,
                     instrument_height=instrument_height,
                     base_rotation_deg=0.0,
-                    default_faces=self.tower_faces_count or self.expected_belt_count,
+                    default_faces=new_tower_faces_count or new_expected_belt_count,
                 )
-                
-                self._tower_blueprint = blueprint
-                self.project_manager.tower_builder_state = blueprint.to_dict()
-                if hasattr(self.editor_3d, 'set_tower_builder_blueprint'):
-                    self.editor_3d.set_tower_builder_blueprint(blueprint)
+
                 logger.info(f"Создан blueprint из импортированных данных: {len(blueprint.segments)} частей")
                 
                 # Логируем распределение по поясам перед загрузкой
                 belt_distribution = processed_data['belt'].value_counts().sort_index()
                 logger.info(f"Загружаем данные в главное окно. Распределение по поясам: {belt_distribution.to_dict()}")
                 logger.info(f"Первые 5 строк данных:\n{processed_data[['name', 'belt']].head(10)}")
-                
-                # Создаем команду для импорта данных (ПЕРЕД установкой данных)
-                from core.undo_manager import DataChangeCommand
-                
-                old_data = self.raw_data.copy(deep=True) if self.raw_data is not None else pd.DataFrame()
-                new_data = processed_data.copy(deep=True)
-                
-                def data_getter():
-                    return self.raw_data if self.raw_data is not None else pd.DataFrame()
-                
-                def data_setter(data):
-                    self.raw_data = data
-                    if hasattr(self, 'data_table'):
-                        self.data_table.set_data(data)
-                    if hasattr(self, 'editor_3d'):
-                        self.editor_3d.set_data(data)
-                
-                import_command = DataChangeCommand(
-                    data_getter,
-                    data_setter,
-                    old_data,
-                    new_data,
-                    f"Импорт данных из {os.path.basename(self.current_file_path) if self.current_file_path else 'файла'}"
+
+                new_state = self._compose_main_window_undo_state(
+                    old_state,
+                    raw_data=processed_data.copy(deep=True),
+                    processed_data=None,
+                    epsg_code=epsg_code,
+                    import_context=new_import_context,
+                    import_diagnostics=new_import_diagnostics,
+                    transformation_audit=new_transformation_audit,
+                    current_file_path=import_file_path,
+                    original_data_before_sections=None,
+                    expected_belt_count=new_expected_belt_count,
+                    tower_faces_count=new_tower_faces_count,
+                    tower_blueprint_state=blueprint.to_dict(),
+                    section_data=[],
                 )
-                
-                # Выполняем команду через undo_manager (она установит данные)
-                self.undo_manager.execute_command(import_command)
-                
-                # Обновляем состояние кнопок undo/redo после импорта
-                self._update_undo_redo_actions()
+
+                if not self._execute_main_window_state_command(
+                    description=f"Импорт данных из {os.path.basename(import_file_path)}",
+                    old_state=old_state,
+                    new_state=new_state,
+                ):
+                    raise RuntimeError('Не удалось добавить импорт в историю undo/redo')
+
+                if epsg_code:
+                    for i in range(self.epsg_combo.count()):
+                        if self.epsg_combo.itemData(i) == epsg_code:
+                            self.epsg_combo.setCurrentIndex(i)
+                            break
+                self._show_import_diagnostics_summary(loaded)
                 
                 # Активируем кнопки
                 self.save_project_btn.setEnabled(True)
@@ -1378,10 +1993,6 @@ class MainWindow(QMainWindow):
                 logger.info(f"Загружено {len(processed_data)} точек с {belt_count} поясами")
             else:
                 self.statusBar.showMessage('Загрузка отменена')
-                self.current_file_path = None
-                self.import_context = None
-                self.import_diagnostics = None
-                self.transformation_audit = None
             
         except (DataLoadError, FileFormatError, DataValidationError, IOError, OSError) as e:
             logger.error(f"Ошибка загрузки файла: {e}", exc_info=True)
@@ -1781,9 +2392,7 @@ class MainWindow(QMainWindow):
         """Внутренний метод сохранения проекта в файл"""
         try:
             # Получаем section_data из 3D редактора
-            section_data = None
-            if hasattr(self.editor_3d, 'section_data'):
-                section_data = self.editor_3d.section_data
+            section_data = self._collect_section_data_for_persistence()
             
             xy_plane_state = None
             if hasattr(self.editor_3d, 'get_xy_plane_state'):
@@ -1807,7 +2416,10 @@ class MainWindow(QMainWindow):
                 processed_data=self.processed_data,
                 epsg_code=self.epsg_code,
                 current_file_path=self.current_file_path,
-                original_data_before_sections=self.original_data_before_sections,
+                original_data_before_sections=self._derive_original_data_before_sections(
+                    self.raw_data,
+                    getattr(self.editor_3d, 'section_data', []) if self.editor_3d is not None else [],
+                ),
                 height_tolerance=self.height_tolerance,
                 center_method=self.center_method,
                 expected_belt_count=self.expected_belt_count,
@@ -2002,8 +2614,7 @@ class MainWindow(QMainWindow):
                 self.editor_3d.point_index_counter = 0
             if hasattr(self.editor_3d, 'selected_indices'):
                 self.editor_3d.selected_indices = []
-            if hasattr(self.editor_3d, 'section_data'):
-                self.editor_3d.section_data = []
+            self._set_editor_section_data([])
             if hasattr(self.editor_3d, 'show_central_axis'):
                 self.editor_3d.show_central_axis = False
             if hasattr(self.editor_3d, 'xy_plane_initialized'):
@@ -2145,252 +2756,26 @@ class MainWindow(QMainWindow):
             self.last_open_dir or '',
             'Проект GeoVertical (*.gvproj)'
         )
-        
-        if file_path:
-            try:
-                self.last_open_dir = os.path.dirname(file_path)
-                self._paths_settings.setValue('last_open_dir', self.last_open_dir)
-                # Используем ProjectManager для загрузки
-                project_data = self.project_manager.load_project(file_path)
-                blueprint_state = project_data.get('tower_builder_state')
-                if blueprint_state:
-                    try:
-                        self._tower_blueprint = TowerBlueprint.from_dict(blueprint_state)
-                    except Exception:
-                        self._tower_blueprint = None
-                else:
-                    self._tower_blueprint = None
-                self.project_manager.tower_builder_state = blueprint_state
-                
-                # Восстанавливаем данные
-                self.raw_data = project_data.get('raw_data')
-                self.processed_data = project_data.get('processed_data')
-                full_report_state = project_data.get('full_report_state', {})
-                self.epsg_code = project_data.get('epsg_code')
-                self.import_context = project_data.get('import_context')
-                self.import_diagnostics = project_data.get('import_diagnostics')
-                self.transformation_audit = project_data.get('transformation_audit')
-                self.current_file_path = project_data.get('current_file_path')
-                self.original_data_before_sections = project_data.get('original_data_before_sections')
-                # Синхронизируем с project_manager
-                self.project_manager.current_file_path = self.current_file_path
-                self.project_manager.import_context = self.import_context
-                self.project_manager.import_diagnostics = self.import_diagnostics
-                self.project_manager.transformation_audit = self.transformation_audit
-                self.height_tolerance = project_data.get('height_tolerance', 0.1)
-                self.center_method = project_data.get('center_method', 'mean')
-                self.expected_belt_count = project_data.get('expected_belt_count')
-                self.tower_faces_count = project_data.get('tower_faces_count')
-                
-                # Обновляем интерфейс
-                if self.raw_data is not None and not self.raw_data.empty:
-                    # Сначала устанавливаем количество поясов до установки данных в виджеты
-                    if 'belt' in self.raw_data.columns:
-                        belt_count = self.raw_data['belt'].nunique()
-                        self.belt_count_spin.blockSignals(True)  # Блокируем сигналы
-                        self.belt_count_spin.setValue(belt_count)
-                        self.belt_count_spin.blockSignals(False)  # Разблокируем
-                        self.expected_belt_count = belt_count
-                        logger.info(f"Восстановлено количество поясов: {belt_count}")
-                    
-                    self.data_table.set_data(self.raw_data)
-                    self.editor_3d.set_data(self.raw_data)
-                    if 'xy_plane_state' in project_data and hasattr(self.editor_3d, 'set_xy_plane_state'):
-                        self.editor_3d.set_xy_plane_state(project_data.get('xy_plane_state'))
-                    
-                    # Восстанавливаем историю Undo/Redo
-                    undo_history = project_data.get('undo_history')
-                    if undo_history:
-                        # Восстанавливаем историю только если есть данные
-                        if self.raw_data is not None and not self.raw_data.empty:
-                            logger.info(f"Восстановление истории undo/redo из проекта: undo_stack={len(undo_history.get('undo_stack', []))}, redo_stack={len(undo_history.get('redo_stack', []))}")
-                            if self.undo_manager.deserialize(undo_history, self):
-                                logger.info(f"История успешно восстановлена: can_undo={self.undo_manager.can_undo()}, can_redo={self.undo_manager.can_redo()}")
-                            else:
-                                logger.warning("Не удалось восстановить историю undo/redo")
-                                self.undo_manager.clear()
-                        else:
-                            # Если данных нет, очищаем историю
-                            logger.info("Данных нет, очищаем историю undo/redo")
-                            self.undo_manager.clear()
-                    else:
-                        # Если истории нет в проекте, очищаем
-                        logger.info("Истории undo/redo нет в проекте, очищаем")
-                        self.undo_manager.clear()
-                    self._update_undo_redo_actions()
-                    
-                    # Восстанавливаем section_data
-                    if 'section_data' in project_data:
-                        # Сохраняем section_data в 3D редакторе
-                        self.editor_3d.section_data = project_data['section_data']
-                        
-                        # Активируем кнопки работы с секциями
-                        has_sections = bool(len(project_data['section_data']) > 0)
-                        if hasattr(self.editor_3d, 'remove_sections_action'):
-                            self.editor_3d.remove_sections_action.setEnabled(has_sections)
-                        if hasattr(self.editor_3d, 'build_central_axis_action'):
-                            self.editor_3d.build_central_axis_action.setEnabled(has_sections)
-                        if hasattr(self.editor_3d, 'tilt_plane_btn'):
-                            self.editor_3d.tilt_plane_btn.setEnabled(has_sections)
-                        if hasattr(self.editor_3d, 'tilt_single_section_btn'):
-                            self.editor_3d.tilt_single_section_btn.setEnabled(has_sections)
-                        
-                        # Отрисовываем линии секций
-                        if hasattr(self.editor_3d, 'update_section_lines'):
-                            self.editor_3d.update_section_lines()
-                        
-                        logger.info(f"Восстановлено {len(project_data['section_data'])} секций")
-                    
-                    # Активируем кнопки
-                    self.save_project_btn.setEnabled(True)
-                    # Кнопки работы с секциями находятся в 3D редакторе
-                    
-                    logger.info(f"Загружено {len(self.raw_data)} точек из проекта")
-                    
-                    # Если нет blueprint, но есть данные, создаем blueprint из данных
-                    if self._tower_blueprint is None and self.raw_data is not None and not self.raw_data.empty:
-                        try:
-                            from core.tower_generator import create_blueprint_from_imported_data
-                            
-                            # Определяем параметры прибора из данных (если есть точка стояния)
-                            instrument_distance = 60.0
-                            instrument_angle_deg = 0.0
-                            instrument_height = 1.7
-                            
-                            if 'is_station' in self.raw_data.columns:
-                                station_data = self.raw_data[self.raw_data['is_station'] == True]
-                                if not station_data.empty:
-                                    station = station_data.iloc[0]
-                                    # Вычисляем расстояние и угол от центра башни
-                                    tower_data = self.raw_data[build_working_tower_mask(self.raw_data)]
-                                    if not tower_data.empty:
-                                        tower_center = tower_data[['x', 'y']].mean()
-                                        station_xy = np.array([station['x'], station['y']])
-                                        center_xy = np.array([tower_center['x'], tower_center['y']])
-                                        diff = station_xy - center_xy
-                                        instrument_distance = float(np.linalg.norm(diff))
-                                        instrument_angle_deg = float(np.degrees(np.arctan2(diff[1], diff[0])))
-                                        instrument_height = float(station.get('z', 1.7))
-                            
-                            # Определяем информацию о частях башни из данных
-                            tower_parts_info = None
-                            if 'tower_part' in self.raw_data.columns:
-                                unique_parts = sorted(self.raw_data['tower_part'].dropna().unique())
-                                if len(unique_parts) > 1:
-                                    parts = []
-                                    for part_num in unique_parts:
-                                        part_data = self.raw_data[self.raw_data['tower_part'] == part_num]
-                                        if not part_data.empty:
-                                            # Определяем параметры части
-                                            faces = int(part_data['belt'].nunique()) if 'belt' in part_data.columns else 4
-                                            shape = 'prism'  # По умолчанию
-                                            if 'faces' in part_data.columns:
-                                                unique_faces = part_data['faces'].dropna().unique()
-                                                if len(unique_faces) > 0:
-                                                    faces = int(unique_faces[0])
-                                            
-                                            # Определяем размеры
-                                            part_xy = part_data[['x', 'y']].values
-                                            center = part_xy.mean(axis=0)
-                                            radii = np.linalg.norm(part_xy - center, axis=1)
-                                            avg_radius = radii.mean()
-                                            base_size = avg_radius * 2.0
-                                            
-                                            parts.append({
-                                                'part_number': int(part_num),
-                                                'shape': shape,
-                                                'faces': faces,
-                                            })
-                                    
-                                    if parts:
-                                        # Определяем высоту раздвоения
-                                        part_1_data = self.raw_data[self.raw_data['tower_part'] == 1]
-                                        split_height = float(part_1_data['z'].max()) if not part_1_data.empty else None
-                                        
-                                        tower_parts_info = {
-                                            'split_height': split_height,
-                                            'parts': parts
-                                        }
-                            
-                            blueprint = create_blueprint_from_imported_data(
-                                self.raw_data,
-                                tower_parts_info=tower_parts_info,
-                                instrument_distance=instrument_distance,
-                                instrument_angle_deg=instrument_angle_deg,
-                                instrument_height=instrument_height,
-                                base_rotation_deg=0.0,
-                                default_faces=self.tower_faces_count or self.expected_belt_count,
-                            )
-                            
-                            self._tower_blueprint = blueprint
-                            self.project_manager.tower_builder_state = blueprint.to_dict()
-                            logger.info(f"Создан blueprint из данных проекта: {len(blueprint.segments)} частей")
-                        except Exception as e:
-                            logger.warning(f"Не удалось создать blueprint из данных проекта: {e}")
-                            self._tower_blueprint = None
-                    
-                    # Загружаем blueprint в конструктор
-                    if hasattr(self.editor_3d, 'set_tower_builder_blueprint'):
-                        self.editor_3d.set_tower_builder_blueprint(self._tower_blueprint)
-                    if hasattr(self.editor_3d, 'hide_tower_builder_tab'):
-                        self.editor_3d.hide_tower_builder_tab()
-                
-                # Восстанавливаем результаты расчетов, если они есть
-                if self.processed_data is not None:
-                    try:
-                        self.verticality_widget.set_data(self.raw_data, self.processed_data)
-                        self.straightness_widget.set_data(self.raw_data, self.processed_data)
-                        if hasattr(self.editor_3d, 'set_processed_results'):
-                            self.editor_3d.set_processed_results(self.processed_data)
-                        if hasattr(self.data_table, 'set_processed_results'):
-                            self.data_table.set_processed_results(self.processed_data)
-                    except (CalculationError, AttributeError, KeyError, ValueError) as calc_exc:
-                        logger.warning(f"Не удалось восстановить данные анализа: {calc_exc}")
-                        self.processed_data = None
-                        self.verticality_widget.set_data(self.raw_data, None)
-                        self.straightness_widget.set_data(self.raw_data, None)
-                        if hasattr(self.editor_3d, 'set_processed_results'):
-                            self.editor_3d.set_processed_results(None)
-                        if hasattr(self.data_table, 'set_processed_results'):
-                            self.data_table.set_processed_results(None)
-                else:
-                    self.verticality_widget.set_data(self.raw_data, None)
-                    self.straightness_widget.set_data(self.raw_data, None)
-                    if hasattr(self.editor_3d, 'set_processed_results'):
-                        self.editor_3d.set_processed_results(None)
-                    if hasattr(self.data_table, 'set_processed_results'):
-                        self.data_table.set_processed_results(None)
 
-                # Обновляем доступность функций
-                self.update_export_actions_state()
-                if hasattr(self.editor_3d, 'update_central_axis') and getattr(self.editor_3d, 'show_central_axis', False):
-                    self.editor_3d.update_central_axis()
+        if not file_path:
+            return
 
-                # Обновляем заголовок окна
-                project_name = os.path.basename(file_path)
-                self.setWindowTitle(f'GeoVertical Analyzer - {project_name}')
-                
-                self.statusBar.showMessage(f'✓ Проект загружен: {file_path}', 3000)
-                logger.info(f"Проект загружен: {file_path}")
-
-                if self.full_report_tab is not None:
-                    if full_report_state:
-                        self.full_report_tab.load_state(full_report_state)
-                    else:
-                        self.full_report_tab.clear_form()
-                    self.full_report_tab.set_source_data(
-                        self.raw_data,
-                        self.processed_data,
-                        self.import_context,
-                        self.import_diagnostics,
-                        project_path=self.project_manager.current_project_path,
-                        tower_blueprint=self._tower_blueprint,
-                    )
-                
-            except (ProjectLoadError, IOError, OSError, pickle.UnpicklingError, AttributeError, KeyError, ValueError) as e:
-                logger.error(f"Ошибка загрузки проекта: {e}", exc_info=True)
-                self.statusBar.showMessage(f'❌ Ошибка загрузки проекта: {str(e)}')
-                QMessageBox.critical(self, 'Ошибка', f'Ошибка загрузки проекта:\n{str(e)}')
+        try:
+            self.last_open_dir = os.path.dirname(file_path)
+            self._paths_settings.setValue('last_open_dir', self.last_open_dir)
+            project_data = self.project_manager.load_project(file_path)
+            self._apply_loaded_project_data(
+                project_data,
+                file_path=file_path,
+                status_message=f'✓ Проект загружен: {file_path}',
+                status_timeout=3000,
+                update_window_title=True,
+            )
+            logger.info(f"Проект загружен: {file_path}")
+        except (ProjectLoadError, IOError, OSError, pickle.UnpicklingError, AttributeError, KeyError, ValueError) as e:
+            logger.error(f"Ошибка загрузки проекта: {e}", exc_info=True)
+            self.statusBar.showMessage(f'❌ Ошибка загрузки проекта: {str(e)}')
+            QMessageBox.critical(self, 'Ошибка', f'Ошибка загрузки проекта:\n{str(e)}')
                 
     def add_point(self):
         """Добавление новой точки"""
@@ -2488,6 +2873,7 @@ class MainWindow(QMainWindow):
             self.statusBar.showMessage('Нет действий для отмены', 2000)
             return
         if self.undo_manager.undo():
+            restored_command = self.undo_manager.redo_stack[-1] if self.undo_manager.redo_stack else None
             undo_desc = self.undo_manager.get_redo_description()  # После undo следующая команда для redo
             if undo_desc:
                 self.statusBar.showMessage(f'Отменено: {undo_desc}', 2000)
@@ -2495,35 +2881,8 @@ class MainWindow(QMainWindow):
                 self.statusBar.showMessage('Операция отменена', 2000)
             logger.info(f"Undo выполнен успешно: can_undo={self.undo_manager.can_undo()}, can_redo={self.undo_manager.can_redo()}")
             self._update_undo_redo_actions()
-            # Обновляем данные в виджетах
-            if self.raw_data is not None:
-                self.data_table.set_data(self.raw_data)
-                if hasattr(self.editor_3d, 'set_data'):
-                    self.editor_3d.set_data(self.raw_data)
-                
-                # Обновляем section_data если есть
-                if hasattr(self.editor_3d, 'section_data') and self.editor_3d.section_data:
-                    if hasattr(self.editor_3d, 'set_section_lines'):
-                        self.editor_3d.set_section_lines(self.editor_3d.section_data)
-                
-                # Обновляем виджеты анализа
-                self.update_export_actions_state()
-                if hasattr(self, 'verticality_widget'):
-                    self.verticality_widget.set_data(self.raw_data, self.processed_data)
-                if hasattr(self, 'straightness_widget'):
-                    self.straightness_widget.set_data(self.raw_data, self.processed_data)
-            else:
-                # Если данных нет, очищаем виджеты
-                self.data_table.set_data(pd.DataFrame())
-                if hasattr(self.editor_3d, 'set_data'):
-                    self.editor_3d.set_data(pd.DataFrame())
-                if hasattr(self.editor_3d, 'set_section_lines'):
-                    self.editor_3d.set_section_lines([])
-                if hasattr(self, 'verticality_widget'):
-                    self.verticality_widget.set_data(None, None)
-                if hasattr(self, 'straightness_widget'):
-                    self.straightness_widget.set_data(None, None)
-            
+            if not self._history_command_restores_full_window_state(restored_command):
+                self._sync_widgets_after_history_navigation()
             self.has_unsaved_changes = True
         else:
             self.statusBar.showMessage('Не удалось отменить операцию', 2000)
@@ -2536,6 +2895,7 @@ class MainWindow(QMainWindow):
             self.statusBar.showMessage('Нет действий для повтора', 2000)
             return
         if self.undo_manager.redo():
+            restored_command = self.undo_manager.undo_stack[-1] if self.undo_manager.undo_stack else None
             redo_desc = self.undo_manager.get_undo_description()  # После redo команда снова в undo
             if redo_desc:
                 self.statusBar.showMessage(f'Повторено: {redo_desc}', 2000)
@@ -2543,35 +2903,8 @@ class MainWindow(QMainWindow):
                 self.statusBar.showMessage('Операция повторена', 2000)
             logger.info(f"Redo выполнен успешно: can_undo={self.undo_manager.can_undo()}, can_redo={self.undo_manager.can_redo()}")
             self._update_undo_redo_actions()
-            # Обновляем данные в виджетах
-            if self.raw_data is not None:
-                self.data_table.set_data(self.raw_data)
-                if hasattr(self.editor_3d, 'set_data'):
-                    self.editor_3d.set_data(self.raw_data)
-                
-                # Обновляем section_data если есть
-                if hasattr(self.editor_3d, 'section_data') and self.editor_3d.section_data:
-                    if hasattr(self.editor_3d, 'set_section_lines'):
-                        self.editor_3d.set_section_lines(self.editor_3d.section_data)
-                
-                # Обновляем виджеты анализа
-                self.update_export_actions_state()
-                if hasattr(self, 'verticality_widget'):
-                    self.verticality_widget.set_data(self.raw_data, self.processed_data)
-                if hasattr(self, 'straightness_widget'):
-                    self.straightness_widget.set_data(self.raw_data, self.processed_data)
-            else:
-                # Если данных нет, очищаем виджеты
-                self.data_table.set_data(pd.DataFrame())
-                if hasattr(self.editor_3d, 'set_data'):
-                    self.editor_3d.set_data(pd.DataFrame())
-                if hasattr(self.editor_3d, 'set_section_lines'):
-                    self.editor_3d.set_section_lines([])
-                if hasattr(self, 'verticality_widget'):
-                    self.verticality_widget.set_data(None, None)
-                if hasattr(self, 'straightness_widget'):
-                    self.straightness_widget.set_data(None, None)
-            
+            if not self._history_command_restores_full_window_state(restored_command):
+                self._sync_widgets_after_history_navigation()
             self.has_unsaved_changes = True
         else:
             self.statusBar.showMessage('Не удалось повторить операцию', 2000)
@@ -2609,6 +2942,9 @@ class MainWindow(QMainWindow):
                 self.redo_action.setText(f'Повторить: {redo_desc}')
             else:
                 self.redo_action.setText('Повторить')
+        
+        if hasattr(self, 'editor_3d') and hasattr(self.editor_3d, 'update_undo_redo_buttons'):
+            self.editor_3d.update_undo_redo_buttons()
     
     def on_epsg_changed(self, index):
         """Обработчик изменения системы координат"""
@@ -2655,64 +2991,46 @@ class MainWindow(QMainWindow):
     
     def _determine_tower_faces(self, data: pd.DataFrame):
         """Определяет количество граней башни на основе данных"""
-        if self.expected_belt_count is not None and int(self.expected_belt_count) >= 3:
-            self.tower_faces_count = int(self.expected_belt_count)
+        self.tower_faces_count = self._infer_tower_faces_count(
+            data,
+            expected_belt_count=self.expected_belt_count,
+        )
+        return
+
+    @staticmethod
+    def _infer_tower_faces_count(data: pd.DataFrame, expected_belt_count: Optional[int]) -> int:
+        if expected_belt_count is not None and int(expected_belt_count) >= 3:
+            tower_faces_count = int(expected_belt_count)
             logger.info(
-                f"РљРѕР»РёС‡РµСЃС‚РІРѕ РіСЂР°РЅРµР№ РІР·СЏС‚Рѕ РёР· РЅР°СЃС‚СЂРѕРµРє РјР°СЃС‚РµСЂР° РёРјРїРѕСЂС‚Р°: {self.tower_faces_count}"
+                f"Количество граней взято из настроек мастера импорта: {tower_faces_count}"
             )
-            return
+            return tower_faces_count
 
         if 'faces' in data.columns:
             face_values = pd.to_numeric(data['faces'], errors='coerce').dropna()
             face_values = face_values[face_values >= 3]
             if not face_values.empty:
-                self.tower_faces_count = int(face_values.mode().iloc[0])
+                tower_faces_count = int(face_values.mode().iloc[0])
                 logger.info(
-                    f"РљРѕР»РёС‡РµСЃС‚РІРѕ РіСЂР°РЅРµР№ РІР·СЏС‚Рѕ РёР· РёРјРїРѕСЂС‚РёСЂРѕРІР°РЅРЅС‹С… РґР°РЅРЅС‹С…: {self.tower_faces_count}"
+                    f"Количество граней взято из импортированных данных: {tower_faces_count}"
                 )
-                return
+                return tower_faces_count
 
-        if 'belt' in data.columns:
-            belt_values = pd.to_numeric(data['belt'], errors='coerce').dropna()
-            belt_values = belt_values[belt_values > 0]
-            if not belt_values.empty:
-                unique_belts = sorted({int(value) for value in belt_values})
-                self.tower_faces_count = max(3, max(len(unique_belts), max(unique_belts)))
-                logger.warning(
-                    f"РљРѕР»РёС‡РµСЃС‚РІРѕ РіСЂР°РЅРµР№ РѕРїСЂРµРґРµР»РµРЅРѕ РїРѕ РЅРѕРјРµСЂР°Рј РїРѕСЏСЃРѕРІ: {self.tower_faces_count}. "
-                    f"РќР°Р№РґРµРЅС‹ РїРѕСЏСЃР°: {unique_belts}"
-                )
-                return
+        for col in ('face_track', 'belt'):
+            if col in data.columns:
+                values = pd.to_numeric(data[col], errors='coerce').dropna()
+                values = values[values > 0]
+                if not values.empty:
+                    unique_vals = sorted({int(v) for v in values})
+                    tower_faces_count = max(3, max(len(unique_vals), max(unique_vals)))
+                    logger.info(
+                        f"Количество граней определено по колонке '{col}': {tower_faces_count}. "
+                        f"Найдены значения: {unique_vals}"
+                    )
+                    return tower_faces_count
 
-        self.tower_faces_count = 4
-        logger.warning("РќРµ СѓРґР°Р»РѕСЃСЊ РѕРїСЂРµРґРµР»РёС‚СЊ РєРѕР»РёС‡РµСЃС‚РІРѕ РіСЂР°РЅРµР№, РёСЃРїРѕР»СЊР·СѓРµРј Р·РЅР°С‡РµРЅРёРµ РїРѕ СѓРјРѕР»С‡Р°РЅРёСЋ: 4")
-        return
-
-        if 'belt' not in data.columns:
-            logger.warning("Колонка 'belt' не найдена, используем значение по умолчанию")
-            self.tower_faces_count = 4
-            return
-        
-        # Находим количество точек на каждом поясе
-        belt_counts = {}
-        for belt_num in data['belt'].dropna().unique():
-            belt_points = data[data['belt'] == belt_num]
-            # Исключаем точки стояния
-            if not belt_points.empty:
-                belt_points = belt_points[build_working_tower_mask(belt_points)]
-            belt_counts[belt_num] = len(belt_points)
-        
-        if belt_counts:
-            # Берем наиболее частое количество точек на поясе
-            from collections import Counter
-            count_freq = Counter(belt_counts.values())
-            most_common_count = count_freq.most_common(1)[0][0]
-            self.tower_faces_count = most_common_count
-            logger.info(f"Количество граней определено: {most_common_count} "
-                       f"(найдено на поясах: {dict(count_freq)})")
-        else:
-            self.tower_faces_count = 4
-            logger.warning("Не удалось определить количество граней, используем значение по умолчанию: 4")
+        logger.warning("Не удалось определить количество граней, используем значение по умолчанию: 4")
+        return 4
     
     def auto_filter_points(self):
         """Автоматическая фильтрация и назначение поясов"""
@@ -2776,12 +3094,62 @@ class MainWindow(QMainWindow):
             with self._suspend_data_change_handlers():
                 self.data_table.set_data(data)
             self.raw_data = data
+            self.original_data_before_sections = self._derive_original_data_before_sections(
+                data,
+                getattr(self.editor_3d, 'section_data', []) if self.editor_3d is not None else [],
+            )
             self._rebuild_active_sections_from_raw_data()
         self.processed_data = None
         self.update_analysis_widgets()
         self.statusBar.showMessage('Данные изменены в 3D. Требуется пересчет.')
     
+    def on_table_data_mutated(self, old_data, new_data, description: str):
+        if (hasattr(self, '_updating_analysis_widgets') and self._updating_analysis_widgets) or self._suspend_data_sync:
+            logger.debug("Пропуск on_table_data_mutated - уже выполняется обновление виджетов")
+            return
+
+        old_snapshot = self._clone_dataframe(old_data)
+        new_snapshot = self._clone_dataframe(new_data)
+        if old_snapshot is None:
+            old_snapshot = pd.DataFrame()
+        if new_snapshot is None:
+            new_snapshot = pd.DataFrame()
+
+        current_sections = self._clone_section_data(
+            getattr(self.editor_3d, 'section_data', []) if self.editor_3d is not None else []
+        )
+        rebuilt_sections = self._rebuild_section_data_from_data(new_snapshot, current_sections) if current_sections else []
+
+        old_state = self._compose_main_window_undo_state(
+            self._capture_main_window_undo_state(),
+            raw_data=old_snapshot,
+            section_data=current_sections,
+        )
+        new_state = self._compose_main_window_undo_state(
+            old_state,
+            raw_data=new_snapshot,
+            processed_data=None,
+            section_data=rebuilt_sections,
+        )
+
+        self._skip_next_table_data_changed = True
+        try:
+            if not self._execute_main_window_state_command(
+                description=description,
+                old_state=old_state,
+                new_state=new_state,
+            ):
+                raise RuntimeError(f'Не удалось добавить изменение таблицы в undo/redo: {description}')
+        except Exception:
+            self._skip_next_table_data_changed = False
+            raise
+
+        self.has_unsaved_changes = True
+
     def on_table_data_changed(self):
+        if self._skip_next_table_data_changed:
+            self._skip_next_table_data_changed = False
+            return
         """Обработчик изменения данных в таблице"""
         # Защита от зацикливания: если уже обновляем виджеты, пропускаем
         if (hasattr(self, '_updating_analysis_widgets') and self._updating_analysis_widgets) or self._suspend_data_sync:
@@ -2797,6 +3165,10 @@ class MainWindow(QMainWindow):
             data = pd.DataFrame()
 
         self.raw_data = data
+        self.original_data_before_sections = self._derive_original_data_before_sections(
+            data,
+            getattr(self.editor_3d, 'section_data', []) if self.editor_3d is not None else [],
+        )
         
         # Обновляем editor_3d без генерации обратных сигналов
         with self._suspend_data_change_handlers():
@@ -3518,9 +3890,7 @@ class MainWindow(QMainWindow):
             # Если проект не сохранен, используем временный файл автосохранения
             try:
                 # Получаем section_data из 3D редактора
-                section_data = None
-                if hasattr(self.editor_3d, 'section_data'):
-                    section_data = self.editor_3d.section_data
+                section_data = self._collect_section_data_for_persistence()
                 
                 xy_plane_state = None
                 if hasattr(self.editor_3d, 'get_xy_plane_state'):
@@ -3540,7 +3910,10 @@ class MainWindow(QMainWindow):
                     processed_data=self.processed_data,
                     epsg_code=self.epsg_code,
                     current_file_path=self.current_file_path,
-                    original_data_before_sections=self.original_data_before_sections,
+                    original_data_before_sections=self._derive_original_data_before_sections(
+                        self.raw_data,
+                        getattr(self.editor_3d, 'section_data', []) if self.editor_3d is not None else [],
+                    ),
                     height_tolerance=self.height_tolerance,
                     center_method=self.center_method,
                     expected_belt_count=self.expected_belt_count,
@@ -3602,83 +3975,14 @@ class MainWindow(QMainWindow):
     def _load_project_from_file(self, file_path: str):
         """Внутренний метод загрузки проекта из файла (используется для автосохранения)"""
         try:
-            # Используем ProjectManager для загрузки
             project_data = self.project_manager.load_project(file_path)
-            
-            # Восстанавливаем данные
-            self.raw_data = project_data.get('raw_data')
-            self.processed_data = project_data.get('processed_data')
-            full_report_state = project_data.get('full_report_state', {})
-            self.epsg_code = project_data.get('epsg_code')
-            self.import_context = project_data.get('import_context')
-            self.import_diagnostics = project_data.get('import_diagnostics')
-            self.transformation_audit = project_data.get('transformation_audit')
-            self.current_file_path = project_data.get('current_file_path')
-            self.original_data_before_sections = project_data.get('original_data_before_sections')
-            # Синхронизируем с project_manager
-            self.project_manager.current_file_path = self.current_file_path
-            self.project_manager.import_context = self.import_context
-            self.project_manager.import_diagnostics = self.import_diagnostics
-            self.project_manager.transformation_audit = self.transformation_audit
-            self.height_tolerance = project_data.get('height_tolerance', 0.1)
-            self.center_method = project_data.get('center_method', 'mean')
-            self.expected_belt_count = project_data.get('expected_belt_count')
-            self.tower_faces_count = project_data.get('tower_faces_count')
-            
-            # Обновляем интерфейс
-            if self.raw_data is not None and not self.raw_data.empty:
-                if 'belt' in self.raw_data.columns:
-                    belt_count = self.raw_data['belt'].nunique()
-                    self.belt_count_spin.blockSignals(True)
-                    self.belt_count_spin.setValue(belt_count)
-                    self.belt_count_spin.blockSignals(False)
-                    self.expected_belt_count = belt_count
-                
-                self.data_table.set_data(self.raw_data)
-                self.editor_3d.set_data(self.raw_data)
-                
-                if 'xy_plane_state' in project_data and hasattr(self.editor_3d, 'set_xy_plane_state'):
-                    self.editor_3d.set_xy_plane_state(project_data.get('xy_plane_state'))
-                
-                if 'section_data' in project_data:
-                    self.editor_3d.section_data = project_data['section_data']
-                    has_sections = bool(len(project_data['section_data']) > 0)
-                    if hasattr(self.editor_3d, 'remove_sections_action'):
-                        self.editor_3d.remove_sections_action.setEnabled(has_sections)
-                    if hasattr(self.editor_3d, 'build_central_axis_action'):
-                        self.editor_3d.build_central_axis_action.setEnabled(has_sections)
-                    if hasattr(self.editor_3d, 'update_section_lines'):
-                        self.editor_3d.update_section_lines()
-                
-                self.save_project_btn.setEnabled(True)
-                
-                if self.processed_data is not None:
-                    try:
-                        self.verticality_widget.set_data(self.raw_data, self.processed_data)
-                        self.straightness_widget.set_data(self.raw_data, self.processed_data)
-                        if hasattr(self.editor_3d, 'set_processed_results'):
-                            self.editor_3d.set_processed_results(self.processed_data)
-                        if hasattr(self.data_table, 'set_processed_results'):
-                            self.data_table.set_processed_results(self.processed_data)
-                    except Exception:
-                        pass
-                
-                self.update_export_actions_state()
-                self.statusBar.showMessage('Проект восстановлен из автосохранения', 5000)
-
-            if self.full_report_tab is not None:
-                if full_report_state:
-                    self.full_report_tab.load_state(full_report_state)
-                else:
-                    self.full_report_tab.clear_form()
-                self.full_report_tab.set_source_data(
-                    self.raw_data,
-                    self.processed_data,
-                    self.import_context,
-                    self.import_diagnostics,
-                    project_path=self.project_manager.current_project_path,
-                    tower_blueprint=self._tower_blueprint,
-                )
+            self._apply_loaded_project_data(
+                project_data,
+                file_path=file_path,
+                status_message='Проект восстановлен из автосохранения',
+                status_timeout=5000,
+                update_window_title=False,
+            )
         except Exception as e:
             logger.error(f"Ошибка загрузки проекта из файла: {e}", exc_info=True)
             QMessageBox.warning(self, 'Ошибка', f'Не удалось восстановить проект:\n{str(e)}')

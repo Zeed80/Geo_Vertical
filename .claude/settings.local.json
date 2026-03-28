@@ -1,0 +1,21 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(wc -l /c/Project/GEO_Vertical/core/*.py /c/Project/GEO_Vertical/utils/*.py)",
+      "Bash(ls:*)",
+      "Bash(python -m pytest tests/test_sorting_pipeline.py -v --tb=short)",
+      "Bash(python -m pytest tests/test_sorting_pipeline.py tests/test_section_audit_regressions.py -v --tb=short)",
+      "Bash(python -m pytest tests/ -v --tb=short)",
+      "Bash(python -m pytest tests/test_import_regressions.py::test_data_import_wizard_ignores_legacy_saved_belt_assignments -v --tb=long)",
+      "Bash(python -m pytest tests/test_import_regressions.py::test_data_import_wizard_preserves_multi_station_service_points -v --tb=short)",
+      "Bash(python -m pytest tests/test_import_regressions.py -v --tb=short)",
+      "Bash(python -m pytest tests/test_import_regressions.py::test_section_operations_follow_tracks_for_privoln_composite_import -v --tb=long)",
+      "Bash(python -m pytest tests/test_import_regressions.py::test_section_operations_follow_tracks_for_privoln_composite_import -v --tb=short)",
+      "Bash(python -m pytest tests/test_import_regressions.py::test_privoln_straightness_profiles_match_widget_and_report -x -v)",
+      "Bash(python -m pytest tests/test_import_regressions.py::test_semichniy_straightness_profiles_ignore_service_points_and_match_widget -x -v)",
+      "Bash(python:*)",
+      "Bash(grep -v \"^$\\\\|WARNING\\\\|INFO\\\\|DEBUG\")",
+      "Bash(grep -v \"^$\\\\|WARNING\\\\|INFO\\\\|DEBUG\\\\|UserWarning\")"
+    ]
+  }
+}

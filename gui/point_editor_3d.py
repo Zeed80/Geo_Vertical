@@ -3,6 +3,7 @@
 Позволяет визуализировать, редактировать и управлять точками в 3D пространстве
 """
 
+import copy
 import json
 import math
 import numpy as np
@@ -23,6 +24,11 @@ import re
 
 from gui.ui_helpers import apply_compact_button_style
 from core.section_operations import get_section_lines, find_section_levels
+from core.section_state import (
+    SECTION_BUILD_HEIGHT_TOLERANCE,
+    build_section_generated_mask,
+    deduplicate_section_heights,
+)
 from core.tower_generator import TowerBlueprint, TowerBlueprintV2
 from gui.tower_builder_panel import TowerBuilderPanel
 from gui.index_manager import IndexManager
@@ -475,6 +481,7 @@ class PointEditor3DWidget(QWidget):
             rich_tooltip_desc='Автоматически разбивает башню на секции и добавляет недостающие точки для полного описания геометрии. Секции определяются по уровням поясов.'
         )
         toolbar.add_button(self.create_sections_btn)
+        self.create_sections_action = self.create_sections_btn
 
         self.remove_sections_btn = self._create_toolbar_button(
             '🗑️\nУдалить\nсекции',
@@ -485,6 +492,7 @@ class PointEditor3DWidget(QWidget):
             rich_tooltip_desc='Удаляет все точки, добавленные при создании секций, возвращая башню к исходному состоянию. Оригинальные точки сохраняются.'
         )
         toolbar.add_button(self.remove_sections_btn)
+        self.remove_sections_action = self.remove_sections_btn
 
         toolbar.add_button(self._create_toolbar_button(
             '📐\nНа уровень\nсекции',
@@ -543,6 +551,7 @@ class PointEditor3DWidget(QWidget):
             rich_tooltip_desc='Строит вертикальную линию, проходящую через центры всех секций башни. Используется для визуализации и анализа.'
         )
         toolbar.add_button(self.build_central_axis_btn)
+        self.build_central_axis_action = self.build_central_axis_btn
 
         self.tilt_plane_btn = self._create_toolbar_button(
             '⚙️\nКрен\nсекции',
@@ -808,6 +817,29 @@ class PointEditor3DWidget(QWidget):
         if null_mask.any():
             series.loc[null_mask] = False
         return series.astype(bool)
+
+    def _has_valid_belts(self) -> bool:
+        return bool(
+            self.data is not None
+            and not self.data.empty
+            and 'belt' in self.data.columns
+            and self.data['belt'].notna().any()
+        )
+
+    def _update_section_toolbar_state(self) -> None:
+        has_sections = bool(self.section_data)
+        has_valid_belts = self._has_valid_belts()
+
+        if hasattr(self, 'create_sections_btn'):
+            self.create_sections_btn.setEnabled(has_valid_belts)
+        if hasattr(self, 'remove_sections_btn'):
+            self.remove_sections_btn.setEnabled(has_sections)
+        if hasattr(self, 'build_central_axis_btn'):
+            self.build_central_axis_btn.setEnabled(has_sections)
+        if hasattr(self, 'tilt_plane_btn'):
+            self.tilt_plane_btn.setEnabled(has_sections)
+        if hasattr(self, 'tilt_single_section_btn'):
+            self.tilt_single_section_btn.setEnabled(has_sections)
     
     def add_coordinate_axes(self):
         """Добавление осей координат (только для ориентации)"""
@@ -1275,6 +1307,20 @@ class PointEditor3DWidget(QWidget):
         
         # ВАЖНО: сохраняем порядок данных как есть, не сортируем
         # Копируем данные с сохранением индексов и порядка строк
+        if hasattr(self, 'structural_items'):
+            for item in self.structural_items:
+                self.glview.removeItem(item)
+            self.structural_items.clear()
+
+        self._blueprint_applied = False
+        self._clear_tower_preview()
+
+        if not hasattr(self, '_updating_3d_view'):
+            self._updating_3d_view = False
+        if self._updating_3d_view:
+            logger.debug("Пропуск set_data - уже выполняется обновление 3D вида")
+            return
+
         self.data = data.copy()
         
         # Логируем информацию о данных для отладки
@@ -1317,10 +1363,7 @@ class PointEditor3DWidget(QWidget):
             self.data['is_part_boundary'] = boundary_series
         
         # Активируем кнопку создания секций, если есть данные с поясами
-        if hasattr(self, 'create_sections_btn'):
-            has_belts = self.data is not None and not self.data.empty and 'belt' in self.data.columns
-            has_valid_belts = bool(has_belts and self.data['belt'].notna().any())
-            self.create_sections_btn.setEnabled(has_valid_belts)
+        self._update_section_toolbar_state()
         
         # Обновляем внутренние индексы и 3D представление без генерации лишних сигналов
         self._ensure_point_indices()
@@ -1708,7 +1751,8 @@ class PointEditor3DWidget(QWidget):
         if self.data is None or self.data.empty:
             return
 
-        belts = self.data[self.data['belt'].notna()].groupby('belt')
+        group_col = 'face_track' if 'face_track' in self.data.columns else 'belt'
+        belts = self.data[self.data[group_col].notna()].groupby(group_col)
         xy_extent = self.data[['x', 'y']].max().values - self.data[['x', 'y']].min().values
         lateral_offset = max(float(np.max(xy_extent)) * 0.03, 0.25)
         z_range = float(self.data['z'].max() - self.data['z'].min()) if 'z' in self.data.columns else 0.0
@@ -1768,11 +1812,12 @@ class PointEditor3DWidget(QWidget):
             section_data: Список словарей с информацией о секциях
                 [{'height': float, 'points': [(x,y,z),...], 'belt_nums': [...]}, ...]
         """
-        self.section_data = section_data
+        self.section_data = copy.deepcopy(section_data) if section_data else []
         self.update_section_lines()
         
         # Обновляем состояние кнопок
         has_sections = bool(len(section_data) > 0)
+        self._update_section_toolbar_state()
         if hasattr(self, 'build_central_axis_btn'):
             self.build_central_axis_btn.setEnabled(has_sections)
         if hasattr(self, 'remove_sections_btn'):
@@ -1795,8 +1840,84 @@ class PointEditor3DWidget(QWidget):
         
         # Обновляем таблицу секций в главном окне
         self.update_data_table_sections()
+
+    def _current_section_heights(self) -> List[float]:
+        heights: List[float] = []
+        for section in self.section_data or []:
+            try:
+                heights.append(float(section.get('height')))
+            except (TypeError, ValueError):
+                continue
+        return deduplicate_section_heights(
+            heights,
+            tolerance=SECTION_BUILD_HEIGHT_TOLERANCE,
+        )
+
+    def _resolve_section_levels(
+        self,
+        section_levels: Optional[List[float]] = None,
+        *,
+        fallback_to_detected: bool = False,
+    ) -> List[float]:
+        preferred_levels = self._current_section_heights() if section_levels is None else list(section_levels)
+        preferred_levels = deduplicate_section_heights(
+            [float(level) for level in preferred_levels],
+            tolerance=SECTION_BUILD_HEIGHT_TOLERANCE,
+        )
+
+        if self.data is None or self.data.empty:
+            return preferred_levels
+
+        detected_levels = deduplicate_section_heights(
+            find_section_levels(
+                self.data,
+                height_tolerance=SECTION_BUILD_HEIGHT_TOLERANCE,
+            ),
+            tolerance=SECTION_BUILD_HEIGHT_TOLERANCE,
+        )
+
+        if preferred_levels and detected_levels and len(preferred_levels) == len(detected_levels):
+            return detected_levels
+        if preferred_levels:
+            return preferred_levels
+        return detected_levels if fallback_to_detected else []
+
+    def _rebuild_section_data(self, section_levels: Optional[List[float]] = None) -> List[Dict]:
+        if self.data is None or self.data.empty:
+            self.section_data = []
+            return self.section_data
+
+        levels = self._resolve_section_levels(
+            section_levels,
+            fallback_to_detected=bool(section_levels),
+        )
+        self.section_data = (
+            get_section_lines(
+                self.data,
+                levels,
+                height_tolerance=SECTION_BUILD_HEIGHT_TOLERANCE,
+            )
+            if levels else []
+        )
+        return self.section_data
+
+    def _refresh_after_section_mutation(
+        self,
+        *,
+        rebuild_sections: bool = True,
+        section_levels: Optional[List[float]] = None,
+    ) -> None:
+        self.update_all_indices()
+        if rebuild_sections:
+            rebuilt_sections = self._rebuild_section_data(section_levels)
+            self.set_section_lines(rebuilt_sections)
+        else:
+            self.update_section_lines()
+            if self.show_central_axis:
+                self.update_central_axis()
+        self.data_changed.emit()
     
-    def update_section_lines(self):
+    def _legacy_update_section_lines(self):
         """Обновить визуализацию линий секций"""
         # Удаляем старые линии секций
         for line in self.section_lines:
@@ -1852,7 +1973,7 @@ class PointEditor3DWidget(QWidget):
         # Обновляем таблицу секций в главном окне
         self.update_data_table_sections()
 
-    def set_structural_lines(self, members_data: List[Dict[str, Any]]):
+    def _legacy_set_structural_lines(self, members_data: List[Dict[str, Any]]):
         """
         Displays structural members (lattice).
         members_data: list of dicts with 'points' (start, end), 'type' (leg, brace...), 'color'.
@@ -2680,7 +2801,7 @@ class PointEditor3DWidget(QWidget):
         
         logger.info(f"Активирован режим выбора уровня секции для точки {self.pending_point_idx}")
     
-    def project_point_to_section_level(self, section_height: float):
+    def _legacy_project_point_to_section_level(self, section_height: float):
         """Переносит точку на уровень секции вдоль вектора пояса
         
         Логика:
@@ -2871,6 +2992,22 @@ class PointEditor3DWidget(QWidget):
             self.section_selection_mode = False
             self.pending_point_idx = None
     
+    def project_point_to_section_level(self, section_height: float):
+        """Активный путь переноса точки на уровень секции с нормализацией секционных линий."""
+        before_data = self.data.copy(deep=True) if self.data is not None else None
+        description = f'Перенести точку на уровень секции Z={section_height:.2f}м'
+        with self.undo_transaction(description) as tx:
+            self._legacy_project_point_to_section_level(section_height)
+
+            if before_data is None or self.data is None or before_data.equals(self.data):
+                return
+
+            after_levels = self._current_section_heights()
+            self.index_manager.set_data(self.data)
+            rebuilt_sections = self._rebuild_section_data(after_levels)
+            self.set_section_lines(rebuilt_sections)
+            tx.commit()
+
     def align_section_dialog(self):
         """Начинает интерактивный режим выравнивания секции"""
         # Включаем режим выравнивания секции
@@ -2884,7 +3021,7 @@ class PointEditor3DWidget(QWidget):
         
         logger.info("Активирован режим выравнивания секции")
     
-    def align_section(self, section_height: float):
+    def _legacy_align_section(self, section_height: float):
         """Автоматически переносит все точки секции на одну высоту
         
         Логика:
@@ -3056,6 +3193,18 @@ class PointEditor3DWidget(QWidget):
             self.section_alignment_mode = False
             self.pending_point_idx = None
     
+    def align_section(self, section_height: float):
+        """Активный путь выравнивания секции с пересборкой секционных линий."""
+        before_data = self.data.copy(deep=True) if self.data is not None else None
+        self._legacy_align_section(section_height)
+
+        if before_data is None or self.data is None or before_data.equals(self.data):
+            return
+
+        self.index_manager.set_data(self.data)
+        rebuilt_sections = self._rebuild_section_data(self._current_section_heights())
+        self.set_section_lines(rebuilt_sections)
+
     def delete_section_dialog(self):
         """Начинает интерактивный режим удаления конкретной секции"""
         if not self.section_data:
@@ -3071,6 +3220,63 @@ class PointEditor3DWidget(QWidget):
         logger.info("Активирован режим удаления секции")
     
     def delete_section(self, section_height: float):
+        """Удаляет только выбранную секцию и ее сгенерированные точки."""
+        if self.data is None or self.data.empty:
+            self.info_label.setText('⚠ Нет данных для удаления секции')
+            self.section_deletion_mode = False
+            return
+
+        current_levels = self._current_section_heights()
+        remaining_levels = [
+            level
+            for level in current_levels
+            if abs(level - float(section_height)) > SECTION_BUILD_HEIGHT_TOLERANCE
+        ]
+        remaining_levels = deduplicate_section_heights(
+            remaining_levels,
+            tolerance=SECTION_BUILD_HEIGHT_TOLERANCE,
+        )
+
+        if len(remaining_levels) == len(current_levels):
+            self.info_label.setText('⚠ Не удалось найти выбранную секцию')
+            self.section_deletion_mode = False
+            return
+
+        description = f'Удалить секцию Z={section_height:.2f}м'
+        try:
+            with self.undo_transaction(description) as tx:
+                generated_mask = build_section_generated_mask(self.data)
+                target_mask = generated_mask & (
+                    self.data['z'].sub(float(section_height)).abs() <= SECTION_BUILD_HEIGHT_TOLERANCE
+                )
+                removed_points_count = int(target_mask.sum())
+
+                if removed_points_count > 0:
+                    self.data = self.data.loc[~target_mask].copy().reset_index(drop=True)
+
+                self.index_manager.set_data(self.data)
+                self.update_3d_view()
+                rebuilt_sections = self._rebuild_section_data(remaining_levels)
+                self.set_section_lines(rebuilt_sections)
+                self.data_changed.emit()
+                self.update_all_indices()
+                tx.commit()
+
+                self.info_label.setText(
+                    f'✓ Секция удалена! Z={section_height:.3f}м, удалено сгенерированных точек: {removed_points_count}'
+                )
+                logger.info(
+                    "Удалена секция на высоте %.3f м, удалено generated-точек: %s",
+                    section_height,
+                    removed_points_count,
+                )
+        except Exception as e:
+            logger.error(f"РћС€РёР±РєР° РїСЂРё СѓРґР°Р»РµРЅРёРё СЃРµРєС†РёРё: {e}", exc_info=True)
+            self.info_label.setText(f'вќЊ РћС€РёР±РєР°: {str(e)}')
+        finally:
+            self.section_deletion_mode = False
+
+    def _legacy_delete_section(self, section_height: float):
         """Удаляет конкретную секцию и ВСЕ точки на ней (включая основные)
         
         Логика:
@@ -3349,203 +3555,6 @@ class PointEditor3DWidget(QWidget):
         """
         return self._add_section_impl(section_height, tower_part=tower_part, placement=placement)
 
-        try:
-            height_tolerance = 0.3
-            
-            # Проверяем, нет ли уже секции на этой высоте
-            for section in self.section_data:
-                if abs(section['height'] - section_height) < height_tolerance:
-                    self.info_label.setText(f'⚠ Секция на высоте {section_height:.2f}м уже существует')
-                    return
-            
-            # Получаем список поясов (исключаем точки standing)
-            data_without_station = self.data.copy()
-            if 'is_station' in self.data.columns:
-                mask = self._build_is_station_mask(data_without_station['is_station'])
-                data_without_station['is_station'] = mask
-                data_without_station = data_without_station[~mask]
-            
-            available_belts = sorted(data_without_station['belt'].dropna().unique())
-            
-            if len(available_belts) == 0:
-                self.info_label.setText('⚠ Нет поясов для добавления секции')
-                return
-            
-            self._ensure_point_indices()
-            added_count = 0
-            new_points = []
-            
-            # Предварительно определяем часть, если она не указана
-            section_part = tower_part
-            section_segment = tower_part
-            
-            if section_part is None:
-                # Автоматическое определение части из существующих точек
-                # Берем точки близкие к целевой высоте
-                height_mask = self.data['z'].between(section_height - height_tolerance, section_height + height_tolerance)
-                section_points = self.data[height_mask]
-                
-                if not section_points.empty:
-                    # Определяем часть из tower_part или segment
-                    if 'tower_part' in section_points.columns and section_points['tower_part'].notna().any():
-                        # Берем наиболее часто встречающуюся часть
-                        part_counts = section_points['tower_part'].value_counts()
-                        if not part_counts.empty:
-                            section_part = int(part_counts.index[0])
-                            section_segment = section_part  # segment соответствует части
-                    elif 'segment' in section_points.columns and section_points['segment'].notna().any():
-                        segment_counts = section_points['segment'].value_counts()
-                        if not segment_counts.empty:
-                            section_segment = int(segment_counts.index[0])
-                            section_part = section_segment
-                else:
-                    # Если нет точек на этой высоте, ищем ближайшие точки
-                    if not self.data.empty:
-                        # Берем точки выше и ниже
-                        points_below = self.data[self.data['z'] < section_height]
-                        points_above = self.data[self.data['z'] > section_height]
-                        
-                        # Используем точки снизу, если есть, иначе сверху
-                        reference_points = points_below if not points_below.empty else points_above
-                        if not reference_points.empty:
-                            if 'tower_part' in reference_points.columns and reference_points['tower_part'].notna().any():
-                                part_counts = reference_points['tower_part'].value_counts()
-                                if not part_counts.empty:
-                                    section_part = int(part_counts.index[0])
-                                    section_segment = section_part
-                            elif 'segment' in reference_points.columns and reference_points['segment'].notna().any():
-                                segment_counts = reference_points['segment'].value_counts()
-                                if not segment_counts.empty:
-                                    section_segment = int(segment_counts.index[0])
-                                    section_part = section_segment
-            
-            # Убеждаемся, что колонки существуют
-            if 'tower_part' not in self.data.columns:
-                self.data['tower_part'] = None
-            if 'segment' not in self.data.columns:
-                self.data['segment'] = None
-            
-            # Добавляем точку на каждом поясе
-            for belt_num in available_belts:
-                belt_num = int(belt_num)
-                
-                # Получаем точки этого пояса (без точек standing)
-                belt_points = data_without_station[data_without_station['belt'] == belt_num]
-                
-                if len(belt_points) < 2:
-                    logger.warning(f"На поясе {belt_num} недостаточно точек для интерполяции")
-                    continue
-                
-                # Сортируем точки пояса по высоте
-                belt_points_sorted = belt_points.sort_values('z')
-                
-                # Находим точки выше и ниже уровня новой секции
-                points_below = belt_points_sorted[belt_points_sorted['z'] < section_height]
-                points_above = belt_points_sorted[belt_points_sorted['z'] > section_height]
-                
-                # Выбираем точки для интерполяции/экстраполяции
-                if points_below.empty:
-                    # Берем две самые нижние точки (экстраполяция вниз)
-                    p1 = belt_points_sorted.iloc[0]
-                    p2 = belt_points_sorted.iloc[1]
-                elif points_above.empty:
-                    # Берем две самые верхние точки (экстраполяция вверх)
-                    p1 = belt_points_sorted.iloc[-2]
-                    p2 = belt_points_sorted.iloc[-1]
-                else:
-                    # Интерполяция между ближайшими точками
-                    p1 = points_below.iloc[-1]  # Ближайшая снизу
-                    p2 = points_above.iloc[0]   # Ближайшая сверху
-                
-                # Линейная интерполяция/экстраполяция
-                if abs(p2['z'] - p1['z']) < 1e-6:
-                    # Точки на одной высоте
-                    new_x = (p1['x'] + p2['x']) / 2
-                    new_y = (p1['y'] + p2['y']) / 2
-                else:
-                    t = (section_height - p1['z']) / (p2['z'] - p1['z'])
-                    new_x = p1['x'] + t * (p2['x'] - p1['x'])
-                    new_y = p1['y'] + t * (p2['y'] - p1['y'])
-                
-                # Генерируем имя для новой точки
-                new_name = f"S{int(section_height)}_B{belt_num}"
-                
-                # Создаем новую точку с информацией о части
-                new_point = {
-                    'name': new_name,
-                    'x': new_x,
-                    'y': new_y,
-                    'z': section_height,
-                    'belt': belt_num,
-                    'point_index': self._get_next_point_index()
-                }
-                
-                # Устанавливаем tower_part и segment, если они определены
-                if section_part is not None:
-                    new_point['tower_part'] = section_part
-                if section_segment is not None:
-                    new_point['segment'] = section_segment
-                
-                new_points.append((new_x, new_y, section_height))
-                
-                # Добавляем к DataFrame
-                new_point_df = pd.DataFrame([new_point])
-                self.data = pd.concat([self.data, new_point_df], ignore_index=True)
-                self._ensure_point_indices()
-                
-                added_count += 1
-                
-                logger.info(f"Добавлена точка '{new_name}' на ({new_x:.3f}, {new_y:.3f}, {section_height:.3f}), часть: {section_part}")
-            
-            # Добавляем новую секцию в section_data
-            new_section = {
-                'height': section_height,
-                'points': new_points,
-                'belt_nums': [int(b) for b in available_belts]
-            }
-            
-            # Добавляем информацию о части, если она определена
-            if section_part is not None:
-                new_section['tower_part'] = section_part
-            if section_segment is not None:
-                new_section['segment'] = section_segment
-            
-            self.section_data.append(new_section)
-            
-            # Сортируем section_data по высоте
-            self.section_data = sorted(self.section_data, key=lambda s: s['height'])
-            
-            # Обновляем IndexManager после добавления точек
-            self.index_manager.set_data(self.data)
-            
-            # Обновляем визуализацию
-            self.update_3d_view()
-            self.update_section_lines()
-            
-            # Обновляем состояние кнопок
-            has_sections = bool(len(self.section_data) > 0)
-            if hasattr(self, 'build_central_axis_btn'):
-                self.build_central_axis_btn.setEnabled(has_sections)
-            
-            # Обновляем центральную ось, если она отображается
-            if self.show_central_axis:
-                self.update_central_axis()
-            
-            # Сигнализируем об изменении
-            self.data_changed.emit()
-            self.update_all_indices()
-            
-            # Показываем информацию
-            self.info_label.setText(
-                f'✓ Секция добавлена! Z={section_height:.3f}м, добавлено точек: {added_count}'
-            )
-            
-            logger.info(f"Добавлена секция на высоте {section_height:.3f}м: {added_count} точек")
-            
-        except Exception as e:
-            logger.error(f"Ошибка при добавлении секции: {e}", exc_info=True)
-            self.info_label.setText(f'❌ Ошибка: {str(e)}')
-
     def _add_section_impl(
         self,
         section_height: float,
@@ -3710,20 +3719,9 @@ class PointEditor3DWidget(QWidget):
                         if section.get('height') is not None
                     ] + [float(section_height)]
                 )
-                self.section_data = get_section_lines(self.data, requested_heights, height_tolerance=height_tolerance)
-
                 self.index_manager.set_data(self.data)
                 self.update_3d_view()
-                self.update_section_lines()
-
-                has_sections = bool(self.section_data)
-                if hasattr(self, 'build_central_axis_btn'):
-                    self.build_central_axis_btn.setEnabled(has_sections)
-                if self.show_central_axis:
-                    self.update_central_axis()
-
-                self.data_changed.emit()
-                self.update_all_indices()
+                self._refresh_after_section_mutation(section_levels=requested_heights)
                 tx.commit()
 
                 self.info_label.setText(
@@ -3835,41 +3833,27 @@ class PointEditor3DWidget(QWidget):
                 self.info_label.setText('⚠ Смещение слишком мало')
                 return
             
-            # Подсчитываем количество точек
-            total_points = len(self.data)
-            
-            # Смещаем все точки по Z
-            self.data['z'] = self.data['z'] + offset
-            
-            logger.info(f"Смещено {total_points} точек на {offset:+.3f}м по оси Z")
-            
-            # Смещаем все секции
-            if self.section_data:
-                sections_count = len(self.section_data)
-                
-                for section in self.section_data:
-                    # Обновляем высоту секции
-                    section['height'] += offset
-                    
-                    # Обновляем координаты Z для всех точек в секции
-                    updated_points = []
-                    for x, y, z in section['points']:
-                        updated_points.append((x, y, z + offset))
-                    section['points'] = updated_points
-                
-                logger.info(f"Смещено {sections_count} секций на {offset:+.3f}м")
-            
-            # Обновляем визуализацию
-            self.update_3d_view()
-            self.update_section_lines()
-            
-            # Обновляем центральную ось, если она отображается
-            if self.show_central_axis:
-                self.update_central_axis()
-            
-            # Сигнализируем об изменении данных
-            self.data_changed.emit()
-            self.update_all_indices()
+            current_levels = self._current_section_heights()
+            description = f'Сместить башню по высоте на {offset:+.3f} м'
+            with self.undo_transaction(description) as tx:
+                total_points = len(self.data)
+                self.data['z'] = self.data['z'] + offset
+                self.index_manager.set_data(self.data)
+                logger.info(f"Смещено {total_points} точек на {offset:+.3f}м по оси Z")
+
+                self.update_3d_view()
+                rebuilt_sections = self._rebuild_section_data(current_levels) if current_levels else []
+                if current_levels:
+                    self.set_section_lines(rebuilt_sections)
+                    logger.info(f"Смещено {len(rebuilt_sections)} секций на {offset:+.3f}м")
+                else:
+                    self.update_section_lines()
+                    if self.show_central_axis:
+                        self.update_central_axis()
+
+                self.data_changed.emit()
+                self.update_all_indices()
+                tx.commit()
             
             # Находим новую минимальную высоту
             new_min_height = self.data['z'].min()
@@ -5062,7 +5046,7 @@ class PointEditor3DWidget(QWidget):
             self.update_3d_view()
         self.update_info_label()
     
-    def set_data(self, data: pd.DataFrame, preserve_history: bool = False):
+    def _legacy_set_data_simple(self, data: pd.DataFrame, preserve_history: bool = False):
         """
         Установить данные для отображения
         
@@ -5086,10 +5070,7 @@ class PointEditor3DWidget(QWidget):
             self.data['is_station'] = False
         
         # Активируем кнопку создания секций, если есть данные с поясами
-        if hasattr(self, 'create_sections_btn'):
-            has_belts = self.data is not None and not self.data.empty and 'belt' in self.data.columns
-            has_valid_belts = bool(has_belts and self.data['belt'].notna().any())
-            self.create_sections_btn.setEnabled(has_valid_belts)
+        self._update_section_toolbar_state()
         
         # Обновляем внутренние индексы без лишних сигналов
         self._ensure_point_indices()
@@ -5135,7 +5116,11 @@ class PointEditor3DWidget(QWidget):
             if 'center' in section:
                 center = section.get('center')
                 if center is not None:
-                    section_dict['center'] = tuple(center) if isinstance(center, (list, tuple)) else center
+                    section_dict['center'] = (
+                        tuple(center)
+                        if isinstance(center, (list, tuple, np.ndarray))
+                        else center
+                    )
             
             section_snapshot.append(section_dict)
 
@@ -5178,14 +5163,20 @@ class PointEditor3DWidget(QWidget):
             
             self.section_data.append(section_dict)
 
+        if self.data is not None and not self.data.empty and self.section_data:
+            section_levels = [
+                float(section.get('height'))
+                for section in snapshot_sections
+                if section.get('height') is not None
+            ]
+            self.section_data = self._rebuild_section_data(section_levels)
+
         self.show_central_axis = snapshot.get('show_central_axis', False)
         self.set_xy_plane_state(snapshot.get('xy_plane_state'), update_geometry=False)
 
         # Перерисовываем 3D и таблицы
         self.update_all_indices()
-        self.update_section_lines()
-        if self.show_central_axis:
-            self.update_central_axis()
+        self.set_section_lines(self.section_data)
 
         self.data_changed.emit()
 
@@ -5203,9 +5194,80 @@ class PointEditor3DWidget(QWidget):
         self.update_undo_redo_buttons()
         return state
 
+    def _history_main_window(self):
+        main_window = self.parent()
+        while main_window and not (
+            hasattr(main_window, 'undo_manager')
+            and hasattr(main_window, '_capture_editor_undo_state')
+            and hasattr(main_window, '_apply_editor_undo_state')
+        ):
+            main_window = main_window.parent()
+        return main_window
+
+    @staticmethod
+    def _history_state_frames_equal(left, right) -> bool:
+        if left is None and right is None:
+            return True
+        if isinstance(left, pd.DataFrame) and isinstance(right, pd.DataFrame):
+            return left.equals(right)
+        return False
+
+    @classmethod
+    def _history_states_equal(cls, before_state: dict, after_state: dict) -> bool:
+        if not cls._history_state_frames_equal(before_state.get('data'), after_state.get('data')):
+            return False
+        if not cls._history_state_frames_equal(
+            before_state.get('original_data_before_sections'),
+            after_state.get('original_data_before_sections'),
+        ):
+            return False
+        return (
+            before_state.get('section_data', []) == after_state.get('section_data', [])
+            and bool(before_state.get('show_central_axis', False))
+            == bool(after_state.get('show_central_axis', False))
+            and before_state.get('point_index_counter') == after_state.get('point_index_counter')
+            and before_state.get('xy_plane_state') == after_state.get('xy_plane_state')
+        )
+
     @contextmanager
     def undo_transaction(self, description: str):
         """Контекст для операций с поддержкой undo/redo."""
+        history_main_window = self._history_main_window()
+        if history_main_window is not None:
+            before_state = history_main_window._capture_editor_undo_state()
+            committed = False
+
+            class _UndoRecord:
+                def commit(self_inner):
+                    nonlocal committed
+                    committed = True
+
+            record = _UndoRecord()
+
+            try:
+                yield record
+                if committed:
+                    after_state = history_main_window._capture_editor_undo_state()
+                    if not self._history_states_equal(before_state, after_state):
+                        from core.undo_manager import EditorStateCommand
+
+                        command = EditorStateCommand(
+                            history_main_window,
+                            before_state,
+                            after_state,
+                            description=description,
+                            skip_initial_execute=True,
+                        )
+                        if not history_main_window.undo_manager.execute_command(command):
+                            raise RuntimeError(f'Не удалось добавить действие в undo: {description}')
+                        history_main_window._update_undo_redo_actions()
+                return
+            except Exception:
+                history_main_window._apply_editor_undo_state(before_state)
+                raise
+            finally:
+                self.update_undo_redo_buttons()
+
         state = self.push_undo_state(description)
         committed = False
 
@@ -5237,6 +5299,15 @@ class PointEditor3DWidget(QWidget):
 
     def undo_action(self):
         """Отменяет последнюю операцию."""
+        history_main_window = self._history_main_window()
+        if history_main_window is not None:
+            history_main_window.undo()
+            if hasattr(self, 'info_label'):
+                description = history_main_window.undo_manager.get_redo_description()
+                if description:
+                    self.info_label.setText(f'↩️ Отменено действие: {description}')
+            return
+
         if not self.undo_stack:
             return
 
@@ -5248,6 +5319,15 @@ class PointEditor3DWidget(QWidget):
 
     def redo_action(self):
         """Повторяет последнюю отменённую операцию."""
+        history_main_window = self._history_main_window()
+        if history_main_window is not None:
+            history_main_window.redo()
+            if hasattr(self, 'info_label'):
+                description = history_main_window.undo_manager.get_undo_description()
+                if description:
+                    self.info_label.setText(f'↪️ Повторено действие: {description}')
+            return
+
         if not self.redo_stack:
             return
 
@@ -5259,6 +5339,16 @@ class PointEditor3DWidget(QWidget):
 
     def update_undo_redo_buttons(self):
         """Обновляет доступность кнопок Undo/Redo."""
+        history_main_window = self._history_main_window()
+        if history_main_window is not None:
+            can_undo = history_main_window.undo_manager.can_undo()
+            can_redo = history_main_window.undo_manager.can_redo()
+            if hasattr(self, 'undo_button'):
+                self.undo_button.setEnabled(can_undo)
+            if hasattr(self, 'redo_button'):
+                self.redo_button.setEnabled(can_redo)
+            return
+
         if hasattr(self, 'undo_button'):
             self.undo_button.setEnabled(bool(self.undo_stack))
         if hasattr(self, 'redo_button'):
@@ -5736,17 +5826,11 @@ class PointEditor3DWidget(QWidget):
 
                 try:
                     updated_levels = sorted(set(new_section_levels))
-                    new_section_data = get_section_lines(self.data, updated_levels, height_tolerance=0.3)
-                    self.section_data = new_section_data
+                    self.index_manager.set_data(self.data)
+                    self.update_3d_view()
+                    self._refresh_after_section_mutation(section_levels=updated_levels)
                 except Exception as exc:
                     logger.warning(f"Не удалось пересобрать линии секций после выравнивания: {exc}")
-
-                self.update_all_indices()
-                self.update_section_lines()
-                if self.show_central_axis:
-                    self.update_central_axis()
-
-                self.data_changed.emit()
 
                 average_distance = total_distance / moved_total if moved_total else 0.0
                 self.info_label.setText(
@@ -6365,23 +6449,11 @@ class PointEditor3DWidget(QWidget):
                     self.info_label.setText('⚠ Точки не изменились — операция отменена.')
                     return
 
-                # Пересчитываем section_levels из актуальных данных после изменения координат
-                section_levels = find_section_levels(self.data, height_tolerance=0.3)
-                
-                if section_levels:
-                    # Обновляем section_data с актуальными координатами точек
-                    # get_section_lines теперь всегда правильно сохраняет информацию о частях из данных точек
-                    self.section_data = get_section_lines(self.data, section_levels, height_tolerance=0.3)
-                else:
-                    self.section_data = []
-
-                self.update_all_indices()
+                self.index_manager.set_data(self.data)
                 self.update_3d_view()
-                self.update_section_lines()
-                if self.show_central_axis:
-                    self.update_central_axis()
-
-                self.data_changed.emit()
+                self._refresh_after_section_mutation(
+                    section_levels=self._current_section_heights(),
+                )
                 tx.commit()
 
                 # Синхронизируем крен с отклонениями секций в конструкторе
@@ -6465,23 +6537,11 @@ class PointEditor3DWidget(QWidget):
                     self.data.at[idx, 'x'] = float(self.data.at[idx, 'x']) + float(delta_vec[0])
                     self.data.at[idx, 'y'] = float(self.data.at[idx, 'y']) + float(delta_vec[1])
 
-                # Пересчитываем section_levels из актуальных данных после изменения координат
-                section_levels = find_section_levels(self.data, height_tolerance=0.3)
-                
-                if section_levels:
-                    # Обновляем section_data с актуальными координатами точек
-                    # get_section_lines теперь всегда правильно сохраняет информацию о частях из данных точек
-                    self.section_data = get_section_lines(self.data, section_levels, height_tolerance=0.3)
-                else:
-                    self.section_data = []
-
-                self.update_all_indices()
+                self.index_manager.set_data(self.data)
                 self.update_3d_view()
-                self.update_section_lines()
-                if self.show_central_axis:
-                    self.update_central_axis()
-
-                self.data_changed.emit()
+                self._refresh_after_section_mutation(
+                    section_levels=self._current_section_heights(),
+                )
                 tx.commit()
                 
                 # Синхронизируем крен с отклонениями секций в конструкторе

@@ -8,6 +8,7 @@ import math
 import re
 import struct
 import xml.etree.ElementTree as ET
+from collections import defaultdict
 from pathlib import Path
 from typing import Any
 
@@ -88,6 +89,139 @@ def _annotate_trimble_point_records(data: pd.DataFrame) -> tuple[pd.DataFrame, d
     return annotated, details
 
 
+def _deduplicate_multi_station_points(
+    df: pd.DataFrame,
+    *,
+    xy_tol: float = 0.30,
+    z_tol: float = 0.50,
+) -> tuple[pd.DataFrame, dict[str, Any]]:
+    """
+    Для данных с несколькими стояниями находит одинаковые физические точки,
+    измеренные с разных инструментальных стояний, и помечает избыточные
+    измерения как is_control=True.
+
+    Критерий «лучшего» измерения: наименьшее горизонтальное расстояние
+    от точки до её стояния. Более близкое стояние = более точное измерение.
+
+    Параметры:
+        xy_tol: максимальное горизонтальное расстояние (м) для признания дублем
+        z_tol:  максимальная разность по Z (м) для признания дублем
+
+    Возвращает (df_с_пометками, stats_dict).
+    """
+    result = df.copy()
+    if 'is_control' not in result.columns:
+        result['is_control'] = False
+
+    stats: dict[str, Any] = {
+        'multi_station_dedup_applied': False,
+        'duplicate_groups': 0,
+        'redundant_points_marked': 0,
+        'station_positions': {},
+    }
+
+    if 'survey_station_name' not in result.columns:
+        return result, stats
+
+    # Собираем координаты стояний из строк-стояний
+    station_positions: dict[str, np.ndarray] = {}
+    if 'is_station' in result.columns:
+        for idx in result[result['is_station'].astype(bool)].index:
+            row = result.loc[idx]
+            st_name = str(row.get('survey_station_name') or row.get('name') or '').strip()
+            if not st_name:
+                continue
+            try:
+                pos = np.array([float(row['x']), float(row['y'])], dtype=float)
+                if np.all(np.isfinite(pos)):
+                    station_positions[st_name] = pos
+            except (ValueError, TypeError, KeyError):
+                pass
+    stats['station_positions'] = {k: v.tolist() for k, v in station_positions.items()}
+
+    # Отбираем только рабочие измерительные точки
+    working_mask = pd.Series(True, index=result.index)
+    for flag_col in ('is_station', 'is_auxiliary', 'is_control'):
+        if flag_col in result.columns:
+            working_mask &= ~result[flag_col].astype(bool)
+
+    working = result[working_mask]
+    if len(working) < 2:
+        return result, stats
+
+    working_indices = working.index.tolist()
+    n = len(working_indices)
+    coords_xy = working[['x', 'y']].to_numpy(dtype=float)
+    coords_z = working['z'].to_numpy(dtype=float)
+    station_names = working['survey_station_name'].fillna('').tolist()
+
+    # Union-Find для кластеризации дублей
+    parent = list(range(n))
+
+    def _find(i: int) -> int:
+        while parent[i] != i:
+            parent[i] = parent[parent[i]]
+            i = parent[i]
+        return i
+
+    def _union(i: int, j: int) -> None:
+        pi, pj = _find(i), _find(j)
+        if pi != pj:
+            parent[pj] = pi
+
+    for i in range(n):
+        for j in range(i + 1, n):
+            if station_names[i] == station_names[j]:
+                continue  # одно стояние — не дубль
+            dxy = float(np.linalg.norm(coords_xy[i] - coords_xy[j]))
+            dz = abs(float(coords_z[i]) - float(coords_z[j]))
+            if dxy <= xy_tol and dz <= z_tol:
+                _union(i, j)
+
+    # Собираем кластеры
+    clusters: dict[int, list[int]] = defaultdict(list)
+    for i in range(n):
+        clusters[_find(i)].append(i)
+
+    duplicate_clusters = {r: m for r, m in clusters.items() if len(m) > 1}
+    if not duplicate_clusters:
+        return result, stats
+
+    stats['multi_station_dedup_applied'] = True
+    stats['duplicate_groups'] = len(duplicate_clusters)
+
+    marked_control = 0
+    for members in duplicate_clusters.values():
+        # Для каждого члена группы вычисляем расстояние до своего стояния
+        dist_to_station: list[float] = []
+        for i in members:
+            st_name = station_names[i]
+            st_pos = station_positions.get(st_name)
+            if st_pos is not None:
+                dist = float(np.linalg.norm(coords_xy[i] - st_pos))
+            else:
+                dist = float('inf')
+            dist_to_station.append(dist)
+
+        # Лучший — ближайший к своей стоянке; при равенстве берём первый
+        best_local = int(np.argmin(dist_to_station))
+        for k, i in enumerate(members):
+            if k != best_local:
+                original_idx = working_indices[i]
+                result.at[original_idx, 'is_control'] = True
+                marked_control += 1
+
+    stats['redundant_points_marked'] = marked_control
+
+    if marked_control > 0:
+        logger.info(
+            f"Автодедупликация многостояночных данных: "
+            f"{len(duplicate_clusters)} групп дублей, "
+            f"помечено {marked_control} избыточных измерений как контрольные"
+        )
+    return result, stats
+
+
 class TrimbleJobXMLLoader:
     """
     Загрузчик для Trimble JobXML формата
@@ -104,6 +238,7 @@ class TrimbleJobXMLLoader:
         self.warnings: list[str] = []
         self.raw_records = 0
         self.annotation_details: dict[str, Any] = {}
+        self.dedup_stats: dict[str, Any] = {}
 
     def load(self) -> pd.DataFrame:
         """Загружает данные из JobXML файла"""
@@ -214,12 +349,27 @@ class TrimbleJobXMLLoader:
             raise ValueError(f"Ошибка чтения JobXML: {e!s}")
 
     def _to_dataframe(self) -> pd.DataFrame:
-        """Конвертирует точки в DataFrame"""
+        """Конвертирует точки в DataFrame. При наличии нескольких стояний
+        автоматически помечает избыточные дублирующие измерения."""
         df = pd.DataFrame(self.points)
         result = df[['x', 'y', 'z']].copy()
         result['name'] = df['point_id']
         annotated, annotation_details = _annotate_trimble_point_records(result)
         self.annotation_details = annotation_details
+
+        if annotation_details.get('multi_station_detected'):
+            annotated, dedup_stats = _deduplicate_multi_station_points(annotated)
+            self.dedup_stats = dedup_stats
+            n_marked = int(dedup_stats.get('redundant_points_marked', 0))
+            n_groups = int(dedup_stats.get('duplicate_groups', 0))
+            if n_marked > 0:
+                self.warnings.append(
+                    f"Обнаружено {n_groups} групп задублированных измерений "
+                    f"({n_marked} точек помечены как контрольные дубли). "
+                    f"Для каждой группы автоматически выбрано лучшее измерение "
+                    f"по дистанции до стоянки. Ручная перестановка по поясам доступна в мастере импорта."
+                )
+
         return annotated
 
 
@@ -946,6 +1096,9 @@ def load_trimble_data_detailed(file_path: str) -> LoadedSurveyData:
     if ext in ['.jxl', '.jobxml', '.xml']:
         loader = TrimbleJobXMLLoader(file_path)
         data = loader.load()
+        details: dict[str, Any] = dict(loader.annotation_details)
+        if loader.dedup_stats:
+            details['dedup_stats'] = loader.dedup_stats
         return _build_trimble_loaded_data(
             file_path=file_path,
             data=data,
@@ -953,7 +1106,7 @@ def load_trimble_data_detailed(file_path: str) -> LoadedSurveyData:
             warnings=loader.warnings,
             raw_records=loader.raw_records or len(data),
             confidence=0.96,
-            details=loader.annotation_details,
+            details=details,
         )
 
     if ext == '.csv':
