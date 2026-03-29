@@ -37,6 +37,7 @@ from gui.editor_components import (
     ContrastGLTextItem,
     ButtonGroupWidget,
     ToolPanelWidget,
+    TabToolbarWidget,
     PointEditDialog,
     TiltPlaneDialog,
 )
@@ -65,6 +66,7 @@ class PointEditor3DWidget(QWidget):
     toolbar_position_changed = pyqtSignal(str)
     tower_blueprint_requested = pyqtSignal(object)
     tower_reference_model_updated = pyqtSignal(object)
+    build_belt_requested = pyqtSignal()  # Запрос достройки пояса (обрабатывается MainWindow)
     
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -177,8 +179,8 @@ class PointEditor3DWidget(QWidget):
         self.root_layout = root_layout
         
         # Панель инструментов (возможность менять позицию)
-        self.toolbar = self.create_toolbar()
-        self.toolbar.set_position(self.toolbar_position)
+        self.toolbar: TabToolbarWidget = self.create_toolbar()
+        self.toolbar.set_position('top')
         
         # 3D вид
         self.glview = gl.GLViewWidget()
@@ -287,8 +289,13 @@ class PointEditor3DWidget(QWidget):
                                 width: int = 78, height: int = 54, enabled: bool = True,
                                 rich_tooltip_title: Optional[str] = None,
                                 rich_tooltip_desc: Optional[str] = None,
-                                rich_tooltip_shortcut: Optional[str] = None) -> QPushButton:
-        """Создает компактную многострочную кнопку для тулбара редактора."""
+                                rich_tooltip_shortcut: Optional[str] = None,
+                                use_max_clamp: bool = True,
+                                register: bool = True) -> QPushButton:
+        """Создает компактную многострочную кнопку для тулбара редактора.
+        use_max_clamp=False — использовать точные размеры (для кнопок внутри группы).
+        register=False — не добавлять в список toolbar_buttons (для кнопок внутри группы).
+        """
         button = QPushButton(text)
         button.setObjectName('editorToolbarButton')
         button.setCheckable(checkable)
@@ -297,9 +304,12 @@ class PointEditor3DWidget(QWidget):
         button.setEnabled(enabled)
         button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         button.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
-        # Увеличиваем размеры кнопок для лучшей читаемости текста
-        button.setFixedWidth(max(width, 85))
-        button.setFixedHeight(max(height, 56))
+        if use_max_clamp:
+            button.setFixedWidth(max(width, 85))
+            button.setFixedHeight(max(height, 56))
+        else:
+            button.setFixedWidth(width)
+            button.setFixedHeight(height)
         # Всегда устанавливаем tooltip - если не указан, используем текст кнопки
         if tooltip:
             button.setToolTip(tooltip)
@@ -339,7 +349,8 @@ class PointEditor3DWidget(QWidget):
             else:
                 button.clicked.connect(callback)
         
-        self._register_toolbar_button(button, base_width=width, base_height=height)
+        if register:
+            self._register_toolbar_button(button, base_width=width, base_height=height)
         return button
 
     def _register_toolbar_button(self, button: QWidget, *, base_width: int, base_height: int):
@@ -393,53 +404,209 @@ class PointEditor3DWidget(QWidget):
         self.toolbar_position_changed.emit(self.toolbar_position)
 
     def apply_toolbar_position(self, initial: bool = False):
-        """Применяет текущее расположение панели инструментов."""
+        """Применяет текущее расположение панели инструментов.
+        TabToolbarWidget всегда размещается сверху (top) — он горизонтальный по природе."""
         if not hasattr(self, 'toolbar') or self.toolbar is None:
             return
-        
-        # Удаляем панель из предыдущего контейнера
+
+        # Извлекаем из предыдущего контейнера
         if hasattr(self, 'main_area_layout'):
             self.main_area_layout.removeWidget(self.toolbar)
         if hasattr(self, 'root_layout'):
             self.root_layout.removeWidget(self.toolbar)
-        
+
         self.toolbar.setParent(None)
         self.toolbar.hide()
-        
-        self.toolbar.set_position(self.toolbar_position)
-        
-        if self.toolbar_position == 'left':
-            self.main_area_layout.insertWidget(0, self.toolbar, 0)
-        elif self.toolbar_position == 'right':
-            self.main_area_layout.addWidget(self.toolbar, 0)
-        elif self.toolbar_position == 'top':
-            self.root_layout.insertWidget(0, self.toolbar)
-        else:
-            self.main_area_layout.insertWidget(0, self.toolbar, 0)
-        
+        self.toolbar.set_position('top')
+
+        # TabToolbarWidget всегда идёт в верхнюю строку root_layout
+        self.root_layout.insertWidget(0, self.toolbar)
+
         self.toolbar.show()
         self.toolbar.reflow()
         self._update_toolbar_button_sizes()
         self._update_toolbar_position_menu()
-        
+
         if not initial:
             self.update()
 
-    def create_toolbar(self) -> ToolPanelWidget:
-        """Создание панели инструментов"""
-        toolbar = ToolPanelWidget(self)
+    def create_toolbar(self) -> TabToolbarWidget:
+        """Создание компактной вкладочной панели инструментов.
+        6 вкладок (Точки / Пояса / Секции / Ред. секций / Выравн./Крен / Правка+Вид),
+        каждая показывает одну строку кнопок высотой 42px.
+        Полная высота ~70px вместо ~300px."""
+        toolbar = TabToolbarWidget(self)
 
-        # Меню настройки расположения панели
+        # Вспомогательный метод создания компактной кнопки для вкладки
+        def _tb(text, *, cb, tooltip, checkable=False, checked=False, enabled=True,
+                rt_title=None, rt_desc=None, rt_shortcut=None, w=70, h=42):
+            return self._create_toolbar_button(
+                text, callback=cb, tooltip=tooltip,
+                checkable=checkable, checked=checked, enabled=enabled,
+                rich_tooltip_title=rt_title, rich_tooltip_desc=rt_desc,
+                rich_tooltip_shortcut=rt_shortcut,
+                width=w, height=h, use_max_clamp=False, register=False
+            )
+
+        # ========== Вкладка 1: Точки ==========
+        toolbar.add_tab('Точки', [
+            _tb('➕\nТочку', cb=self.add_point_dialog,
+                tooltip='Добавить новую точку в башню',
+                rt_title='Добавить точку',
+                rt_desc='Открывает диалог для добавления новой точки. Укажите координаты X, Y, Z и пояс.'),
+            _tb('✏️\nРедакт.', cb=self.edit_selected_point,
+                tooltip='Редактировать выбранную точку',
+                rt_title='Редактировать точку',
+                rt_desc='Редактирует координаты выбранной точки. Выберите точку, затем нажмите кнопку.'),
+            _tb('❌\nУдалить', cb=self.delete_selected_points,
+                tooltip='Удалить выбранные точки (Del)',
+                rt_title='Удалить точки',
+                rt_desc='Удаляет выбранные точки из башни.',
+                rt_shortcut='Del'),
+        ])
+
+        # ========== Вкладка 2: Пояса ==========
+        toolbar.add_tab('Пояса', [
+            _tb('🏷️\nНа пояс', cb=self.move_all_belt_points_to_line_dialog,
+                tooltip='Перенести все точки пояса на выбранную линию',
+                rt_title='Перенести точки на пояс',
+                rt_desc='Все точки пояса переносятся на выбранную линию — для выравнивания по поясу.'),
+            _tb('📍\nНа линию', cb=self.project_to_belt_line_dialog,
+                tooltip='Спроецировать выбранные точки на линию пояса',
+                rt_title='На линию пояса',
+                rt_desc='Проецирует выбранные точки на линию пояса перпендикулярно к ней.'),
+            _tb('⬛\nДостроить', cb=lambda: self.build_belt_requested.emit(), w=76,
+                tooltip='Достроить недостающий пояс на основе соседних поясов',
+                rt_title='Достроить пояс',
+                rt_desc='Автоматически создаёт недостающий пояс башни на основе геометрии соседних поясов. Используется для восстановления пропущенных данных.'),
+        ])
+
+        # ========== Вкладка 3: Секции ==========
+        self.create_sections_btn = _tb(
+            '📏\nСоздать', cb=self.create_sections_wrapper,
+            tooltip='Автоматически разбить башню на секции', enabled=False,
+            rt_title='Создать секции',
+            rt_desc='Автоматически разбивает башню на секции, добавляя недостающие точки.')
+        self.create_sections_action = self.create_sections_btn
+
+        self.remove_sections_btn = _tb(
+            '🔙\nОтменить', cb=self.remove_sections_wrapper,
+            tooltip='Удалить все точки секций, вернуть исходные данные', enabled=False,
+            rt_title='Отменить секции',
+            rt_desc='Удаляет все добавленные точки секций, возвращая башню к исходному виду.')
+        self.remove_sections_action = self.remove_sections_btn
+
+        self.build_central_axis_btn = _tb(
+            '📌\nОсь', cb=self.build_central_axis,
+            tooltip='Построить центральную ось через центры секций', enabled=False,
+            rt_title='Центральная ось',
+            rt_desc='Строит вертикальную линию через центры всех секций башни.')
+        self.build_central_axis_action = self.build_central_axis_btn
+
+        toolbar.add_tab('Секции', [
+            self.create_sections_btn,
+            self.remove_sections_btn,
+            self.build_central_axis_btn,
+        ])
+
+        # ========== Вкладка 4: Ред. секций ==========
+        toolbar.add_tab('Ред. секций', [
+            _tb('➕\nДоб. секцию', cb=self.add_section_dialog, w=82,
+                tooltip='Добавить новую секцию над или под существующей',
+                rt_title='Добавить секцию',
+                rt_desc='Добавляет новую секцию над или под существующей.'),
+            _tb('🗑️\nУдал. секцию', cb=self.delete_section_dialog, w=82,
+                tooltip='Удалить выбранную секцию и её точки',
+                rt_title='Удалить секцию',
+                rt_desc='Удаляет выбранную секцию и все точки, добавленные при её создании.'),
+            _tb('⬆️\nСдвинуть', cb=self.shift_tower_height_dialog,
+                tooltip='Сместить всю башню по высоте',
+                rt_title='Сдвинуть башню',
+                rt_desc='Смещает всю башню по вертикали, изменяя высоту нижней секции.'),
+        ])
+
+        # ========== Вкладка 5: Выравн./Крен ==========
+        self.tilt_plane_btn = _tb(
+            '⚙️\nКрен', cb=self.open_section_tilt_dialog,
+            tooltip='Задать крен секции (глобально, влияет на выше стоящие)', enabled=False,
+            rt_title='Крен секции',
+            rt_desc='Поворачивает плоскость так, чтобы выбранная секция имела заданный крен. Влияет на все секции выше.')
+        self.tilt_single_section_btn = _tb(
+            '⚙️\nКрен (лок.)', cb=self.open_single_section_tilt_dialog,
+            tooltip='Задать крен только выбранной секции (локально)', enabled=False,
+            rt_title='Крен секции (локальный)',
+            rt_desc='Перераспределяет только выбранную секцию под заданный крен, не влияя на другие.')
+
+        toolbar.add_tab('Выравн./Крен', [
+            _tb('📐\nНа уровень', cb=self.project_to_section_level_dialog, w=76,
+                tooltip='Спроецировать точки на уровень секции',
+                rt_title='На уровень секции',
+                rt_desc='Проецирует выбранные точки на горизонтальный уровень секции.'),
+            _tb('🔧\nВыр. секцию', cb=self.align_section_dialog, w=78,
+                tooltip='Выровнять все точки секции по одной линии',
+                rt_title='Выровнять секцию',
+                rt_desc='Переносит все точки выбранной секции на одну прямую линию.'),
+            _tb('⚖️\nВсе секц.', cb=self.align_all_sections_dialog,
+                tooltip='Выровнять все секции по выбранному поясу',
+                rt_title='Выровнять все секции',
+                rt_desc='Выравнивает все секции башни по выбранному поясу с умным переносом точек.'),
+            self.tilt_plane_btn,
+            self.tilt_single_section_btn,
+        ])
+
+        # ========== Вкладка 6: Правка / Вид ==========
+        self.undo_button = _tb(
+            '↩️\nОтменить', cb=self.undo_action,
+            tooltip='Отменить последнее действие (Ctrl+Z)', enabled=False,
+            rt_title='Отменить', rt_desc='Отменяет последнее выполненное действие.',
+            rt_shortcut='Ctrl+Z')
+        self.redo_button = _tb(
+            '↪️\nПовторить', cb=self.redo_action,
+            tooltip='Повторить отменённое действие (Ctrl+Y)', enabled=False,
+            rt_title='Повторить', rt_desc='Повторяет последнее отменённое действие.',
+            rt_shortcut='Ctrl+Y')
+        self.move_xy_plane_btn = _tb(
+            '🟦\nПеренести XY', cb=self.start_xy_plane_move_mode, w=78,
+            tooltip='Перенести плоскость XY через выбранную точку',
+            rt_title='Перенести XY',
+            rt_desc='Переносит начало координат (плоскость XY) в выбранную точку.')
+        self.toggle_belt_lines_btn = _tb(
+            '👁️\nЛинии поясов', cb=self.toggle_belt_lines, w=82,
+            tooltip='Показать/скрыть линии поясов', checkable=True, checked=True,
+            rt_title='Линии поясов',
+            rt_desc='Переключает отображение линий поясов в 3D-виде.')
+        self.toggle_tower_visualization_btn = _tb(
+            '🏗️\nБашня 3D', cb=self.toggle_tower_visualization,
+            tooltip='Показать/скрыть визуализацию башни из конструктора',
+            checkable=True, checked=True, enabled=False,
+            rt_title='Башня 3D',
+            rt_desc='Переключает отображение 3D-модели башни из конструктора.')
+        self.tower_builder_toggle_btn = _tb(
+            '🏗️\nКонструктор', cb=self.toggle_tower_builder_panel, w=82,
+            tooltip='Показать или скрыть конструктор башни', checkable=True, checked=False,
+            rt_title='Конструктор',
+            rt_desc='Открывает или скрывает панель конструктора башни.')
+
+        toolbar.add_tab('Правка / Вид', [
+            self.undo_button,
+            self.redo_button,
+            self.move_xy_plane_btn,
+            self.toggle_belt_lines_btn,
+            self.toggle_tower_visualization_btn,
+            self.tower_builder_toggle_btn,
+            _tb('🔄\nСброс вида', cb=self.reset_camera, w=76,
+                tooltip='Сбросить вид камеры к исходному положению',
+                rt_title='Сброс вида',
+                rt_desc='Возвращает камеру в исходное положение.'),
+        ])
+
+        # ---- Кнопка настройки расположения (справа от вкладок) ----
         settings_button = QToolButton()
-        settings_button.setText('⚙️\nПанель')
+        settings_button.setText('⚙️')
         settings_button.setToolTip('Изменить расположение панели инструментов')
         settings_button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         settings_button.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
-        settings_button.setStyleSheet(
-            "padding: 6px 8px; font-size: 11px; font-weight: 500; text-align: center;"
-        )
-        self._register_toolbar_button(settings_button, base_width=66, base_height=48)
-
+        settings_button.setFixedSize(28, 22)
         settings_menu = QMenu(settings_button)
         positions = [('left', 'Слева'), ('top', 'Сверху'), ('right', 'Справа')]
         self.toolbar_position_actions = {}
@@ -450,217 +617,7 @@ class PointEditor3DWidget(QWidget):
             action.triggered.connect(lambda checked, p=pos: self.set_toolbar_position(p))
             self.toolbar_position_actions[pos] = action
         settings_button.setMenu(settings_menu)
-        toolbar.add_button(settings_button)
-
-        # ========== ГРУППА: Редактирование точек ==========
-        toolbar.add_button(self._create_toolbar_button(
-            '➕\nДобавить\nточку',
-            callback=self.add_point_dialog,
-            tooltip='Добавить новую точку в башню',
-            rich_tooltip_title='Добавить точку',
-            rich_tooltip_desc='Открывает диалог для добавления новой точки в башню. Можно указать координаты X, Y, Z и назначить пояс.'
-        ))
-
-        toolbar.add_button(self._create_toolbar_button(
-            '✏️\nРедактировать',
-            callback=self.edit_selected_point,
-            tooltip='Редактировать выбранную точку',
-            rich_tooltip_title='Редактировать точку',
-            rich_tooltip_desc='Редактирует координаты выбранной точки. Выберите точку в 3D редакторе или таблице, затем нажмите эту кнопку.'
-        ))
-
-        toolbar.add_button(self._create_toolbar_button(
-            '❌\nУдалить',
-            callback=self.delete_selected_points,
-            tooltip='Удалить выбранные точки (Del)',
-            rich_tooltip_title='Удалить точки',
-            rich_tooltip_desc='Удаляет выбранные точки из башни. Можно выбрать несколько точек для удаления.',
-            rich_tooltip_shortcut='Del'
-        ))
-
-        # ========== ГРУППА: Работа с поясами ==========
-        toolbar.add_button(self._create_toolbar_button(
-            '🏷️\nТочки\nна пояс',
-            callback=self.move_all_belt_points_to_line_dialog,
-            tooltip='Выбрать линию пояса и перенести на неё все точки этого пояса',
-            rich_tooltip_title='Перенести точки на пояс',
-            rich_tooltip_desc='Выберите линию пояса, и все точки этого пояса будут автоматически перенесены на эту линию. Используется для выравнивания точек пояса.'
-        ))
-
-        toolbar.add_button(self._create_toolbar_button(
-            '📍\nНа линию\nпояса',
-            callback=self.project_to_belt_line_dialog,
-            tooltip='Спроецировать выбранные точки на линию пояса',
-            rich_tooltip_title='Спроецировать на линию пояса',
-            rich_tooltip_desc='Проецирует выбранные точки на линию пояса. Точки перемещаются перпендикулярно к линии пояса.'
-        ))
-
-        # ========== ГРУППА: Работа с секциями ==========
-        self.create_sections_btn = self._create_toolbar_button(
-            '📏\nСоздать\nсекции',
-            callback=self.create_sections_wrapper,
-            tooltip='Автоматическая разбивка башни на секции с добавлением недостающих точек',
-            enabled=False,
-            rich_tooltip_title='Создать секции',
-            rich_tooltip_desc='Автоматически разбивает башню на секции и добавляет недостающие точки для полного описания геометрии. Секции определяются по уровням поясов.'
-        )
-        toolbar.add_button(self.create_sections_btn)
-        self.create_sections_action = self.create_sections_btn
-
-        self.remove_sections_btn = self._create_toolbar_button(
-            '🗑️\nУдалить\nсекции',
-            callback=self.remove_sections_wrapper,
-            tooltip='Удалить все добавленные точки секций, вернуть оригинальные данные',
-            enabled=False,
-            rich_tooltip_title='Удалить секции',
-            rich_tooltip_desc='Удаляет все точки, добавленные при создании секций, возвращая башню к исходному состоянию. Оригинальные точки сохраняются.'
-        )
-        toolbar.add_button(self.remove_sections_btn)
-        self.remove_sections_action = self.remove_sections_btn
-
-        toolbar.add_button(self._create_toolbar_button(
-            '📐\nНа уровень\nсекции',
-            callback=self.project_to_section_level_dialog,
-            tooltip='Спроецировать выбранные точки на уровень секции',
-            rich_tooltip_title='Спроецировать на уровень секции',
-            rich_tooltip_desc='Проецирует выбранные точки на горизонтальный уровень секции. Используется для выравнивания точек по высоте.'
-        ))
-
-        toolbar.add_button(self._create_toolbar_button(
-            '🔧\nВыровнять\nсекцию',
-            callback=self.align_section_dialog,
-            tooltip='Автоматически переносит все точки секции на одну линию',
-            rich_tooltip_title='Выровнять секцию',
-            rich_tooltip_desc='Автоматически переносит все точки выбранной секции на одну прямую линию. Используется для исправления геометрии секции.'
-        ))
-
-        toolbar.add_button(self._create_toolbar_button(
-            '⚖️\nВыровнять\nсекции',
-            callback=self.align_all_sections_dialog,
-            tooltip='Выровнять все секции по выбранному поясу с умным переносом точек',
-            rich_tooltip_title='Выровнять все секции',
-            rich_tooltip_desc='Выравнивает все секции башни по выбранному поясу с умным переносом точек. Обеспечивает единообразие геометрии.'
-        ))
-
-        toolbar.add_button(self._create_toolbar_button(
-            '🗑️\nУдалить\nсекцию',
-            callback=self.delete_section_dialog,
-            tooltip='Удалить выбранную секцию и все её добавленные точки',
-            rich_tooltip_title='Удалить секцию',
-            rich_tooltip_desc='Удаляет выбранную секцию и все точки, добавленные при её создании. Оригинальные точки сохраняются.'
-        ))
-
-        toolbar.add_button(self._create_toolbar_button(
-            '➕\nДобавить\nсекцию',
-            callback=self.add_section_dialog,
-            tooltip='Добавить новую секцию над или под существующей',
-            rich_tooltip_title='Добавить секцию',
-            rich_tooltip_desc='Добавляет новую секцию над или под существующей. Позволяет расширить модель башни.'
-        ))
-
-        toolbar.add_button(self._create_toolbar_button(
-            '⬆️\nСместить\nбашню',
-            callback=self.shift_tower_height_dialog,
-            tooltip='Сместить всю башню по высоте, изменив высоту нижней секции',
-            rich_tooltip_title='Сместить башню по высоте',
-            rich_tooltip_desc='Смещает всю башню по вертикали, изменяя высоту нижней секции. Все точки смещаются на одинаковое значение.'
-        ))
-
-        self.build_central_axis_btn = self._create_toolbar_button(
-            '📌\nЦентральная\nось',
-            callback=self.build_central_axis,
-            tooltip='Построить вертикальную линию через центры секций',
-            enabled=False,
-            rich_tooltip_title='Построить центральную ось',
-            rich_tooltip_desc='Строит вертикальную линию, проходящую через центры всех секций башни. Используется для визуализации и анализа.'
-        )
-        toolbar.add_button(self.build_central_axis_btn)
-        self.build_central_axis_action = self.build_central_axis_btn
-
-        self.tilt_plane_btn = self._create_toolbar_button(
-            '⚙️\nКрен\nсекции',
-            callback=self.open_section_tilt_dialog,
-            tooltip='Повернуть плоскость так, чтобы выбранная секция имела заданный крен',
-            enabled=False,
-            rich_tooltip_title='Крен секции',
-            rich_tooltip_desc='Поворачивает плоскость так, чтобы выбранная секция имела заданный крен. Влияет на все секции выше выбранной.'
-        )
-        toolbar.add_button(self.tilt_plane_btn)
-
-        self.tilt_single_section_btn = self._create_toolbar_button(
-            '⚙️\nКрен\n(лок.)',
-            callback=self.open_single_section_tilt_dialog,
-            tooltip='Перераспределить только выбранную секцию под заданный крен',
-            enabled=False,
-            rich_tooltip_title='Крен секции (локальный)',
-            rich_tooltip_desc='Перераспределяет только выбранную секцию под заданный крен, не влияя на другие секции.'
-        )
-        toolbar.add_button(self.tilt_single_section_btn)
-
-        # ========== ГРУППА: Отмена/Повтор ==========
-        self.undo_button = self._create_toolbar_button(
-            '↩️\nОтменить',
-            callback=self.undo_action,
-            tooltip='Отменить последнее действие (Ctrl+Z)',
-            enabled=False,
-            rich_tooltip_title='Отменить действие',
-            rich_tooltip_desc='Отменяет последнее выполненное действие. Поддерживается история изменений.',
-            rich_tooltip_shortcut='Ctrl+Z'
-        )
-        toolbar.add_button(self.undo_button)
-
-        self.redo_button = self._create_toolbar_button(
-            '↪️\nПовторить',
-            callback=self.redo_action,
-            tooltip='Повторить отмененное действие (Ctrl+Y)',
-            enabled=False,
-            rich_tooltip_title='Повторить действие',
-            rich_tooltip_desc='Повторяет последнее отмененное действие.',
-            rich_tooltip_shortcut='Ctrl+Y'
-        )
-        toolbar.add_button(self.redo_button)
-
-        # ========== ГРУППА: Вид и настройки ==========
-        self.move_xy_plane_btn = self._create_toolbar_button(
-            '🟦\nПеренести\nXY',
-            callback=self.start_xy_plane_move_mode,
-            tooltip='Перенести плоскость XY через выбранную точку'
-        )
-        toolbar.add_button(self.move_xy_plane_btn)
-
-        self.toggle_belt_lines_btn = self._create_toolbar_button(
-            '👁️\nЛинии\nпоясов',
-            callback=self.toggle_belt_lines,
-            tooltip='Показать/скрыть линии поясов',
-            checkable=True,
-            checked=True
-        )
-        toolbar.add_button(self.toggle_belt_lines_btn)
-
-        self.toggle_tower_visualization_btn = self._create_toolbar_button(
-            '🏗️\nБашня\n3D',
-            callback=self.toggle_tower_visualization,
-            tooltip='Показать/скрыть визуализацию башни из конструктора',
-            checkable=True,
-            checked=True,
-            enabled=False  # Включится, когда будет загружен чертеж
-        )
-        toolbar.add_button(self.toggle_tower_visualization_btn)
-
-        self.tower_builder_toggle_btn = self._create_toolbar_button(
-            '🏗️\nКонструктор',
-            callback=self.toggle_tower_builder_panel,
-            tooltip='Показать или скрыть конструктор башни',
-            checkable=True,
-            checked=False
-        )
-        toolbar.add_button(self.tower_builder_toggle_btn)
-
-        toolbar.add_button(self._create_toolbar_button(
-            '🔄\nСброс\nвида',
-            callback=self.reset_camera,
-            tooltip='Сбросить вид камеры к исходному положению'
-        ))
+        toolbar.add_settings_button(settings_button)
 
         return toolbar
     

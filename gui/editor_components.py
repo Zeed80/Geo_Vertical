@@ -15,6 +15,7 @@ from PyQt6.QtWidgets import (
     QLabel, QDialog, QFormLayout, QDialogButtonBox,
     QLineEdit, QComboBox, QMessageBox,
     QCheckBox, QSizePolicy, QDoubleSpinBox, QGridLayout,
+    QStackedWidget, QToolButton,
 )
 from PyQt6.QtCore import Qt, QPointF, QSize
 from PyQt6.QtGui import QColor
@@ -68,7 +69,7 @@ class ContrastGLTextItem(gl.GLTextItem):
 
 
 class ButtonGroupWidget(QWidget):
-    """Виджет-группа для кнопок с рамкой и заголовком снизу."""
+    """Виджет-группа для кнопок с рамкой и заголовком снизу. Поддерживает светлую и тёмную тему."""
 
     def __init__(self, title: str, parent: Optional[QWidget] = None):
         super().__init__(parent)
@@ -89,21 +90,18 @@ class ButtonGroupWidget(QWidget):
 
         self.title_label = QLabel(title)
         self.title_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.title_label.setStyleSheet("""
-            QLabel {
-                font-size: 9px;
-                color: #666;
-                padding: 2px;
-                background-color: transparent;
-            }
-        """)
+        # Без явного color — наследует цвет текста из палитры (работает в обеих темах)
+        self.title_label.setStyleSheet(
+            'font-size: 9px; padding: 2px; background-color: transparent;'
+        )
         main_layout.addWidget(self.title_label)
 
+        # palette(mid) адаптируется к текущей теме (светлая/тёмная) без хардкода
         self.setStyleSheet("""
             QWidget#buttonGroup {
-                border: 1px solid #b0b0b0;
+                border: 1px solid palette(mid);
                 border-radius: 4px;
-                background-color: #f0f0f0;
+                background-color: transparent;
                 margin: 2px;
             }
         """)
@@ -128,9 +126,13 @@ class ButtonGroupWidget(QWidget):
             item = self.buttons_layout.itemAt(i)
             if item and item.widget():
                 widget = item.widget()
-                hint = widget.sizeHint()
-                total_width += hint.width()
-                max_height = max(max_height, hint.height())
+                # Для кнопок с фиксированным размером используем fixedWidth/Height
+                min_w, max_w = widget.minimumWidth(), widget.maximumWidth()
+                min_h, max_h = widget.minimumHeight(), widget.maximumHeight()
+                w = min_w if (min_w == max_w and min_w > 0) else widget.sizeHint().width()
+                h = min_h if (min_h == max_h and min_h > 0) else widget.sizeHint().height()
+                total_width += w
+                max_height = max(max_height, h)
 
         margins = self.buttons_layout.contentsMargins()
         spacing = self.buttons_layout.spacing()
@@ -293,6 +295,183 @@ class ToolPanelWidget(QWidget):
             self.setFixedWidth(required_width)
 
         self.updateGeometry()
+
+
+class TabToolbarWidget(QWidget):
+    """Компактная вкладочная панель инструментов 3D-редактора.
+    Вкладки (Точки / Пояса / Секции / …) переключают набор кнопок в одной строке.
+    Полная высота ~78px. Вкладки оформлены с рамкой и акцентной полосой."""
+
+    # Цвета для светлой темы (defaults)
+    _ACCENT_LIGHT  = '#0078d4'
+    _ACCENT_DARK   = '#4da3e0'
+
+    def __init__(self, parent: Optional[QWidget] = None):
+        super().__init__(parent)
+        self.setObjectName('tabToolbar')
+
+        root = QVBoxLayout(self)
+        root.setContentsMargins(4, 2, 4, 0)
+        root.setSpacing(0)
+
+        # --- Строка вкладок (высота 30px) ---
+        tab_bar_widget = QWidget()
+        tab_bar_widget.setObjectName('tabBarWidget')
+        self._tab_bar_row = QHBoxLayout(tab_bar_widget)
+        # отступ снизу 0 — вкладки "прилипают" к панели кнопок
+        self._tab_bar_row.setContentsMargins(0, 2, 0, 0)
+        self._tab_bar_row.setSpacing(2)
+        tab_bar_widget.setFixedHeight(30)
+        root.addWidget(tab_bar_widget)
+        self._tab_bar_widget = tab_bar_widget
+
+        # --- Область кнопок (стек страниц) ---
+        self._stack = QStackedWidget()
+        self._stack.setObjectName('tabStack')
+        self._stack.setFixedHeight(52)
+        root.addWidget(self._stack)
+
+        self._tab_btns: List[QPushButton] = []
+        self._current: int = 0
+        self._is_dark: bool = False
+
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        # Применяем начальный стиль (светлая тема)
+        self.apply_style(False)
+
+    def add_tab(self, title: str, widgets: list) -> int:
+        """Добавить вкладку с указанными виджетами-кнопками."""
+        idx = len(self._tab_btns)
+
+        tab_btn = QPushButton(title)
+        tab_btn.setCheckable(True)
+        tab_btn.setChecked(idx == 0)
+        tab_btn.setFixedHeight(28)
+        tab_btn.setObjectName('toolbarTabBtn')
+        tab_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        tab_btn.clicked.connect(lambda _c, i=idx: self._activate(i))
+        self._tab_bar_row.addWidget(tab_btn)
+        self._tab_btns.append(tab_btn)
+
+        panel = QWidget()
+        panel.setObjectName('tabPanel')
+        row = QHBoxLayout(panel)
+        row.setContentsMargins(6, 3, 6, 3)
+        row.setSpacing(4)
+        for w in widgets:
+            if w is not None:
+                row.addWidget(w)
+        row.addStretch()
+        self._stack.addWidget(panel)
+
+        # Переприменяем стиль чтобы новая кнопка получила правильный вид
+        self.apply_style(self._is_dark)
+        return idx
+
+    def add_settings_button(self, button: QWidget):
+        """Кнопка ⚙️ справа от вкладок (настройки панели)."""
+        self._tab_bar_row.addStretch()
+        self._tab_bar_row.addWidget(button)
+
+    def _activate(self, idx: int):
+        self._current = idx
+        self._stack.setCurrentIndex(idx)
+        for i, btn in enumerate(self._tab_btns):
+            btn.setChecked(i == idx)
+        # Обновить стили чтобы активная вкладка получила правильную границу
+        self.apply_style(self._is_dark)
+
+    # --- Совместимость с ToolPanelWidget ---
+    def set_position(self, pos: str):
+        pass
+
+    def reflow(self):
+        pass
+
+    def orientation(self) -> Qt.Orientation:
+        return Qt.Orientation.Horizontal
+
+    def items(self) -> List[QWidget]:
+        result = []
+        for i in range(self._stack.count()):
+            panel = self._stack.widget(i)
+            if panel and panel.layout():
+                lay = panel.layout()
+                for j in range(lay.count()):
+                    item = lay.itemAt(j)
+                    if item and item.widget():
+                        result.append(item.widget())
+        return result
+
+    def apply_style(self, is_dark: bool):
+        """Применить тему. Вкладки оформлены как настоящие tabs:
+        рамка на 3 сторонах, активная — акцентный цвет, неактивная — серая."""
+        self._is_dark = is_dark
+
+        if is_dark:
+            accent        = self._ACCENT_DARK
+            panel_bg      = '#1e1e21'
+            bar_bg        = '#2d2d30'
+            inactive_bg   = '#3a3a3e'
+            inactive_text = '#a0a0a0'
+            inactive_border = '#555558'
+            hover_bg      = '#464649'
+            active_text   = '#ffffff'
+            stack_border  = '#555558'
+        else:
+            accent        = self._ACCENT_LIGHT
+            panel_bg      = '#ffffff'
+            bar_bg        = '#f0f0f0'
+            inactive_bg   = '#e4e4e4'
+            inactive_text = '#606060'
+            inactive_border = '#c0c0c0'
+            hover_bg      = '#d8d8d8'
+            active_text   = '#ffffff'
+            stack_border  = '#c8c8c8'
+
+        # Цвет фона вкладки совпадает с panel_bg (эффект "открытой" вкладки)
+        # Нижняя граница активной вкладки = panel_bg (визуально стирает рамку снизу)
+        self._tab_bar_widget.setStyleSheet(
+            f'QWidget#tabBarWidget {{ background: {bar_bg}; }}'
+        )
+        self._stack.setStyleSheet(
+            f'QStackedWidget#tabStack {{ '
+            f'border: 1px solid {stack_border}; '
+            f'border-top: 2px solid {accent}; '
+            f'background: {panel_bg}; }}'
+        )
+
+        active_style = f"""
+            QPushButton#toolbarTabBtn:checked {{
+                font-size: 9px; font-weight: 700;
+                border: 1px solid {accent};
+                border-bottom: 1px solid {panel_bg};
+                border-radius: 4px 4px 0px 0px;
+                padding: 2px 12px 3px 12px;
+                background: {panel_bg};
+                color: {accent};
+                margin-bottom: -1px;
+            }}
+        """
+        inactive_style = f"""
+            QPushButton#toolbarTabBtn {{
+                font-size: 9px; font-weight: 500;
+                border: 1px solid {inactive_border};
+                border-bottom: 1px solid {inactive_border};
+                border-radius: 4px 4px 0px 0px;
+                padding: 2px 12px 3px 12px;
+                background: {inactive_bg};
+                color: {inactive_text};
+            }}
+            QPushButton#toolbarTabBtn:hover:!checked {{
+                background: {hover_bg};
+                color: {inactive_text};
+                border-color: {accent};
+            }}
+        """
+        combined = inactive_style + active_style
+        for btn in self._tab_btns:
+            btn.setStyleSheet(combined)
 
 
 class PointEditDialog(QDialog):

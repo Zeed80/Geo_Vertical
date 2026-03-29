@@ -11,7 +11,7 @@ from html import escape
 from pathlib import Path
 from typing import Dict, Any, List
 
-from PyQt6.QtCore import Qt, QTimer, QStringListModel
+from PyQt6.QtCore import Qt, QTimer, QStringListModel, QSettings
 from PyQt6.QtWidgets import (
     QApplication,
     QWidget,
@@ -166,70 +166,8 @@ class FullReportTab(QWidget):
             widget = self.title_fields.get(field_name)
             if isinstance(widget, QLineEdit):
                 widget.setReadOnly(True)
-                widget.setToolTip("РџРѕР»Рµ РїРѕРґС‚СЏРіРёРІР°РµС‚СЃСЏ РёР· РѕСЃРЅРѕРІРЅС‹С… СЂРµРєРІРёР·РёС‚РѕРІ.")
+                widget.setToolTip("Поле подтягивается из основных реквизитов.")
         self._refresh_templates()
-
-    def _build_metadata_group(self):
-        group = QGroupBox("Титульные данные")
-        form = QFormLayout(group)
-        note = QLabel("РќР°РёРјРµРЅРѕРІР°РЅРёРµ, РёРЅРІРµРЅС‚Р°СЂРЅС‹Р№ РЅРѕРјРµСЂ, РѕСЂРіР°РЅРёР·Р°С†РёСЏ Рё Р°РґСЂРµСЃ Р±РµСЂСѓС‚СЃСЏ РёР· РѕСЃРЅРѕРІРЅС‹С… СЂРµРєРІРёР·РёС‚РѕРІ, С‡С‚РѕР±С‹ РЅРµ РІРІРѕРґРёС‚СЊ РёС… РїРѕРІС‚РѕСЂРЅРѕ.")
-        note.setWordWrap(True)
-        form.addRow(note)
-        note = QLabel("Р—Р°РїРѕР»РЅСЏР№С‚Рµ РѕСЃРЅРѕРІРЅС‹Рµ СЂРµРєРІРёР·РёС‚С‹ РѕРґРёРЅ СЂР°Р·. РќРёР¶Рµ РѕРЅРё Р±СѓРґСѓС‚ РёСЃРїРѕР»СЊР·РѕРІР°РЅС‹ РІРѕ РІСЃРµС… СЂР°Р·РґРµР»Р°С….")
-        note.setWordWrap(True)
-        form.addRow(note)
-
-        def add_line(key, label, default=""):
-            edit = QLineEdit(default)
-            self.metadata_fields[key] = edit
-            form.addRow(label, edit)
-
-        add_line("report_number", "Номер отчёта:")
-        add_line("project_name", "Наименование объекта:")
-        add_line("inventory_number", "Инвентарный №:")
-        add_line("location", "Местоположение:")
-        add_line("customer_name", "Заказчик (для титула):")
-        add_line("operator_name", "Исполнитель (для титула):")
-
-        def add_date(key, label):
-            edit = QDateEdit()
-            edit.setCalendarPopup(True)
-            edit.setDisplayFormat("dd.MM.yyyy")
-            edit.setDate(date.today())
-            self.metadata_fields[key] = edit
-            form.addRow(label, edit)
-
-        add_date("start_date", "Дата начала работ:")
-        add_date("end_date", "Дата окончания:")
-        add_line("approval_person", "Утверждающий:")
-        add_line("approval_position", "Должность:")
-        add_line("approval_city", "Город:")
-        add_date("approval_date", "Дата утверждения:")
-
-        return group
-
-    def _build_title_object_group(self):
-        group = QGroupBox("Паспорт объекта обследования")
-        form = QFormLayout(group)
-
-        def add_line(key: str, label: str, widget_cls=QLineEdit, read_only: bool = False):
-            widget = widget_cls()
-            if isinstance(widget, QSpinBox):
-                widget.setRange(1900, 2100)
-                widget.setValue(date.today().year)
-            elif isinstance(widget, QLineEdit) and read_only:
-                widget.setReadOnly(True)
-                widget.setToolTip("РџРѕР»Рµ РїРѕРґС‚СЏРіРёРІР°РµС‚СЃСЏ РёР· РѕР±С‰РёС… СЂРµРєРІРёР·РёС‚РѕРІ.")
-            self.title_fields[key] = widget
-            form.addRow(label, widget)
-
-        add_line("name", "Наименование объекта:")
-        add_line("inventory_number", "Инвентарный №:")
-        add_line("operator", "Эксплуатирующая организация:")
-        add_line("location", "Местонахождение:")
-        add_line("city", "Город печати:")
-        add_line("year", "Год выпуска отчёта:", QSpinBox)
-        return group
 
     def _build_resource_group(self):
         group = QGroupBox("Расчёт остаточного ресурса")
@@ -343,12 +281,12 @@ class FullReportTab(QWidget):
         return group
 
     def _build_metadata_group(self):
-        group = QGroupBox("\u0422\u0438\u0442\u0443\u043b\u044c\u043d\u044b\u0435 \u0434\u0430\u043d\u043d\u044b\u0435")
+        group = QGroupBox("Титульные данные")
         form = QFormLayout(group)
         note = QLabel(
-            "\u0417\u0430\u043f\u043e\u043b\u043d\u0438\u0442\u0435 \u043e\u0441\u043d\u043e\u0432\u043d\u044b\u0435 \u0440\u0435\u043a\u0432\u0438\u0437\u0438\u0442\u044b \u043e\u0434\u0438\u043d \u0440\u0430\u0437. "
-            "\u041d\u0430\u0438\u043c\u0435\u043d\u043e\u0432\u0430\u043d\u0438\u0435, \u0438\u043d\u0432\u0435\u043d\u0442\u0430\u0440\u043d\u044b\u0439 \u043d\u043e\u043c\u0435\u0440 \u0438 \u043c\u0435\u0441\u0442\u043e\u043f\u043e\u043b\u043e\u0436\u0435\u043d\u0438\u0435 "
-            "\u0434\u0430\u043b\u044c\u0448\u0435 \u0431\u0443\u0434\u0443\u0442 \u0438\u0441\u043f\u043e\u043b\u044c\u0437\u043e\u0432\u0430\u043d\u044b \u0430\u0432\u0442\u043e\u043c\u0430\u0442\u0438\u0447\u0435\u0441\u043a\u0438."
+            "Заполните основные реквизиты один раз. "
+            "Наименование, инвентарный номер и местоположение "
+            "дальше будут использованы автоматически."
         )
         note.setWordWrap(True)
         form.addRow(note)
@@ -358,12 +296,12 @@ class FullReportTab(QWidget):
             self.metadata_fields[key] = edit
             form.addRow(label, edit)
 
-        add_line("report_number", "\u041d\u043e\u043c\u0435\u0440 \u043e\u0442\u0447\u0451\u0442\u0430:")
-        add_line("project_name", "\u041d\u0430\u0438\u043c\u0435\u043d\u043e\u0432\u0430\u043d\u0438\u0435 \u043e\u0431\u044a\u0435\u043a\u0442\u0430:")
-        add_line("inventory_number", "\u0418\u043d\u0432\u0435\u043d\u0442\u0430\u0440\u043d\u044b\u0439 \u2116:")
-        add_line("location", "\u041c\u0435\u0441\u0442\u043e\u043f\u043e\u043b\u043e\u0436\u0435\u043d\u0438\u0435:")
-        add_line("customer_name", "\u0417\u0430\u043a\u0430\u0437\u0447\u0438\u043a (\u0434\u043b\u044f \u0442\u0438\u0442\u0443\u043b\u0430):")
-        add_line("operator_name", "\u0418\u0441\u043f\u043e\u043b\u043d\u0438\u0442\u0435\u043b\u044c (\u0434\u043b\u044f \u0442\u0438\u0442\u0443\u043b\u0430):")
+        add_line("report_number", "Номер отчёта:")
+        add_line("project_name", "Наименование объекта:")
+        add_line("inventory_number", "Инвентарный №:")
+        add_line("location", "Местоположение:")
+        add_line("customer_name", "Заказчик (для титула):")
+        add_line("operator_name", "Исполнитель (для титула):")
 
         def add_date(key, label):
             edit = QDateEdit()
@@ -373,22 +311,22 @@ class FullReportTab(QWidget):
             self.metadata_fields[key] = edit
             form.addRow(label, edit)
 
-        add_date("start_date", "\u0414\u0430\u0442\u0430 \u043d\u0430\u0447\u0430\u043b\u0430 \u0440\u0430\u0431\u043e\u0442:")
-        add_date("end_date", "\u0414\u0430\u0442\u0430 \u043e\u043a\u043e\u043d\u0447\u0430\u043d\u0438\u044f:")
-        add_line("approval_person", "\u0423\u0442\u0432\u0435\u0440\u0436\u0434\u0430\u044e\u0449\u0438\u0439:")
-        add_line("approval_position", "\u0414\u043e\u043b\u0436\u043d\u043e\u0441\u0442\u044c:")
-        add_line("approval_city", "\u0413\u043e\u0440\u043e\u0434:")
-        add_date("approval_date", "\u0414\u0430\u0442\u0430 \u0443\u0442\u0432\u0435\u0440\u0436\u0434\u0435\u043d\u0438\u044f:")
+        add_date("start_date", "Дата начала работ:")
+        add_date("end_date", "Дата окончания:")
+        add_line("approval_person", "Утверждающий:")
+        add_line("approval_position", "Должность:")
+        add_line("approval_city", "Город:")
+        add_date("approval_date", "Дата утверждения:")
 
         return group
 
     def _build_title_object_group(self):
-        group = QGroupBox("\u041a\u0430\u0440\u0442\u043e\u0447\u043a\u0430 \u043e\u0431\u044a\u0435\u043a\u0442\u0430 (\u0430\u0432\u0442\u043e\u0437\u0430\u043f\u043e\u043b\u043d\u0435\u043d\u0438\u0435)")
+        group = QGroupBox("Карточка объекта (автозаполнение)")
         form = QFormLayout(group)
         note = QLabel(
-            "\u041f\u043e\u043b\u044f \u043d\u0430\u0438\u043c\u0435\u043d\u043e\u0432\u0430\u043d\u0438\u044f, \u0438\u043d\u0432\u0435\u043d\u0442\u0430\u0440\u043d\u043e\u0433\u043e \u043d\u043e\u043c\u0435\u0440\u0430, \u043e\u0440\u0433\u0430\u043d\u0438\u0437\u0430\u0446\u0438\u0438 "
-            "\u0438 \u043c\u0435\u0441\u0442\u043e\u043f\u043e\u043b\u043e\u0436\u0435\u043d\u0438\u044f \u0441\u0438\u043d\u0445\u0440\u043e\u043d\u0438\u0437\u0438\u0440\u0443\u044e\u0442\u0441\u044f \u0441 \u0442\u0438\u0442\u0443\u043b\u044c\u043d\u044b\u043c\u0438 \u0434\u0430\u043d\u043d\u044b\u043c\u0438. "
-            "\u0412\u0440\u0443\u0447\u043d\u0443\u044e \u043e\u0431\u044b\u0447\u043d\u043e \u043d\u0443\u0436\u043d\u043e \u0443\u0442\u043e\u0447\u043d\u0438\u0442\u044c \u0442\u043e\u043b\u044c\u043a\u043e \u0433\u043e\u0440\u043e\u0434 \u0438 \u0433\u043e\u0434."
+            "Поля наименования, инвентарного номера, организации "
+            "и местоположения синхронизируются с титульными данными. "
+            "Вручную обычно нужно уточнить только город и год."
         )
         note.setWordWrap(True)
         form.addRow(note)
@@ -400,16 +338,16 @@ class FullReportTab(QWidget):
                 widget.setValue(date.today().year)
             elif isinstance(widget, QLineEdit) and read_only:
                 widget.setReadOnly(True)
-                widget.setToolTip("\u041f\u043e\u043b\u0435 \u043f\u043e\u0434\u0442\u044f\u0433\u0438\u0432\u0430\u0435\u0442\u0441\u044f \u0438\u0437 \u043e\u0431\u0449\u0438\u0445 \u0440\u0435\u043a\u0432\u0438\u0437\u0438\u0442\u043e\u0432.")
+                widget.setToolTip("Поле подтягивается из общих реквизитов.")
             self.title_fields[key] = widget
             form.addRow(label, widget)
 
-        add_line("name", "\u041d\u0430\u0438\u043c\u0435\u043d\u043e\u0432\u0430\u043d\u0438\u0435 \u043e\u0431\u044a\u0435\u043a\u0442\u0430:", read_only=True)
-        add_line("inventory_number", "\u0418\u043d\u0432\u0435\u043d\u0442\u0430\u0440\u043d\u044b\u0439 \u2116:", read_only=True)
-        add_line("operator", "\u042d\u043a\u0441\u043f\u043b\u0443\u0430\u0442\u0438\u0440\u0443\u044e\u0449\u0430\u044f \u043e\u0440\u0433\u0430\u043d\u0438\u0437\u0430\u0446\u0438\u044f:", read_only=True)
-        add_line("location", "\u041c\u0435\u0441\u0442\u043e\u043d\u0430\u0445\u043e\u0436\u0434\u0435\u043d\u0438\u0435:", read_only=True)
-        add_line("city", "\u0413\u043e\u0440\u043e\u0434 \u043f\u0435\u0447\u0430\u0442\u0438:")
-        add_line("year", "\u0413\u043e\u0434 \u0432\u044b\u043f\u0443\u0441\u043a\u0430 \u043e\u0442\u0447\u0451\u0442\u0430:", QSpinBox)
+        add_line("name", "Наименование объекта:", read_only=True)
+        add_line("inventory_number", "Инвентарный №:", read_only=True)
+        add_line("operator", "Эксплуатирующая организация:", read_only=True)
+        add_line("location", "Местонахождение:", read_only=True)
+        add_line("city", "Город печати:")
+        add_line("year", "Год выпуска отчёта:", QSpinBox)
         return group
 
     # -------------------------------------------------------- Template logic
@@ -1234,6 +1172,18 @@ class FullReportTab(QWidget):
         preview_layout.addWidget(self.preview_browser, stretch=1)
         splitter.addWidget(preview_panel)
         splitter.setSizes([190, 760, 560])
+        _settings = QSettings('GeoVertical', 'GeoVerticalAnalyzer')
+        _saved_sizes = _settings.value('full_report/splitter_sizes')
+        if _saved_sizes:
+            try:
+                splitter.setSizes([int(s) for s in _saved_sizes])
+            except (TypeError, ValueError):
+                pass
+        splitter.splitterMoved.connect(
+            lambda: QSettings('GeoVertical', 'GeoVerticalAnalyzer').setValue(
+                'full_report/splitter_sizes', splitter.sizes()
+            )
+        )
 
         self.section_anchors = {
             "title": metadata_group,

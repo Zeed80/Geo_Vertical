@@ -7,11 +7,11 @@ from PyQt6.QtWidgets import (QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
                              QFileDialog, QMessageBox, QStatusBar, QLabel,
                              QPushButton, QComboBox, QGroupBox, QFormLayout,
                              QDoubleSpinBox, QDialog, QSplitter, QSpinBox, QCheckBox,
-                             QSizePolicy, QApplication)
+                             QSizePolicy, QApplication, QFrame)
 from contextlib import contextmanager
 
 from PyQt6.QtCore import Qt, pyqtSignal, QSettings, QRect, QTimer
-from PyQt6.QtGui import QIcon, QAction, QPalette, QColor, QGuiApplication
+from PyQt6.QtGui import QIcon, QAction, QPalette, QColor, QGuiApplication, QKeySequence, QShortcut
 import copy
 import pandas as pd
 import numpy as np
@@ -473,6 +473,13 @@ class MainWindow(QMainWindow):
             self.belt_count_spin.setValue(belt_count)
             self.belt_count_spin.blockSignals(False)
 
+        if self.auto_belt_checkbox is not None:
+            is_auto = self.expected_belt_count is None
+            self.auto_belt_checkbox.blockSignals(True)
+            self.auto_belt_checkbox.setChecked(is_auto)
+            self.belt_count_spin.setEnabled(not is_auto)
+            self.auto_belt_checkbox.blockSignals(False)
+
         if hasattr(self.editor_3d, 'set_tower_builder_blueprint'):
             self.editor_3d.set_tower_builder_blueprint(self._tower_blueprint)
 
@@ -762,7 +769,12 @@ class MainWindow(QMainWindow):
                 self.belt_count_spin.setValue(belt_count)
                 self.belt_count_spin.blockSignals(False)
                 self.expected_belt_count = belt_count
-                logger.info(f"Р’РѕСЃСЃС‚Р°РЅРѕРІР»РµРЅРѕ РєРѕР»РёС‡РµСЃС‚РІРѕ РїРѕСЏСЃРѕРІ: {belt_count}")
+                logger.info(f"Восстановлено количество поясов: {belt_count}")
+                if self.auto_belt_checkbox is not None:
+                    self.auto_belt_checkbox.blockSignals(True)
+                    self.auto_belt_checkbox.setChecked(False)
+                    self.belt_count_spin.setEnabled(True)
+                    self.auto_belt_checkbox.blockSignals(False)
 
             self.data_table.set_data(self.raw_data)
             self.editor_3d.set_data(self.raw_data)
@@ -811,6 +823,7 @@ class MainWindow(QMainWindow):
         if update_window_title:
             project_name = os.path.basename(file_path)
             self.setWindowTitle(f'GeoVertical Analyzer - {project_name}')
+            self._mark_saved()
 
         self.statusBar.showMessage(status_message, status_timeout)
 
@@ -843,6 +856,20 @@ class MainWindow(QMainWindow):
         rebuilt_sections = self._rebuild_section_data_from_data(self.raw_data, current_sections)
         self._set_editor_section_data(rebuilt_sections)
 
+    def _mark_unsaved(self):
+        """Пометить проект как содержащий несохранённые изменения."""
+        self.has_unsaved_changes = True
+        title = self.windowTitle()
+        if not title.endswith(' *'):
+            self.setWindowTitle(title + ' *')
+
+    def _mark_saved(self):
+        """Снять пометку несохранённых изменений."""
+        self.has_unsaved_changes = False
+        title = self.windowTitle()
+        if title.endswith(' *'):
+            self.setWindowTitle(title[:-2])
+
     def init_ui(self):
         """Инициализация интерфейса"""
         self.setWindowTitle('GeoVertical Analyzer - Анализ вертикальности мачт')
@@ -853,7 +880,9 @@ class MainWindow(QMainWindow):
         # Создаем меню
         self.create_menu()
         
-        # Создаем панель инструментов
+        # Создаем панель быстрого доступа (QAT) — строка 1
+        self._create_quick_access_toolbar()
+        # Создаем основную панель инструментов — строка 2
         self.create_toolbar()
         
         # Создаем центральный виджет
@@ -902,6 +931,69 @@ class MainWindow(QMainWindow):
             button.setProperty('variant', variant)
 
         return button
+
+    def _create_toolbar_group_widget(self, label: str, items: list) -> QWidget:
+        """Создает контейнер группы кнопок с тонкой рамкой и подписью снизу."""
+        outer = QWidget()
+        outer.setObjectName('toolbarGroupOuter')
+        outer_layout = QVBoxLayout(outer)
+        outer_layout.setContentsMargins(0, 1, 0, 1)
+        outer_layout.setSpacing(1)
+
+        frame = QFrame()
+        frame.setObjectName('toolbarGroupFrame')
+        frame.setAutoFillBackground(False)
+        frame_layout = QHBoxLayout(frame)
+        frame_layout.setContentsMargins(2, 2, 2, 2)
+        frame_layout.setSpacing(4)
+        for item in items:
+            frame_layout.addWidget(item)
+
+        group_label = QLabel(label)
+        group_label.setObjectName('toolbarGroupLabel')
+        group_label.setAlignment(Qt.AlignmentFlag.AlignHCenter)
+        group_label.setStyleSheet('font-size: 8px; color: #808080; margin: 0; padding: 0;')
+
+        outer_layout.addWidget(frame)
+        outer_layout.addWidget(group_label)
+
+        if not hasattr(self, '_toolbar_group_frames'):
+            self._toolbar_group_frames = []
+            self._toolbar_group_labels = []
+        self._toolbar_group_frames.append(frame)
+        self._toolbar_group_labels.append(group_label)
+
+        return outer
+
+    def _create_quick_access_toolbar(self):
+        """Создает панель быстрого доступа (QAT) над основной панелью инструментов."""
+        qat = QToolBar()
+        qat.setObjectName('QuickAccessToolBar')
+        qat.setMovable(False)
+        self.addToolBar(Qt.ToolBarArea.TopToolBarArea, qat)
+        self.qat = qat
+
+        self.undo_btn = QPushButton('↩ Отменить')
+        self.undo_btn.setObjectName('qatButton')
+        self.undo_btn.setFixedSize(90, 24)
+        self.undo_btn.setEnabled(False)
+        self.undo_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.undo_btn.clicked.connect(self.undo)
+        self.undo_btn.setToolTip('Отменить последнее действие (Ctrl+Z)')
+
+        self.redo_btn = QPushButton('↪ Повторить')
+        self.redo_btn.setObjectName('qatButton')
+        self.redo_btn.setFixedSize(90, 24)
+        self.redo_btn.setEnabled(False)
+        self.redo_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.redo_btn.clicked.connect(self.redo)
+        self.redo_btn.setToolTip('Повторить отмененное действие (Ctrl+Y)')
+
+        qat.addWidget(self.undo_btn)
+        qat.addWidget(self.redo_btn)
+
+        # Следующий toolbar будет на отдельной строке
+        self.addToolBarBreak(Qt.ToolBarArea.TopToolBarArea)
 
     def create_menu(self):
         """Создание меню"""
@@ -974,7 +1066,10 @@ class MainWindow(QMainWindow):
         self.redo_action.setEnabled(False)
         self.redo_action.triggered.connect(self.redo)
         edit_menu.addAction(self.redo_action)
-        
+        # Дополнительный шорткат Ctrl+Shift+Z (стандарт в QGIS/современных редакторах)
+        redo_shortcut_alt = QShortcut(QKeySequence('Ctrl+Shift+Z'), self)
+        redo_shortcut_alt.activated.connect(self.redo)
+
         edit_menu.addSeparator()
         
         add_point_action = QAction('Добавить точку', self)
@@ -1046,191 +1141,141 @@ class MainWindow(QMainWindow):
         help_menu.addAction(about_action)
         
     def create_toolbar(self):
-        """Создание панели инструментов"""
+        """Создание основной панели инструментов с визуально сгруппированными секциями."""
         toolbar = QToolBar()
         toolbar.setObjectName('MainToolBar')
         toolbar.setMovable(False)
-        self.addToolBar(toolbar)
+        self.addToolBar(Qt.ToolBarArea.TopToolBarArea, toolbar)
         self.toolbar = toolbar
-        
-        # Применяем начальные стили
+
+        # Применяем начальные стили (включая QAT и группы)
         self.update_toolbar_styles()
-        
+
         # ========== ГРУППА: Проект ==========
         open_project_btn = self._create_toolbar_button(
-            '📁 Открыть проект',
+            '📁 Открыть\nпроект',
             self.load_project,
             tooltip='Открыть сохраненный проект (Ctrl+Shift+O)',
-            width=120,
+            width=90, height=52,
             rich_tooltip_title='Открыть проект',
             rich_tooltip_desc='Загрузите ранее сохраненный проект со всеми данными, настройками и результатами расчетов.',
             rich_tooltip_shortcut='Ctrl+Shift+O'
         )
-        toolbar.addWidget(open_project_btn)
-        
         self.save_project_btn = self._create_toolbar_button(
-            '💾 Сохранить проект',
+            '💾 Сохранить\nпроект',
             self.save_project,
             tooltip='Быстрое сохранение проекта (Ctrl+Shift+S)',
             enabled=False,
-            width=130,
+            width=90, height=52,
             rich_tooltip_title='Сохранить проект',
             rich_tooltip_desc='Быстрое сохранение проекта в текущий файл. Сохраняются все данные, настройки и результаты расчетов.',
             rich_tooltip_shortcut='Ctrl+Shift+S'
         )
-        toolbar.addWidget(self.save_project_btn)
-        
         save_project_as_btn = self._create_toolbar_button(
-            '💾 Сохранить как',
+            '💾 Сохранить\nкак',
             self.save_project_as,
             tooltip='Сохранить проект с новым именем',
-            width=120,
+            width=90, height=52,
             rich_tooltip_title='Сохранить проект как',
             rich_tooltip_desc='Сохранить проект в новый файл с указанием имени. Позволяет создать копию проекта.'
         )
-        toolbar.addWidget(save_project_as_btn)
-        
-        toolbar.addSeparator()
-        
+        toolbar.addWidget(self._create_toolbar_group_widget(
+            'Проект', [open_project_btn, self.save_project_btn, save_project_as_btn]
+        ))
+
         # ========== ГРУППА: Импорт данных ==========
         open_btn = self._create_toolbar_button(
-            '📂 Импорт GEO', 
-            self.open_file, 
+            '📂 Импорт\nGEO',
+            self.open_file,
             tooltip='Импорт GEO файла (Ctrl+O)',
-            width=110,
+            width=90, height=52,
             rich_tooltip_title='Импорт геодезических данных',
             rich_tooltip_desc='Загрузите файл с координатами точек башни. Поддерживаются форматы: CSV, DXF, GeoJSON, Shapefile, Trimble JobXML.',
             rich_tooltip_shortcut='Ctrl+O'
         )
-        toolbar.addWidget(open_btn)
-        
         import_second_btn = self._create_toolbar_button(
-            '📥 Импорт второй станции',
+            '📥 Импорт\nстанции №2',
             self.import_second_station,
             tooltip='Импорт данных с другой точки стояния',
-            width=150,
+            width=100, height=52,
             rich_tooltip_title='Импорт второй станции',
             rich_tooltip_desc='Загрузите данные измерений с дополнительной точки стояния для объединения с основными данными.'
         )
-        toolbar.addWidget(import_second_btn)
-        
-        toolbar.addSeparator()
-        
-        # ========== ГРУППА: Редактирование ==========
-        self.undo_btn = self._create_toolbar_button(
-            '↩️ Отменить',
-            self.undo,
-            tooltip='Отменить последнее действие (Ctrl+Z)',
-            enabled=False,
-            width=100,
-            rich_tooltip_title='Отменить действие',
-            rich_tooltip_desc='Отменяет последнее выполненное действие. Поддерживается история изменений.',
-            rich_tooltip_shortcut='Ctrl+Z'
-        )
-        toolbar.addWidget(self.undo_btn)
-        
-        self.redo_btn = self._create_toolbar_button(
-            '↪️ Повторить',
-            self.redo,
-            tooltip='Повторить отмененное действие (Ctrl+Y)',
-            enabled=False,
-            width=100,
-            rich_tooltip_title='Повторить действие',
-            rich_tooltip_desc='Повторяет последнее отмененное действие.',
-            rich_tooltip_shortcut='Ctrl+Y'
-        )
-        toolbar.addWidget(self.redo_btn)
-        
-        toolbar.addSeparator()
-        
-        # ========== ГРУППА: Данные ==========
-        toolbar.addWidget(QLabel('  Поясов: '))
+        toolbar.addWidget(self._create_toolbar_group_widget(
+            'Импорт', [open_btn, import_second_btn]
+        ))
+
+        # ========== ГРУППА: Данные / Пояса ==========
         self.belt_count_spin = QSpinBox()
         self.belt_count_spin.setMinimum(1)
         self.belt_count_spin.setMaximum(50)
         self.belt_count_spin.setValue(10)
-        self.belt_count_spin.setToolTip('Ожидаемое количество поясов башни')
+        self.belt_count_spin.setToolTip('Количество поясов башни (при выключенном Авто)')
         self.belt_count_spin.valueChanged.connect(self.on_belt_count_changed)
-        self.belt_count_spin.setFixedWidth(60)
-        toolbar.addWidget(self.belt_count_spin)
-        
+        self.belt_count_spin.setFixedWidth(58)
+        self.belt_count_spin.setEnabled(False)  # По умолчанию авто
+
         self.auto_belt_checkbox = QCheckBox('Авто')
         self.auto_belt_checkbox.setChecked(True)
         self.auto_belt_checkbox.setToolTip('Автоматическое определение количества поясов')
         self.auto_belt_checkbox.toggled.connect(self.on_auto_belt_toggled)
-        self.belt_count_spin.setEnabled(False)  # По умолчанию авто
-        toolbar.addWidget(self.auto_belt_checkbox)
-        
-        toolbar.addWidget(QLabel('  Угол (XY): '))
-        from PyQt6.QtWidgets import QDoubleSpinBox
+
         self.line_angle_spin = QDoubleSpinBox()
         self.line_angle_spin.setRange(-360.0, 360.0)
         self.line_angle_spin.setDecimals(1)
         self.line_angle_spin.setSingleStep(1.0)
-        self.line_angle_spin.setToolTip('Угол между линиями двух импортов в плоскости XY')
-        self.line_angle_spin.setFixedWidth(70)
-        toolbar.addWidget(self.line_angle_spin)
+        self.line_angle_spin.setToolTip('Угол (XY°): угол поворота между двумя точками стояния в плоскости XY')
+        self.line_angle_spin.setFixedWidth(65)
 
-        build_belt_btn = self._create_toolbar_button(
-            '⬛ Достроить пояс',
-            self.on_build_missing_belt,
-            tooltip='Достроить недостающий пояс на основе соседних поясов',
-            width=120,
-            rich_tooltip_title='Достроить пояс',
-            rich_tooltip_desc='Автоматически создает недостающий пояс башни на основе геометрии соседних поясов. Используется для восстановления пропущенных данных.'
-        )
-        toolbar.addWidget(build_belt_btn)
-        
-        toolbar.addSeparator()
-        
+        toolbar.addWidget(self._create_toolbar_group_widget(
+            'Данные / Пояса',
+            [self.belt_count_spin, self.auto_belt_checkbox, self.line_angle_spin]
+        ))
+
         # ========== ГРУППА: Расчет ==========
-        toolbar.addWidget(QLabel('  СК: '))
         self.epsg_combo = QComboBox()
-        self.epsg_combo.addItem('Авто', None)
+        self.epsg_combo.addItem('Авто (СК)', None)
         for code, desc in get_common_epsg_list():
             self.epsg_combo.addItem(f"EPSG:{code} - {desc}", code)
         self.epsg_combo.currentIndexChanged.connect(self.on_epsg_changed)
-        self.epsg_combo.setFixedWidth(180)
-        toolbar.addWidget(self.epsg_combo)
-        
+        self.epsg_combo.setFixedWidth(125)
+        self.epsg_combo.setToolTip('Система координат (EPSG). Авто — автоматическое определение.')
+
         calc_btn = self._create_toolbar_button(
             '⚙️ Рассчитать',
             self.calculate,
             tooltip='Выполнить расчет вертикальности и прямолинейности (F5)',
             variant='primary',
-            width=110,
+            width=90, height=52,
             rich_tooltip_title='Выполнить расчет',
             rich_tooltip_desc='Запускает полный цикл расчетов: группировка точек по поясам, расчет центров, построение оси башни, вычисление отклонений и проверка нормативов.',
             rich_tooltip_shortcut='F5'
         )
-        toolbar.addWidget(calc_btn)
-        
-        toolbar.addSeparator()
-        
-        # ========== ГРУППА: Экспорт ==========
+        toolbar.addWidget(self._create_toolbar_group_widget(
+            'Расчет', [self.epsg_combo, calc_btn]
+        ))
+
+        # ========== ГРУППА: Экспорт + Очистка ==========
         save_btn = self._create_toolbar_button(
-            '💾 Сохранить отчет', 
-            self.save_report, 
+            '💾 Сохранить\nотчет',
+            self.save_report,
             tooltip='Сохранить отчет в PDF, Word или Excel (Ctrl+S)',
-            width=130,
+            width=90, height=52,
             rich_tooltip_title='Сохранить отчет',
             rich_tooltip_desc='Генерирует профессиональный отчет с результатами анализа. Доступны форматы: PDF (с графиками), Word (DOCX), Excel (таблицы).',
             rich_tooltip_shortcut='Ctrl+S'
         )
-        toolbar.addWidget(save_btn)
-        
-        toolbar.addSeparator()
-        
-        # ========== ГРУППА: Очистка ==========
         clear_btn = self._create_toolbar_button(
-            '🗑️ Очистить данные', 
-            self.clear_data, 
+            '🗑️ Очистить\nданные',
+            self.clear_data,
             tooltip='Очистить все данные и начать заново',
-            width=130,
+            width=90, height=52,
             rich_tooltip_title='Очистить данные',
             rich_tooltip_desc='Удаляет все загруженные данные, результаты расчетов и сбрасывает проект к начальному состоянию. Действие необратимо.'
         )
-        toolbar.addWidget(clear_btn)
+        toolbar.addWidget(self._create_toolbar_group_widget(
+            'Экспорт', [save_btn, clear_btn]
+        ))
         
     def create_central_widget(self):
         """Создание центрального виджета с тремя основными вкладками"""
@@ -1271,8 +1316,12 @@ class MainWindow(QMainWindow):
         self.editor_3d.belt_assigned.connect(self.on_belt_assigned)
         self.editor_3d.tower_blueprint_requested.connect(self.apply_tower_blueprint)
         self.editor_3d.tower_reference_model_updated.connect(self.update_reference_model)
+        self.editor_3d.build_belt_requested.connect(self.on_build_missing_belt)
         self.editor_3d.setMinimumWidth(600)
         self.restore_editor_toolbar_position()
+        # Применяем тему к вкладочной панели 3D редактора
+        if hasattr(self.editor_3d, 'toolbar') and hasattr(self.editor_3d.toolbar, 'apply_style'):
+            self.editor_3d.toolbar.apply_style(self.dark_theme_enabled)
         top_splitter.addWidget(self.editor_3d)
         
         # Таблица данных (с передачей ссылки на 3D редактор для секций)
@@ -1633,8 +1682,8 @@ class MainWindow(QMainWindow):
             ):
                 raise RuntimeError('Не удалось добавить создание секций в историю undo/redo')
 
-            self.has_unsaved_changes = True  # Отмечаем изменения
-            
+            self._mark_unsaved()
+
             # Метод удаления секций доступен через 3D редактор
             
             # Активируем кнопки в 3D редакторе
@@ -1704,7 +1753,7 @@ class MainWindow(QMainWindow):
             ):
                 raise RuntimeError('Не удалось добавить удаление секций в историю undo/redo')
 
-            self.has_unsaved_changes = True
+            self._mark_unsaved()
 
             if hasattr(self.editor_3d, 'remove_sections_action'):
                 self.editor_3d.remove_sections_action.setEnabled(False)
@@ -2016,25 +2065,31 @@ class MainWindow(QMainWindow):
             self.statusBar.showMessage('Ошибка загрузки')
 
     def _show_import_diagnostics_summary(self, loaded: LoadedSurveyData) -> None:
-        """Кратко показывает стратегию и предупреждения импорта."""
+        """Кратко показывает результат и предупреждения импорта."""
         diagnostics = loaded.diagnostics
         warnings = diagnostics.warnings if diagnostics is not None else []
+        n_points = len(loaded.data) if loaded.data is not None else 0
+        n_belts = loaded.data['belt'].nunique() if (loaded.data is not None and 'belt' in loaded.data.columns) else 0
+
+        logger.info(
+            f"Импорт завершён: стратегия={loaded.parser_strategy}, "
+            f"уверенность={loaded.confidence:.2f}, точек={n_points}, поясов={n_belts}"
+        )
+
         if warnings:
             preview = "\n".join(f"• {item}" for item in warnings[:4])
             if len(warnings) > 4:
                 preview += f"\n• ... и ещё {len(warnings) - 4}"
-            QMessageBox.information(
-                self,
-                'Диагностика импорта',
-                f"Стратегия: {loaded.parser_strategy or diagnostics.parser_strategy}\n"
-                f"Уверенность: {loaded.confidence:.2f}\n\n"
-                f"{preview}"
-            )
+            msg = f"Импорт завершён: {n_points} точек"
+            if n_belts:
+                msg += f", {n_belts} поясов"
+            msg += f".\n\nПредупреждений: {len(warnings)}\n{preview}"
+            QMessageBox.information(self, 'Результат импорта', msg)
         else:
-            self.statusBar.showMessage(
-                f"Импорт завершён: стратегия {loaded.parser_strategy}, confidence {loaded.confidence:.2f}",
-                5000,
-            )
+            msg = f"Импорт завершён: {n_points} точек"
+            if n_belts:
+                msg += f", {n_belts} поясов"
+            self.statusBar.showMessage(msg, 5000)
 
     def _attach_import_metadata_to_results(self, results: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
         if results is None:
@@ -2471,8 +2526,8 @@ class MainWindow(QMainWindow):
             self.setWindowTitle(f'GeoVertical Analyzer - {project_name}')
             
             self.statusBar.showMessage(f'✓ Проект сохранен: {file_path}', 3000)
-            self.has_unsaved_changes = False  # Сбрасываем флаг после сохранения
-            
+            self._mark_saved()
+
         except ProjectSaveError as e:
             logger.error(f"Ошибка сохранения проекта: {e}", exc_info=True)
             self.statusBar.showMessage(f'❌ Ошибка сохранения проекта: {str(e)}')
@@ -2503,7 +2558,7 @@ class MainWindow(QMainWindow):
                 if self.project_manager.current_project_path:
                     try:
                         self._save_project_to_file(self.project_manager.current_project_path)
-                        self.has_unsaved_changes = False
+                        self._mark_saved()
                     except Exception as e:
                         logger.error(f"Ошибка сохранения при создании нового проекта: {e}", exc_info=True)
                         QMessageBox.warning(
@@ -2712,7 +2767,7 @@ class MainWindow(QMainWindow):
         self._update_undo_redo_actions()
         
         # Сброс флагов
-        self.has_unsaved_changes = False
+        self._mark_saved()
         self.autosave_path = None
         
         # Обновление UI
@@ -2922,7 +2977,7 @@ class MainWindow(QMainWindow):
             self._update_undo_redo_actions()
             if not self._history_command_restores_full_window_state(restored_command):
                 self._sync_widgets_after_history_navigation()
-            self.has_unsaved_changes = True
+            self._mark_unsaved()
         else:
             self.statusBar.showMessage('Не удалось отменить операцию', 2000)
     
@@ -2944,7 +2999,7 @@ class MainWindow(QMainWindow):
             self._update_undo_redo_actions()
             if not self._history_command_restores_full_window_state(restored_command):
                 self._sync_widgets_after_history_navigation()
-            self.has_unsaved_changes = True
+            self._mark_unsaved()
         else:
             self.statusBar.showMessage('Не удалось повторить операцию', 2000)
     
@@ -3096,8 +3151,8 @@ class MainWindow(QMainWindow):
             self.raw_data = filtered_data
             self.editor_3d.set_data(filtered_data)
             self.data_table.set_data(filtered_data)
-            self.has_unsaved_changes = True  # Отмечаем изменения
-            
+            self._mark_unsaved()
+
             self.statusBar.showMessage(f'Автофильтрация выполнена: {belt_count} поясов')
             QMessageBox.information(
                 self, 
@@ -3186,7 +3241,7 @@ class MainWindow(QMainWindow):
             self._skip_next_table_data_changed = False
             raise
 
-        self.has_unsaved_changes = True
+        self._mark_unsaved()
 
     def on_table_data_changed(self):
         if self._skip_next_table_data_changed:
@@ -3688,12 +3743,25 @@ class MainWindow(QMainWindow):
         
         # Обновляем кнопки в таблице точек башни
         if hasattr(self.data_table, 'tower_add_btn'):
-            apply_compact_button_style(self.data_table.tower_add_btn, 
+            apply_compact_button_style(self.data_table.tower_add_btn,
                                       width=150, min_height=36)
         if hasattr(self.data_table, 'tower_delete_btn'):
-            apply_compact_button_style(self.data_table.tower_delete_btn, 
+            apply_compact_button_style(self.data_table.tower_delete_btn,
                                       width=160, min_height=36)
-    
+
+        # Обновляем рамку группы точек башни
+        if hasattr(self.data_table, '_tower_points_frame'):
+            border_color = '#555558' if self.dark_theme_enabled else '#c0c0c0'
+            self.data_table._tower_points_frame.setStyleSheet(
+                f'QFrame#towerPointsGroupFrame {{ border: 1px solid {border_color}; border-radius: 4px; }}'
+            )
+
+        # Обновляем вкладочную панель 3D редактора
+        if (hasattr(self, 'editor_3d') and self.editor_3d is not None
+                and hasattr(self.editor_3d, 'toolbar')
+                and hasattr(self.editor_3d.toolbar, 'apply_style')):
+            self.editor_3d.toolbar.apply_style(self.dark_theme_enabled)
+
     def update_toolbar_styles(self):
         """Обновляет стили toolbar в зависимости от текущей темы"""
         if not hasattr(self, 'toolbar') or not self.toolbar:
@@ -3820,7 +3888,71 @@ class MainWindow(QMainWindow):
             """
         
         self.toolbar.setStyleSheet(style)
-    
+
+        # ---- QAT styles ----
+        if hasattr(self, 'qat') and self.qat:
+            if is_dark:
+                qat_style = """
+                    QToolBar#QuickAccessToolBar {
+                        background: #252528;
+                        border-bottom: 1px solid #3a3a3e;
+                        padding: 2px 6px;
+                        spacing: 3px;
+                    }
+                    QPushButton#qatButton {
+                        font-size: 10px;
+                        border: none;
+                        border-radius: 3px;
+                        background: transparent;
+                        color: #b0b0b0;
+                        padding: 2px 6px;
+                    }
+                    QPushButton#qatButton:hover {
+                        background: #3a3a3e;
+                        color: #e0e0e0;
+                    }
+                    QPushButton#qatButton:pressed { background: #2a2a2e; }
+                    QPushButton#qatButton:disabled { color: #5a5a5a; }
+                """
+            else:
+                qat_style = """
+                    QToolBar#QuickAccessToolBar {
+                        background: #ebebeb;
+                        border-bottom: 1px solid #d0d0d0;
+                        padding: 2px 6px;
+                        spacing: 3px;
+                    }
+                    QPushButton#qatButton {
+                        font-size: 10px;
+                        border: none;
+                        border-radius: 3px;
+                        background: transparent;
+                        color: #505050;
+                        padding: 2px 6px;
+                    }
+                    QPushButton#qatButton:hover {
+                        background: #d8d8d8;
+                        color: #212121;
+                    }
+                    QPushButton#qatButton:pressed { background: #c8c8c8; }
+                    QPushButton#qatButton:disabled { color: #b0b0b0; }
+                """
+            self.qat.setStyleSheet(qat_style)
+
+        # ---- Toolbar group frame styles ----
+        if hasattr(self, '_toolbar_group_frames'):
+            border_color = '#555558' if is_dark else '#c0c0c0'
+            label_color = '#909090' if is_dark else '#808080'
+            frame_style = (
+                f'QFrame#toolbarGroupFrame {{ border: 1px solid {border_color}; '
+                f'border-radius: 4px; background: transparent; }}'
+            )
+            label_style = f'font-size: 8px; color: {label_color}; margin: 0; padding: 0;'
+            for frame in self._toolbar_group_frames:
+                frame.setStyleSheet(frame_style)
+            for lbl in self._toolbar_group_labels:
+                lbl.setStyleSheet(label_style)
+
     def load_window_geometry(self):
         """Загрузка сохраненной геометрии окна"""
         settings = QSettings('GeoVertical', 'GeoVerticalAnalyzer')
@@ -4053,7 +4185,7 @@ class MainWindow(QMainWindow):
                 if self.project_manager.current_project_path:
                     try:
                         self._save_project_to_file(self.project_manager.current_project_path)
-                        self.has_unsaved_changes = False
+                        self._mark_saved()
                     except Exception as e:
                         logger.error(f"Ошибка сохранения при закрытии: {e}", exc_info=True)
                         QMessageBox.warning(

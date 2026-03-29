@@ -7,7 +7,8 @@ import json
 from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QTableWidget,
                              QTableWidgetItem, QPushButton, QHeaderView, QMessageBox,
                              QTabWidget, QLabel, QGroupBox, QAbstractItemView, QCheckBox,
-                             QComboBox, QDialog, QFormLayout, QDoubleSpinBox, QDialogButtonBox)
+                             QComboBox, QDialog, QFormLayout, QDoubleSpinBox, QDialogButtonBox,
+                             QFrame)
 from PyQt6.QtCore import Qt, pyqtSignal
 from PyQt6.QtGui import QColor
 import pandas as pd
@@ -411,22 +412,42 @@ class DataTableWidget(QWidget):
         mode_layout.addStretch()
         tower_layout.addLayout(mode_layout)
         
-        # Панель кнопок над таблицей башни
+        # Панель кнопок над таблицей башни — сгруппированные по назначению
         tower_buttons_panel = QHBoxLayout()
-        tower_buttons_panel.setSpacing(8)
-        
+        tower_buttons_panel.setSpacing(0)
+
+        # Группа «Точки»: создание и удаление точек
+        points_frame = QFrame()
+        points_frame.setObjectName('towerPointsGroupFrame')
+        pf_layout = QVBoxLayout(points_frame)
+        pf_layout.setContentsMargins(4, 4, 4, 2)
+        pf_layout.setSpacing(2)
+
+        btns_row = QHBoxLayout()
+        btns_row.setSpacing(8)
+
         self.tower_add_btn = QPushButton('➕ Добавить точку')
         self.tower_add_btn.setToolTip('Добавить новую точку в таблицу башни')
         self.tower_add_btn.clicked.connect(lambda: self.add_row(self.tower_table))
         apply_compact_button_style(self.tower_add_btn, width=150, min_height=36)
-        tower_buttons_panel.addWidget(self.tower_add_btn)
-        
+        btns_row.addWidget(self.tower_add_btn)
+
         self.tower_delete_btn = QPushButton('❌ Удалить выбранные')
         self.tower_delete_btn.setToolTip('Удалить выбранные строки из таблицы башни')
         self.tower_delete_btn.clicked.connect(lambda: self.delete_selected_rows(self.tower_table))
         apply_compact_button_style(self.tower_delete_btn, width=160, min_height=36)
-        tower_buttons_panel.addWidget(self.tower_delete_btn)
-        
+        btns_row.addWidget(self.tower_delete_btn)
+
+        pf_layout.addLayout(btns_row)
+
+        points_label = QLabel('Точки')
+        points_label.setAlignment(Qt.AlignmentFlag.AlignHCenter)
+        points_label.setStyleSheet('font-size: 8px; color: #808080; margin: 0; padding: 0;')
+        pf_layout.addWidget(points_label)
+
+        self._tower_points_frame = points_frame  # доступен для обновления темы
+
+        tower_buttons_panel.addWidget(points_frame)
         tower_buttons_panel.addStretch()
         tower_layout.addLayout(tower_buttons_panel)
         
@@ -475,7 +496,11 @@ class DataTableWidget(QWidget):
         sections_label = QLabel('📏 Секции')
         sections_label.setStyleSheet('font-weight: bold; font-size: 12pt; padding: 5px;')
         sections_layout.addWidget(sections_label)
-        
+
+        sections_hint = QLabel('Таблица обновляется автоматически после расчёта. Редактирование недоступно.')
+        sections_hint.setStyleSheet('color: gray; font-style: italic; padding: 2px 5px;')
+        sections_layout.addWidget(sections_hint)
+
         self.sections_table = QTableWidget()
         self.sections_table.setColumnCount(8)
         self.sections_table.setHorizontalHeaderLabels(['№', 'Абс. высота (м)', 'Часть башни', 'Секция части', 'Центр X (м)', 'Центр Y (м)', 'Центр Z (м)', 'Пояса'])

@@ -19,10 +19,15 @@ class LatticeEditorWidget(QWidget):
         pattern_group = QGroupBox("Тип решетки")
         pattern_layout = QFormLayout()
         self.pattern_combo = QComboBox()
-        self.pattern_combo.addItems([
-            "cross", "z_brace", "k_brace", "portal", "none"
-        ])
-        self.pattern_combo.currentTextChanged.connect(self._on_pattern_changed)
+        for label, key in [
+            ("Крест",       "cross"),
+            ("Z-раскос",    "z_brace"),
+            ("K-раскос",    "k_brace"),
+            ("Портальная",  "portal"),
+            ("Без решетки", "none"),
+        ]:
+            self.pattern_combo.addItem(label, key)
+        self.pattern_combo.currentIndexChanged.connect(self._on_pattern_changed)
         pattern_layout.addRow("Схема:", self.pattern_combo)
         pattern_group.setLayout(pattern_layout)
         layout.addWidget(pattern_group)
@@ -82,7 +87,7 @@ class LatticeEditorWidget(QWidget):
         self.setEnabled(True)
         
         # Load values
-        idx = self.pattern_combo.findText(segment.lattice_type)
+        idx = self.pattern_combo.findData(segment.lattice_type)
         if idx >= 0:
             self.pattern_combo.setCurrentIndex(idx)
             
@@ -94,9 +99,9 @@ class LatticeEditorWidget(QWidget):
         self.leg_profile_combo.setCurrentText(leg_p)
         self.brace_profile_combo.setCurrentText(brace_p)
 
-    def _on_pattern_changed(self, text):
+    def _on_pattern_changed(self, _index):
         if self.current_segment:
-            self.current_segment.lattice_type = text
+            self.current_segment.lattice_type = self.pattern_combo.currentData()
 
     def _on_profile_changed(self, _):
         if self.current_segment:

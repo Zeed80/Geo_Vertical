@@ -139,22 +139,27 @@ class StraightnessPlotWidget(BasePlotWidget):
         heights = centers['z'].values
         deviations_mm = centers['straightness_deviation'].values * 1000  # в мм
         
-        # Допуск прямолинейности
-        if 'section_length' in centers and centers['section_length'].iloc[0] > 0:
-            section_length = centers['section_length'].iloc[0]
-            tolerance = get_straightness_tolerance(section_length) * 1000  # в мм
+        # Допуск прямолинейности — per-point (δ = L/750 для каждой секции)
+        if 'section_length' in centers.columns:
+            tolerances = [
+                get_straightness_tolerance(sl) * 1000 if sl > 0 else 0
+                for sl in centers['section_length'].values
+            ]
         else:
-            tolerance = 0
-        
+            tolerances = [0] * len(deviations_mm)
+
         # Определяем цвета
-        passed_flags = [abs(d) <= tolerance for d in deviations_mm]
+        passed_flags = [abs(d) <= t for d, t in zip(deviations_mm, tolerances)]
         colors = ['#2ECC71' if p else '#E74C3C' for p in passed_flags]
-        
-        # Заполненная область допуска
+
+        # Область допуска — минимальный допуск для заливки (консервативно)
+        pos_tolerances = [t for t in tolerances if t > 0]
+        tolerance = min(pos_tolerances) if pos_tolerances else 0
+        max_tolerance = max(tolerances) if tolerances else 0
         if tolerance > 0:
-            ax.fill_betweenx(heights, -tolerance, tolerance, 
-                             alpha=0.2, color='#9B59B6', label='Область допуска')
-            # Линии допуска (пунктирные)
+            ax.fill_betweenx(heights, -tolerance, tolerance,
+                             alpha=0.2, color='#9B59B6', label='Область допуска (мин.)')
+            # Линии допуска (пунктирные) по минимальному допуску
             ax.axvline(x=tolerance, color='#8E44AD', linestyle='--', linewidth=1.5, alpha=0.7)
             ax.axvline(x=-tolerance, color='#8E44AD', linestyle='--', linewidth=1.5, alpha=0.7)
         
@@ -179,17 +184,20 @@ class StraightnessPlotWidget(BasePlotWidget):
         ax.grid(True, alpha=0.3, linestyle='--', linewidth=0.7)
         ax.legend(loc='best', fontsize=10, framealpha=0.9, shadow=True)
         
-        # Улучшенные границы графика
-        if tolerance > 0:
-            x_margin = tolerance * 0.2
-            ax.set_xlim(-tolerance - x_margin, tolerance + x_margin)
-        
+        # Улучшенные границы графика — по максимальному допуску
+        if max_tolerance > 0:
+            x_margin = max_tolerance * 0.2
+            ax.set_xlim(-max_tolerance - x_margin, max_tolerance + x_margin)
+
         # Статистика
         passed = sum(passed_flags)
         failed = len(passed_flags) - passed
         stats_text = f'✓ В норме: {passed}\n✗ Превышение: {failed}'
-        if tolerance > 0:
-            stats_text += f'\n\nДопуск: {tolerance:.2f} мм'
+        if pos_tolerances:
+            if tolerance == max_tolerance:
+                stats_text += f'\n\nДопуск: {tolerance:.2f} мм'
+            else:
+                stats_text += f'\n\nДопуск: {tolerance:.2f}–{max_tolerance:.2f} мм'
         ax.text(0.98, 0.02, stats_text, transform=ax.transAxes,
                verticalalignment='bottom', horizontalalignment='right',
                bbox=dict(boxstyle='round', facecolor='lightgreen', alpha=0.7))
