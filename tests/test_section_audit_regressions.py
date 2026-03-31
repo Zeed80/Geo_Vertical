@@ -7,6 +7,7 @@ from pandas.testing import assert_frame_equal
 from PyQt6.QtWidgets import QApplication, QMessageBox
 
 from core.face_track_completion import CompletionPartSpec, FaceTrackCompleter
+from core.calculations import process_tower_data
 from core.data_loader import load_survey_data
 from core.import_models import ImportDiagnostics, LoadedSurveyData
 from core.point_utils import build_working_tower_mask
@@ -357,10 +358,18 @@ def test_administraciya_add_middle_section_after_build_missing_belt_keeps_payloa
     main_window.data_table.set_data(main_window.raw_data)
 
     inserted_rows = main_window.raw_data.loc[main_window.raw_data["z"].sub(middle_height).abs() <= 1e-6].copy()
+    raw_results = process_tower_data(
+        main_window.raw_data,
+        main_window.height_tolerance,
+        main_window.center_method,
+        section_grouping_mode="height_levels",
+        use_cache=False,
+    )
+    current_data = main_window.data_table.get_data()
     payload = main_window.data_table.get_angular_measurements()
     results = main_window.calculation_service.calculate(
         main_window.raw_data,
-        main_window.data_table.get_data(),
+        current_data,
         main_window.epsg_code,
         main_window.height_tolerance,
         main_window.center_method,
@@ -379,6 +388,18 @@ def test_administraciya_add_middle_section_after_build_missing_belt_keeps_payloa
         abs=1e-3,
     )
     assert len(results["centers"]) == 3
+    assert results["centers"]["points_count"].tolist() == [4, 4, 4]
+    assert_frame_equal(
+        raw_results["centers"][
+            ["x", "y", "z", "deviation_x", "deviation_y", "deviation", "points_count"]
+        ].reset_index(drop=True),
+        results["centers"][
+            ["x", "y", "z", "deviation_x", "deviation_y", "deviation", "points_count"]
+        ].reset_index(drop=True),
+        check_exact=False,
+        atol=5e-4,
+        rtol=0.0,
+    )
 
 
 def test_second_station_import_rebuilds_sections_via_main_window_state_command(main_window, monkeypatch):

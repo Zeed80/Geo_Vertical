@@ -140,7 +140,7 @@ class PointEditor3DWidget(QWidget):
         self._tower_renderer: Optional[Tower3DRenderer] = None
 
         # Режим отображения: 'both' | 'import_only' | 'blueprint_only'
-        self._display_mode: str = 'both'
+        self._display_mode: str = 'import_only'
 
         # Компоненты для режима unified (будут созданы при необходимости)
         self._unified_structure_tree: Optional[QWidget] = None
@@ -265,6 +265,7 @@ class PointEditor3DWidget(QWidget):
         info_layout.addWidget(_display_label)
         self.display_mode_combo = QComboBox()
         self.display_mode_combo.addItems(['Оба', 'Только из импорта', 'Только из конструктора'])
+        self.display_mode_combo.setCurrentIndex(1)
         self.display_mode_combo.setFixedHeight(22)
         self.display_mode_combo.setFixedWidth(170)
         self.display_mode_combo.setStyleSheet('font-size: 9pt;')
@@ -581,7 +582,7 @@ class PointEditor3DWidget(QWidget):
         self.toggle_tower_visualization_btn = _tb(
             '🏗️\nБашня 3D', cb=self.toggle_tower_visualization,
             tooltip='Показать/скрыть визуализацию башни из конструктора',
-            checkable=True, checked=True, enabled=False,
+            checkable=True, checked=False, enabled=False,
             rt_title='Башня 3D',
             rt_desc='Переключает отображение 3D-модели башни из конструктора.')
         self.tower_builder_toggle_btn = _tb(
@@ -1092,6 +1093,246 @@ class PointEditor3DWidget(QWidget):
                 pass
             self.xy_plane_item = None
 
+    @staticmethod
+    def _estimate_bottom_focus_point(
+        positions: Optional[np.ndarray],
+        height_tolerance: float = SECTION_BUILD_HEIGHT_TOLERANCE,
+    ) -> np.ndarray:
+        """Оценивает pivot камеры как центр башни у основания."""
+        default_center = np.array([0.0, 0.0, 0.0], dtype=float)
+        if positions is None:
+            return default_center
+
+        try:
+            points = np.asarray(positions, dtype=float)
+        except Exception:
+            return default_center
+
+        if points.ndim != 2 or points.shape[0] == 0 or points.shape[1] < 3:
+            return default_center
+
+        points = points[:, :3]
+        valid_mask = np.isfinite(points).all(axis=1)
+        points = points[valid_mask]
+        if points.size == 0:
+            return default_center
+
+        points = points[np.argsort(points[:, 2])]
+        base_z = float(points[0, 2])
+        cluster_tolerance = max(float(height_tolerance), 1e-6)
+
+        level_centers: list[dict[str, float]] = []
+        current_cluster = [points[0]]
+        for row in points[1:]:
+            if abs(float(row[2]) - float(current_cluster[-1][2])) <= cluster_tolerance:
+                current_cluster.append(row)
+                continue
+
+            cluster_array = np.asarray(current_cluster, dtype=float)
+            level_centers.append(
+                {
+                    'x': float(cluster_array[:, 0].mean()),
+                    'y': float(cluster_array[:, 1].mean()),
+                    'z': float(cluster_array[:, 2].mean()),
+                }
+            )
+            current_cluster = [row]
+
+        cluster_array = np.asarray(current_cluster, dtype=float)
+        level_centers.append(
+            {
+                'x': float(cluster_array[:, 0].mean()),
+                'y': float(cluster_array[:, 1].mean()),
+                'z': float(cluster_array[:, 2].mean()),
+            }
+        )
+
+        if len(level_centers) >= 2:
+            try:
+                axis_fit = approximate_tower_axis(pd.DataFrame(level_centers))
+            except Exception:
+                axis_fit = {'valid': False}
+            if bool(axis_fit.get('valid')):
+                return np.array(
+                    [
+                        float(axis_fit.get('x0', level_centers[0]['x'])),
+                        float(axis_fit.get('y0', level_centers[0]['y'])),
+                        base_z,
+                    ],
+                    dtype=float,
+                )
+
+        z_span = float(points[-1, 2] - base_z)
+        base_band = max(cluster_tolerance, min(max(z_span * 0.05, cluster_tolerance), 2.0))
+        base_points = points[np.abs(points[:, 2] - base_z) <= base_band]
+        if base_points.size == 0:
+            base_points = points[: min(len(points), 4)]
+
+        return np.array(
+            [
+                float(base_points[:, 0].mean()),
+                float(base_points[:, 1].mean()),
+                base_z,
+            ],
+            dtype=float,
+        )
+
+    def _get_import_focus_positions(self) -> np.ndarray:
+        """Возвращает точки башни для расчёта pivot камеры."""
+        if self.data is None or self.data.empty:
+            return np.empty((0, 3), dtype=float)
+
+        working = self.data
+        if 'is_station' in working.columns:
+            station_mask = self._build_is_station_mask(working['is_station'])
+            working = working.loc[~station_mask]
+
+        for column in ('is_auxiliary', 'is_control'):
+            if column not in working.columns:
+                continue
+            try:
+                column_mask = working[column].fillna(False).astype(bool)
+            except Exception:
+                column_mask = working[column].map(bool)
+            working = working.loc[~column_mask]
+
+        if working.empty:
+            working = self.data
+
+        return working[['x', 'y', 'z']].to_numpy(dtype=float, copy=True)
+
+    def _focus_camera_on_positions(self, positions: Optional[np.ndarray]) -> None:
+        """Фокусирует камеру на данных, используя pivot у основания башни."""
+        if positions is None:
+            return
+
+        coords = np.asarray(positions, dtype=float)
+        if coords.ndim != 2 or coords.shape[0] == 0 or coords.shape[1] < 3:
+            return
+
+        coords = coords[:, :3]
+        valid_mask = np.isfinite(coords).all(axis=1)
+        coords = coords[valid_mask]
+        if coords.size == 0:
+            return
+
+        focus_point = self._estimate_bottom_focus_point(coords)
+        extent = coords.max(axis=0) - coords.min(axis=0)
+        distance = max(float(np.linalg.norm(extent)) * 2, 10.0)
+
+        self.glview.setCameraPosition(distance=distance, elevation=30, azimuth=45)
+        self._set_camera_center(focus_point)
+
+    def _set_camera_center(self, center: Optional[np.ndarray]) -> None:
+        """Устанавливает текущий pivot камеры без изменения дистанции и углов."""
+        if center is None or self.glview is None:
+            return
+
+        coords = np.asarray(center, dtype=float).reshape(-1)
+        if coords.shape[0] < 3 or not np.isfinite(coords[:3]).all():
+            return
+
+        self.glview.opts['center'] = pg.Vector(
+            float(coords[0]),
+            float(coords[1]),
+            float(coords[2]),
+        )
+        self.glview.update()
+
+    def _get_current_camera_center(self) -> Optional[np.ndarray]:
+        """Возвращает текущий pivot камеры, если он валиден."""
+        if self.glview is None:
+            return None
+
+        center = self.glview.opts.get('center')
+        if center is None:
+            return None
+
+        try:
+            if hasattr(center, 'x') and hasattr(center, 'y') and hasattr(center, 'z'):
+                coords = np.array(
+                    [float(center.x()), float(center.y()), float(center.z())],
+                    dtype=float,
+                )
+            else:
+                coords = np.asarray(center, dtype=float).reshape(-1)[:3]
+        except Exception:
+            return None
+
+        if coords.shape[0] < 3 or not np.isfinite(coords[:3]).all():
+            return None
+        return coords[:3].copy()
+
+    def _resolve_automatic_focus_positions(self, mode: Optional[str] = None) -> np.ndarray:
+        """Возвращает геометрию, которая должна использоваться для автоматического pivot."""
+        display_mode = mode or getattr(self, '_display_mode', 'both')
+        import_positions = self._get_import_focus_positions()
+        blueprint_positions = self._get_blueprint_focus_positions()
+
+        if display_mode == 'blueprint_only':
+            return blueprint_positions if blueprint_positions.size > 0 else import_positions
+        if display_mode == 'import_only':
+            return import_positions if import_positions.size > 0 else blueprint_positions
+        return import_positions if import_positions.size > 0 else blueprint_positions
+
+    def _resolve_automatic_focus_point(self, mode: Optional[str] = None) -> Optional[np.ndarray]:
+        """Возвращает автоматический pivot без учёта выделенной точки."""
+        positions = self._resolve_automatic_focus_positions(mode)
+        if positions.size > 0:
+            return self._estimate_bottom_focus_point(positions)
+        return self._get_current_camera_center()
+
+    def _get_blueprint_focus_positions(self) -> np.ndarray:
+        """Возвращает координаты узлов башни из конструктора для расчёта pivot."""
+        if (
+            self._tower_renderer is None
+            or self._tower_renderer._model is None
+            or not self._tower_renderer._model.nodes
+        ):
+            return np.empty((0, 3), dtype=float)
+
+        return np.array(
+            [
+                np.asarray(node.coords, dtype=float) + self._tower_renderer._world_offset
+                for node in self._tower_renderer._model.nodes.values()
+            ],
+            dtype=float,
+        )
+
+    def _get_selected_focus_point(self) -> Optional[np.ndarray]:
+        """Возвращает координаты выбранной точки для pivot камеры."""
+        if self.data is None or self.data.empty or not self.selected_indices:
+            return None
+
+        for position in reversed(self.selected_indices):
+            if not isinstance(position, int) or position < 0 or position >= len(self.data):
+                continue
+            row = self.data.iloc[position]
+            try:
+                point = np.array(
+                    [float(row['x']), float(row['y']), float(row['z'])],
+                    dtype=float,
+                )
+            except Exception:
+                continue
+            if np.isfinite(point).all():
+                return point
+        return None
+
+    def _resolve_orbit_focus_point(self) -> Optional[np.ndarray]:
+        """Определяет точку, вокруг которой нужно вращать сцену."""
+        selected_point = self._get_selected_focus_point()
+        if selected_point is not None:
+            return selected_point
+        return self._resolve_automatic_focus_point()
+
+    def _apply_orbit_focus_point(self) -> None:
+        """Применяет актуальный pivot камеры для следующего вращения."""
+        focus_point = self._resolve_orbit_focus_point()
+        if focus_point is None:
+            focus_point = self._get_current_camera_center()
+        self._set_camera_center(focus_point)
+
     def initialize_xy_plane_from_positions(self, positions: Optional[np.ndarray]) -> None:
         """Инициализирует положение плоскости XY на основе текущих данных."""
         if positions is None or positions.size == 0:
@@ -1108,10 +1349,7 @@ class PointEditor3DWidget(QWidget):
             size_candidate = 10.0
 
         self.xy_plane_size = max(size_candidate, 5.0)
-        center_x = float(np.mean(positions[:, 0]))
-        center_y = float(np.mean(positions[:, 1]))
-        base_z = float(np.min(positions[:, 2]))
-        self.xy_plane_center = np.array([center_x, center_y, base_z], dtype=float)
+        self.xy_plane_center = self._estimate_bottom_focus_point(positions)
         self.xy_plane_initialized = True
 
     def update_xy_plane_geometry(self, positions: Optional[np.ndarray] = None) -> None:
@@ -4392,44 +4630,10 @@ class PointEditor3DWidget(QWidget):
     
     def reset_camera(self):
         """Сброс положения камеры по центру башни (с учётом режима отображения)."""
-        mode = getattr(self, '_display_mode', 'both')
-        has_data = self.data is not None and not self.data.empty
-        has_blueprint = (
-            self._tower_renderer is not None
-            and self._tower_renderer._model is not None
-            and bool(self._tower_renderer._model.nodes)
-        )
-
-        # Режим «только из конструктора» или нет данных съёмки — фокус на Blueprint
-        if mode == 'blueprint_only' or (not has_data and has_blueprint):
-            self._focus_camera_on_blueprint()
+        positions = self._resolve_automatic_focus_positions()
+        if positions.size == 0:
             return
-
-        if not has_data:
-            return
-
-        # Исключаем точки стоянок, вспомогательные и контрольные дубли —
-        # фокус должен быть на башне, а не на инструментальных позициях.
-        working = self.data
-        for _col in ('is_station', 'is_auxiliary', 'is_control'):
-            if _col in working.columns:
-                working = working[~working[_col].astype(bool)]
-        if working.empty:
-            working = self.data  # запасной вариант
-
-        positions = working[['x', 'y', 'z']].values
-        center = positions.mean(axis=0)
-
-        # Вычисляем расстояние камеры
-        extent = positions.max(axis=0) - positions.min(axis=0)
-        distance = max(float(np.linalg.norm(extent)) * 2, 10.0)
-
-        self.glview.setCameraPosition(
-            distance=distance,
-            elevation=30,
-            azimuth=45
-        )
-        self.glview.opts['center'] = pg.Vector(center[0], center[1], center[2])
+        self._focus_camera_on_positions(positions)
     
     def update_info_label(self):
         """Обновление информационной панели"""
@@ -4569,6 +4773,7 @@ class PointEditor3DWidget(QWidget):
             
             self.update_3d_view()
             self.update_info_label()
+            self._apply_orbit_focus_point()
 
             if station_to_activate is not None:
                 self.set_active_station_index(station_to_activate)
@@ -4580,6 +4785,7 @@ class PointEditor3DWidget(QWidget):
         self.selected_indices = []
         self.update_3d_view()
         self.update_info_label()
+        self._apply_orbit_focus_point()
     
     def mouse_move_event(self, event):
         """Обработка перемещения мыши с зажатой кнопкой"""
@@ -4617,6 +4823,7 @@ class PointEditor3DWidget(QWidget):
         # Средняя кнопка или Shift+ЛКМ - начинаем вращение камеры
         if event.button() == Qt.MouseButton.MiddleButton or \
            (event.button() == Qt.MouseButton.LeftButton and event.modifiers() & Qt.KeyboardModifier.ShiftModifier):
+            self._apply_orbit_focus_point()
             self.camera_drag_start_pos = event.pos()
             self.camera_drag_button = event.button()
             return
@@ -5347,6 +5554,7 @@ class PointEditor3DWidget(QWidget):
         if not getattr(self, '_updating_3d_view', False):
             self.update_3d_view()
         self.update_info_label()
+        self._apply_orbit_focus_point()
     
     def _legacy_set_data_simple(self, data: pd.DataFrame, preserve_history: bool = False):
         """
@@ -5486,6 +5694,7 @@ class PointEditor3DWidget(QWidget):
         # Перерисовываем 3D и таблицы
         self.update_all_indices()
         self.set_section_lines(self.section_data)
+        self.reset_camera()
 
         self.data_changed.emit()
 
@@ -5794,6 +6003,7 @@ class PointEditor3DWidget(QWidget):
             if hasattr(self, 'toggle_tower_visualization_btn'):
                 self.toggle_tower_visualization_btn.setEnabled(False)
                 self.toggle_tower_visualization_btn.setChecked(False)
+            self._apply_orbit_focus_point()
             return
         
         # Если это уже TowerBlueprintV2, используем напрямую
@@ -5826,6 +6036,8 @@ class PointEditor3DWidget(QWidget):
             blueprint_only = getattr(self, '_display_mode', 'both') == 'blueprint_only'
             if no_survey or blueprint_only:
                 self._focus_camera_on_blueprint()
+            else:
+                self._apply_orbit_focus_point()
         else:
             # Для старого формата TowerBlueprint не отрисовываем
             # (можно добавить конвертацию при необходимости)
@@ -5954,22 +6166,10 @@ class PointEditor3DWidget(QWidget):
 
     def _focus_camera_on_blueprint(self) -> None:
         """Сфокусировать камеру на башне из конструктора."""
-        if (self._tower_renderer is None
-                or self._tower_renderer._model is None
-                or not self._tower_renderer._model.nodes):
+        coords = self._get_blueprint_focus_positions()
+        if coords.size == 0:
             return
-        coords = np.array(
-            [
-                np.asarray(n.coords, dtype=float) + self._tower_renderer._world_offset
-                for n in self._tower_renderer._model.nodes.values()
-            ],
-            dtype=float,
-        )
-        center = coords.mean(axis=0)
-        extent = coords.max(axis=0) - coords.min(axis=0)
-        distance = max(float(np.linalg.norm(extent)) * 2, 10.0)
-        self.glview.setCameraPosition(distance=distance, elevation=30, azimuth=45)
-        self.glview.opts['center'] = pg.Vector(float(center[0]), float(center[1]), float(center[2]))
+        self._focus_camera_on_positions(coords)
     
     def _setup_unified_mode(self) -> None:
         """

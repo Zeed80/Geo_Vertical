@@ -1937,6 +1937,8 @@ class MainWindow(QMainWindow):
 
             removed_points_count = int(section_generated_mask.sum())
             new_data = old_data.loc[~section_generated_mask].copy(deep=True).reset_index(drop=True)
+            if old_snapshot is not None and 'height_level' not in old_snapshot.columns and 'height_level' in new_data.columns:
+                new_data = new_data.drop(columns=['height_level'])
             old_state = self._compose_main_window_undo_state(
                 old_state,
                 section_data=current_sections,

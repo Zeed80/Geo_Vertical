@@ -2615,10 +2615,29 @@ class DataTableWidget(QWidget):
         seconds = abs_seconds - degrees * 3600 - minutes * 60
         return f"{sign}{degrees}° {minutes:02d}' {seconds:05.2f}\""
 
-    def _get_original_record(self, index: Optional[int]) -> Dict[str, Any]:
-        """Возвращает копию строки исходных данных по глобальному индексу."""
+    def _get_original_record(
+        self,
+        index: Optional[int],
+        *,
+        prefer_point_index: bool = False,
+    ) -> Dict[str, Any]:
+        """Возвращает копию строки исходных данных по DataFrame index или point_index."""
         if index is None or self.original_data is None or self.original_data.empty:
             return {}
+
+        if prefer_point_index and 'point_index' in self.original_data.columns:
+            try:
+                numeric_point_index = pd.to_numeric(
+                    self.original_data['point_index'],
+                    errors='coerce',
+                )
+                matches = numeric_point_index.eq(int(index))
+                if matches.any():
+                    row = self.original_data.loc[matches].iloc[0]
+                    return row.to_dict()
+            except (TypeError, ValueError):
+                pass
+
         try:
             row = self.original_data.loc[index]
         except Exception:
@@ -2689,7 +2708,7 @@ class DataTableWidget(QWidget):
             try:
                 index_item = self.station_table.item(i, 0)
                 global_idx = index_item.data(Qt.ItemDataRole.UserRole) if index_item else None
-                base_record = self._get_original_record(global_idx)
+                base_record = self._get_original_record(global_idx, prefer_point_index=True)
 
                 name_item = self.station_table.item(i, 1)
                 name = name_item.text() if name_item else base_record.get('name', f'Точка стояния {i+1}')
@@ -2740,7 +2759,7 @@ class DataTableWidget(QWidget):
                 try:
                     index_item = table.item(i, 0)
                     global_idx = index_item.data(Qt.ItemDataRole.UserRole) if index_item else None
-                    base_record = self._get_original_record(global_idx)
+                    base_record = self._get_original_record(global_idx, prefer_point_index=True)
 
                     name_item = table.item(i, 1)
                     name = name_item.text() if name_item else base_record.get('name', f'Точка {i+1}')

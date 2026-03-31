@@ -66,6 +66,194 @@ def test_compute_belt_label_position_uses_bottom_point_and_moves_down():
     assert position == (2.4, 0.0, 0.5)
 
 
+def test_estimate_bottom_focus_point_uses_tower_center_at_base():
+    positions = np.array(
+        [
+            [9.0, 19.0, 0.0],
+            [11.0, 19.0, 0.0],
+            [11.0, 21.0, 0.0],
+            [9.0, 21.0, 0.0],
+            [11.0, 20.0, 10.0],
+            [13.0, 20.0, 10.0],
+            [13.0, 22.0, 10.0],
+            [11.0, 22.0, 10.0],
+        ],
+        dtype=float,
+    )
+
+    focus = PointEditor3DWidget._estimate_bottom_focus_point(positions)
+
+    assert np.allclose(focus, np.array([10.0, 20.0, 0.0]), atol=1e-6)
+
+
+class _OrbitFocusStub:
+    def __init__(self, data: pd.DataFrame, selected_indices: list[int] | None = None):
+        self.data = data.copy(deep=True)
+        self.selected_indices = list(selected_indices or [])
+        self.glview = _CameraStub()
+        self._tower_renderer = None
+        self._display_mode = 'import_only'
+        self._estimate_bottom_focus_point = PointEditor3DWidget._estimate_bottom_focus_point
+        self._build_is_station_mask = PointEditor3DWidget._build_is_station_mask
+        self._get_import_focus_positions = MethodType(PointEditor3DWidget._get_import_focus_positions, self)
+        self._get_blueprint_focus_positions = MethodType(PointEditor3DWidget._get_blueprint_focus_positions, self)
+        self._get_current_camera_center = MethodType(PointEditor3DWidget._get_current_camera_center, self)
+        self._resolve_automatic_focus_positions = MethodType(PointEditor3DWidget._resolve_automatic_focus_positions, self)
+        self._resolve_automatic_focus_point = MethodType(PointEditor3DWidget._resolve_automatic_focus_point, self)
+        self._get_selected_focus_point = MethodType(PointEditor3DWidget._get_selected_focus_point, self)
+        self._resolve_orbit_focus_point = MethodType(PointEditor3DWidget._resolve_orbit_focus_point, self)
+
+
+def test_resolve_orbit_focus_point_prefers_selected_point():
+    data = pd.DataFrame(
+        [
+            {'name': 'st1', 'x': 0.0, 'y': 0.0, 'z': 1.0, 'is_station': True},
+            {'name': 'P1', 'x': 10.0, 'y': 20.0, 'z': 3.0, 'is_station': False},
+            {'name': 'P2', 'x': 12.0, 'y': 22.0, 'z': 9.0, 'is_station': False},
+        ]
+    )
+    stub = _OrbitFocusStub(data, selected_indices=[2])
+
+    focus = stub._resolve_orbit_focus_point()
+
+    assert np.allclose(focus, np.array([12.0, 22.0, 9.0]), atol=1e-6)
+
+
+def test_resolve_orbit_focus_point_ignores_station_and_uses_tower_base():
+    data = pd.DataFrame(
+        [
+            {'name': 'st1', 'x': 0.0, 'y': 0.0, 'z': 1.0, 'is_station': True},
+            {'name': 'P1', 'x': 9.0, 'y': 19.0, 'z': 2.0, 'is_station': False},
+            {'name': 'P2', 'x': 11.0, 'y': 19.0, 'z': 2.0, 'is_station': False},
+            {'name': 'P3', 'x': 11.0, 'y': 21.0, 'z': 2.0, 'is_station': False},
+            {'name': 'P4', 'x': 9.0, 'y': 21.0, 'z': 2.0, 'is_station': False},
+            {'name': 'P5', 'x': 11.0, 'y': 20.0, 'z': 10.0, 'is_station': False},
+        ]
+    )
+    stub = _OrbitFocusStub(data)
+
+    focus = stub._resolve_orbit_focus_point()
+
+    assert np.allclose(focus, np.array([10.0, 20.0, 2.0]), atol=1e-6)
+
+
+class _CameraStub:
+    def __init__(self):
+        self.opts = {'center': np.array([0.0, 0.0, 0.0], dtype=float)}
+        self.camera_positions = []
+        self.update_calls = 0
+
+    def setCameraPosition(self, **kwargs):
+        self.camera_positions.append(dict(kwargs))
+
+    def update(self):
+        self.update_calls += 1
+
+
+def _camera_center_array(glview: _CameraStub) -> np.ndarray:
+    center = glview.opts['center']
+    if hasattr(center, 'x') and hasattr(center, 'y') and hasattr(center, 'z'):
+        return np.array([float(center.x()), float(center.y()), float(center.z())], dtype=float)
+    return np.asarray(center, dtype=float).reshape(-1)[:3]
+
+
+class _CameraLifecycleStub:
+    def __init__(self, data: pd.DataFrame, display_mode: str = 'import_only'):
+        self.data = data.copy(deep=True)
+        self.section_data = []
+        self.selected_indices = [0]
+        self.pending_point_idx = 0
+        self.point_index_counter = 0
+        self.show_central_axis = False
+        self.glview = _CameraStub()
+        self._tower_renderer = None
+        self._display_mode = display_mode
+        self._updating_3d_view = False
+        self.index_manager = _IndexManagerStub()
+        self.info_label = _LabelStub()
+        self.data_changed = _SignalStub()
+        self.xy_plane_state = None
+        self._build_is_station_mask = PointEditor3DWidget._build_is_station_mask
+        self._ensure_point_indices = MethodType(PointEditor3DWidget._ensure_point_indices, self)
+        self._refresh_index_mapping = MethodType(PointEditor3DWidget._refresh_index_mapping, self)
+        self._estimate_bottom_focus_point = PointEditor3DWidget._estimate_bottom_focus_point
+        self._get_import_focus_positions = MethodType(PointEditor3DWidget._get_import_focus_positions, self)
+        self._get_blueprint_focus_positions = MethodType(PointEditor3DWidget._get_blueprint_focus_positions, self)
+        self._set_camera_center = MethodType(PointEditor3DWidget._set_camera_center, self)
+        self._get_current_camera_center = MethodType(PointEditor3DWidget._get_current_camera_center, self)
+        self._resolve_automatic_focus_positions = MethodType(PointEditor3DWidget._resolve_automatic_focus_positions, self)
+        self._resolve_automatic_focus_point = MethodType(PointEditor3DWidget._resolve_automatic_focus_point, self)
+        self._get_selected_focus_point = MethodType(PointEditor3DWidget._get_selected_focus_point, self)
+        self._resolve_orbit_focus_point = MethodType(PointEditor3DWidget._resolve_orbit_focus_point, self)
+        self._apply_orbit_focus_point = MethodType(PointEditor3DWidget._apply_orbit_focus_point, self)
+        self._focus_camera_on_positions = MethodType(PointEditor3DWidget._focus_camera_on_positions, self)
+        self.reset_camera = MethodType(PointEditor3DWidget.reset_camera, self)
+        self.update_all_indices = MethodType(PointEditor3DWidget.update_all_indices, self)
+        self.restore_state = MethodType(PointEditor3DWidget.restore_state, self)
+
+    def update_3d_view(self):
+        return None
+
+    def update_info_label(self):
+        return None
+
+    def set_section_lines(self, section_data):
+        self.section_data = [dict(section) for section in section_data]
+
+    def set_xy_plane_state(self, state, update_geometry=False):
+        self.xy_plane_state = (state, update_geometry)
+
+
+def test_update_all_indices_reapplies_orbit_focus_to_tower_base():
+    data = pd.DataFrame(
+        [
+            {'name': 'st1', 'x': 0.0, 'y': 0.0, 'z': 1.0, 'is_station': True},
+            {'name': 'P1', 'x': 9.0, 'y': 19.0, 'z': 2.0, 'is_station': False},
+            {'name': 'P2', 'x': 11.0, 'y': 19.0, 'z': 2.0, 'is_station': False},
+            {'name': 'P3', 'x': 11.0, 'y': 21.0, 'z': 2.0, 'is_station': False},
+            {'name': 'P4', 'x': 9.0, 'y': 21.0, 'z': 2.0, 'is_station': False},
+            {'name': 'P5', 'x': 11.0, 'y': 20.0, 'z': 10.0, 'is_station': False},
+        ]
+    )
+    stub = _CameraLifecycleStub(data)
+    stub._set_camera_center(np.array([0.0, 0.0, 1.0], dtype=float))
+
+    PointEditor3DWidget.update_all_indices(stub)
+
+    assert stub.selected_indices == []
+    assert stub.pending_point_idx is None
+    assert np.allclose(_camera_center_array(stub.glview), np.array([10.0, 20.0, 2.0]), atol=1e-6)
+
+
+def test_restore_state_resets_camera_to_tower_base():
+    data = pd.DataFrame(
+        [
+            {'name': 'st1', 'x': 0.0, 'y': 0.0, 'z': 1.0, 'is_station': True},
+            {'name': 'P1', 'x': 9.0, 'y': 19.0, 'z': 2.0, 'is_station': False},
+            {'name': 'P2', 'x': 11.0, 'y': 19.0, 'z': 2.0, 'is_station': False},
+            {'name': 'P3', 'x': 11.0, 'y': 21.0, 'z': 2.0, 'is_station': False},
+            {'name': 'P4', 'x': 9.0, 'y': 21.0, 'z': 2.0, 'is_station': False},
+            {'name': 'P5', 'x': 11.0, 'y': 20.0, 'z': 10.0, 'is_station': False},
+        ]
+    )
+    stub = _CameraLifecycleStub(pd.DataFrame())
+    stub._set_camera_center(np.array([0.0, 0.0, 1.0], dtype=float))
+
+    PointEditor3DWidget.restore_state(
+        stub,
+        {
+            'data': data,
+            'section_data': [],
+            'show_central_axis': False,
+            'point_index_counter': 0,
+            'xy_plane_state': None,
+        },
+    )
+
+    assert np.allclose(_camera_center_array(stub.glview), np.array([10.0, 20.0, 2.0]), atol=1e-6)
+    assert stub.glview.camera_positions
+
+
 def test_suggest_new_section_height_supports_top_and_bottom_modes():
     heights = [2.5, 10.0, 17.5, 25.0]
 
@@ -341,8 +529,10 @@ class _EditorProjectSectionStub:
             self,
         )
         self._current_section_heights = MethodType(PointEditor3DWidget._current_section_heights, self)
+        self._canonicalize_section_mutation_data = MethodType(PointEditor3DWidget._canonicalize_section_mutation_data, self)
         self._resolve_section_levels = MethodType(PointEditor3DWidget._resolve_section_levels, self)
         self._rebuild_section_data = MethodType(PointEditor3DWidget._rebuild_section_data, self)
+        self._refresh_after_section_mutation = MethodType(PointEditor3DWidget._refresh_after_section_mutation, self)
 
     @contextmanager
     def undo_transaction(self, _description):
