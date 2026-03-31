@@ -17,6 +17,11 @@ import logging
 
 from core.planar_orientation import domain_rotation_deg_to_math_rad, normalize_signed_angle_deg
 from core.data_loader import load_survey_data
+from core.face_track_completion import (
+    FaceTrackCompleter,
+    build_completion_part_specs,
+)
+from core.point_utils import build_working_tower_mask
 from core.survey_registration import (
     compute_helmert_parameters,
     apply_helmert_transform,
@@ -37,6 +42,8 @@ from gui.data_import_wizard import DataImportWizard
 from gui.ui_helpers import apply_compact_button_style
 
 logger = logging.getLogger(__name__)
+
+_SECOND_STATION_HEIGHT_LEVEL_TOLERANCE = 0.35
 
 
 class SecondStationImportWizard(QDialog):
@@ -1315,6 +1322,190 @@ class SecondStationImportWizard(QDialog):
         self._clear_method2_preview_visualization()
         super().closeEvent(event)
 
+    @staticmethod
+    def _cluster_height_levels(z_values: np.ndarray, tolerance: float = _SECOND_STATION_HEIGHT_LEVEL_TOLERANCE) -> np.ndarray:
+        if len(z_values) == 0:
+            return np.array([], dtype=int)
+        order = np.argsort(z_values)
+        sorted_z = z_values[order]
+        labels = np.ones(len(sorted_z), dtype=int)
+        for idx in range(1, len(sorted_z)):
+            if float(sorted_z[idx] - sorted_z[idx - 1]) > float(tolerance):
+                labels[idx] = labels[idx - 1] + 1
+            else:
+                labels[idx] = labels[idx - 1]
+        result = np.zeros(len(z_values), dtype=int)
+        result[order] = labels
+        return result
+
+    @staticmethod
+    def _normalize_bool_column(data: pd.DataFrame, column_name: str, default: bool = False) -> None:
+        if column_name not in data.columns:
+            data[column_name] = default
+        data[column_name] = data[column_name].fillna(default).astype(bool)
+
+    @staticmethod
+    def _normalize_point_index_column(data: pd.DataFrame) -> None:
+        if 'point_index' not in data.columns:
+            data['point_index'] = np.arange(1, len(data) + 1, dtype=int)
+            return
+
+        numeric = pd.to_numeric(data['point_index'], errors='coerce')
+        if numeric.isna().any() or (numeric <= 0).any() or numeric.duplicated().any():
+            data['point_index'] = np.arange(1, len(data) + 1, dtype=int)
+            return
+
+        data['point_index'] = numeric.astype(int)
+
+    def _canonicalize_merged_data(self, data: pd.DataFrame) -> pd.DataFrame:
+        normalized = data.copy(deep=True).reset_index(drop=True)
+        if normalized.empty:
+            return normalized
+
+        for flag_name in ('is_station', 'is_auxiliary', 'is_control', 'is_generated', 'is_part_boundary'):
+            self._normalize_bool_column(normalized, flag_name, default=False)
+
+        if 'generated_by' not in normalized.columns:
+            normalized['generated_by'] = None
+        if 'belt' not in normalized.columns:
+            normalized['belt'] = pd.NA
+        if 'face_track' not in normalized.columns:
+            normalized['face_track'] = pd.NA
+        if 'part_belt' not in normalized.columns:
+            normalized['part_belt'] = pd.NA
+        if 'part_face_track' not in normalized.columns:
+            normalized['part_face_track'] = pd.NA
+        if 'tower_part' not in normalized.columns:
+            normalized['tower_part'] = pd.NA
+        if 'tower_part_memberships' not in normalized.columns:
+            normalized['tower_part_memberships'] = None
+        if 'part_belt_assignments' not in normalized.columns:
+            normalized['part_belt_assignments'] = None
+        if 'faces' not in normalized.columns:
+            normalized['faces'] = pd.NA
+        if 'height_level' not in normalized.columns:
+            normalized['height_level'] = 0
+        if 'cw_angle_deg' not in normalized.columns:
+            normalized['cw_angle_deg'] = pd.NA
+
+        working_mask = build_working_tower_mask(normalized)
+        default_faces = int(self.tower_faces_from_first or 0) or int(self.belt_count_from_first or 0) or 4
+
+        belt_values = pd.to_numeric(normalized['belt'], errors='coerce')
+        face_track_values = pd.to_numeric(normalized['face_track'], errors='coerce')
+        missing_belt_mask = working_mask & belt_values.isna() & face_track_values.notna()
+        if missing_belt_mask.any():
+            normalized.loc[missing_belt_mask, 'belt'] = face_track_values.loc[missing_belt_mask].round().astype(int)
+            belt_values = pd.to_numeric(normalized['belt'], errors='coerce')
+
+        missing_face_track_mask = working_mask & face_track_values.isna() & belt_values.notna()
+        if missing_face_track_mask.any():
+            normalized.loc[missing_face_track_mask, 'face_track'] = belt_values.loc[missing_face_track_mask].round().astype(int)
+            face_track_values = pd.to_numeric(normalized['face_track'], errors='coerce')
+
+        part_belt_values = pd.to_numeric(normalized['part_belt'], errors='coerce')
+        missing_part_belt_mask = working_mask & part_belt_values.isna() & belt_values.notna()
+        if missing_part_belt_mask.any():
+            normalized.loc[missing_part_belt_mask, 'part_belt'] = belt_values.loc[missing_part_belt_mask].round().astype(int)
+            part_belt_values = pd.to_numeric(normalized['part_belt'], errors='coerce')
+
+        part_face_track_values = pd.to_numeric(normalized['part_face_track'], errors='coerce')
+        missing_part_face_track_mask = working_mask & part_face_track_values.isna() & part_belt_values.notna()
+        if missing_part_face_track_mask.any():
+            normalized.loc[missing_part_face_track_mask, 'part_face_track'] = (
+                part_belt_values.loc[missing_part_face_track_mask].round().astype(int)
+            )
+            part_face_track_values = pd.to_numeric(normalized['part_face_track'], errors='coerce')
+
+        fallback_part_face_track_mask = working_mask & part_face_track_values.isna() & face_track_values.notna()
+        if fallback_part_face_track_mask.any():
+            normalized.loc[fallback_part_face_track_mask, 'part_face_track'] = (
+                face_track_values.loc[fallback_part_face_track_mask].round().astype(int)
+            )
+
+        tower_part_values = pd.to_numeric(normalized['tower_part'], errors='coerce')
+        missing_tower_part_mask = working_mask & (tower_part_values.isna() | (tower_part_values <= 0))
+        if missing_tower_part_mask.any():
+            normalized.loc[missing_tower_part_mask, 'tower_part'] = 1
+
+        faces_values = pd.to_numeric(normalized['faces'], errors='coerce')
+        missing_faces_mask = working_mask & (faces_values.isna() | (faces_values <= 0))
+        if missing_faces_mask.any():
+            normalized.loc[missing_faces_mask, 'faces'] = int(default_faces)
+
+        generated_without_source = normalized['is_generated'] & normalized['generated_by'].isna()
+        if generated_without_source.any():
+            normalized.loc[generated_without_source, 'generated_by'] = 'legacy_completion'
+
+        for idx in normalized.index[working_mask]:
+            part_num_raw = pd.to_numeric(pd.Series([normalized.at[idx, 'tower_part']]), errors='coerce').iloc[0]
+            part_num = int(part_num_raw) if pd.notna(part_num_raw) and int(part_num_raw) > 0 else 1
+
+            memberships = normalized.at[idx, 'tower_part_memberships']
+            if memberships is None or (isinstance(memberships, float) and pd.isna(memberships)) or str(memberships).strip() == '':
+                normalized.at[idx, 'tower_part_memberships'] = json.dumps([part_num], ensure_ascii=False)
+
+            assignment = normalized.at[idx, 'part_belt_assignments']
+            part_belt_raw = pd.to_numeric(pd.Series([normalized.at[idx, 'part_belt']]), errors='coerce').iloc[0]
+            if (
+                assignment is None
+                or (isinstance(assignment, float) and pd.isna(assignment))
+                or str(assignment).strip() == ''
+            ) and pd.notna(part_belt_raw):
+                normalized.at[idx, 'part_belt_assignments'] = json.dumps(
+                    {str(part_num): int(part_belt_raw)},
+                    ensure_ascii=False,
+                )
+
+        numeric_z = pd.to_numeric(normalized['z'], errors='coerce')
+        working_height_index = normalized.index[working_mask & numeric_z.notna()]
+        normalized['height_level'] = 0
+        if len(working_height_index) > 0:
+            normalized.loc[working_height_index, 'height_level'] = self._cluster_height_levels(
+                numeric_z.loc[working_height_index].to_numpy(dtype=float),
+                tolerance=_SECOND_STATION_HEIGHT_LEVEL_TOLERANCE,
+            )
+
+        self._normalize_point_index_column(normalized)
+        return normalized
+
+    def _autocomplete_missing_belt_model(self, merged_data: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
+        default_faces = int(self.tower_faces_from_first or 0) or int(self.belt_count_from_first or 0) or 4
+        parent_blueprint = getattr(self.parent(), '_tower_blueprint', None) if self.parent() is not None else None
+        part_specs = build_completion_part_specs(
+            merged_data,
+            blueprint=parent_blueprint,
+            default_faces=default_faces,
+        )
+        completer = FaceTrackCompleter(merged_data, part_specs)
+        return completer.preview(z_method='diagonal')
+
+    def _prepare_final_result_data(self, merged_data: pd.DataFrame) -> pd.DataFrame:
+        normalized = self._canonicalize_merged_data(merged_data)
+        generated = pd.DataFrame()
+
+        if self.autocomplete_belt_checkbox.isChecked():
+            try:
+                normalized, generated = self._autocomplete_missing_belt_model(normalized)
+                normalized = self._canonicalize_merged_data(normalized)
+            except Exception as exc:
+                logger.warning("Автодостройка пояса через FaceTrackCompleter пропущена: %s", exc, exc_info=True)
+
+        if self.transform_quality is None:
+            self.transform_quality = {}
+        self.transform_quality['autocomplete_generated_points'] = int(len(generated))
+        if not generated.empty and 'face_track' in generated.columns:
+            self.transform_quality['autocomplete_generated_tracks'] = sorted(
+                {
+                    int(value)
+                    for value in pd.to_numeric(generated['face_track'], errors='coerce').dropna().tolist()
+                }
+            )
+        else:
+            self.transform_quality['autocomplete_generated_tracks'] = []
+
+        return normalized
+
     def do_import(self):
         """Выполнить импорт"""
         if not hasattr(self, 'second_station_data'):
@@ -1507,11 +1698,10 @@ class SecondStationImportWizard(QDialog):
             merged_data = self._merge_points(self.existing_data, transformed_data, tolerance)
             
             if merged_data is not None:
-                self.result_data = merged_data
-                self._finalize_transformation_audit(method=1, merged_data=merged_data)
+                self.result_data = self._prepare_final_result_data(merged_data)
+                self._finalize_transformation_audit(method=1, merged_data=self.result_data)
                 
                 # Обновляем данные в главном окне
-                self.parent().editor_3d.set_data(merged_data)
                 
                 # Для метода 1 (Гельмерт) визуализация линий соединения не требуется,
                 # так как преобразование применяется ко всем точкам, а не к конкретному поясу
@@ -2530,13 +2720,18 @@ class SecondStationImportWizard(QDialog):
                 logger.warning(f"Не удалось сформировать данные визуализации линий: {viz_e}", exc_info=True)
 
             # Обновляем данные и линии в главном окне (перед accept)
-            self.parent().editor_3d.set_data(merged_data)
-            if 'visualization_data' in self.transform_quality:
+            if self.parent() is not None and hasattr(self.parent(), 'editor_3d'):
+                self.parent().editor_3d.set_data(merged_data)
+            if (
+                'visualization_data' in self.transform_quality
+                and self.parent() is not None
+                and hasattr(self.parent(), 'editor_3d')
+            ):
                 self.parent().editor_3d.set_belt_connection_lines(self.transform_quality['visualization_data'])
                 
             # Достроение пояса (по желанию)
             try:
-                if self.autocomplete_belt_checkbox.isChecked():
+                if False and self.autocomplete_belt_checkbox.isChecked():
                     from core.belt_completion import complete_missing_belt_parallel_lines
                     faces = int(self.tower_faces_from_first or 4)
                     target_belt_to_fill = None
@@ -2618,6 +2813,8 @@ class SecondStationImportWizard(QDialog):
             except Exception as e:
                 logger.warning(f"Автодостройка пояса пропущена: {e}", exc_info=True)
 
+            self.belt_connection_visualization_data = self.transform_quality.get('visualization_data')
+            self.result_data = self._prepare_final_result_data(self.result_data)
             self._finalize_transformation_audit(method=2, merged_data=self.result_data)
             self.accept()
         except Exception as e:

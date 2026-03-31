@@ -516,9 +516,14 @@ class VerticalityWidget(QWidget):
                     continue
                 
                 # Центр секции - среднее по X, Y координатам всех точек секции
-                center_x = np.mean([p[0] for p in points])
-                center_y = np.mean([p[1] for p in points])
-                height = section['height']
+                center_xy = section.get('center_xy')
+                if center_xy is not None:
+                    center_x = float(center_xy[0])
+                    center_y = float(center_xy[1])
+                else:
+                    center_x = np.mean([p[0] for p in points])
+                    center_y = np.mean([p[1] for p in points])
+                height = float(section.get('center_z', section['height']))
                 
                 part_section_centers.append({
                     'height': height,

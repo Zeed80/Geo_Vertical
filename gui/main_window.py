@@ -29,6 +29,7 @@ from gui.data_import_wizard import DataImportWizard
 from gui.second_station_import_wizard import SecondStationImportWizard
 from gui.full_report_tab import FullReportTab
 from core.data_loader import load_data_from_file, load_survey_data, validate_data
+from core.face_track_completion import normalize_working_height_levels
 from core.import_models import ImportDiagnostics, LoadedSurveyData
 from core.normatives import NormativeChecker
 from core.belt_operations import estimate_belt_count_from_heights, auto_assign_belts
@@ -551,6 +552,21 @@ class MainWindow(QMainWindow):
             tolerance=SECTION_BUILD_HEIGHT_TOLERANCE,
         )
 
+    @staticmethod
+    def _prepare_section_rebuild_data(
+        data: Optional[pd.DataFrame],
+        section_data=None,
+    ) -> Optional[pd.DataFrame]:
+        if data is None or data.empty:
+            return data
+
+        has_active_sections = bool(section_data) or bool(build_section_generated_mask(data).any())
+        return normalize_working_height_levels(
+            data,
+            tolerance=SECTION_BUILD_HEIGHT_TOLERANCE,
+            force=has_active_sections,
+        )
+
     def _resolve_section_levels_for_data(self, data: Optional[pd.DataFrame], section_data=None) -> list[float]:
         if data is None or data.empty:
             return []
@@ -571,12 +587,16 @@ class MainWindow(QMainWindow):
         if data is None or data.empty:
             return []
 
-        section_levels = self._resolve_section_levels_for_data(data, section_data)
+        prepared_data = self._prepare_section_rebuild_data(data, section_data)
+        if prepared_data is None or prepared_data.empty:
+            return []
+
+        section_levels = self._resolve_section_levels_for_data(prepared_data, section_data)
         if not section_levels:
             return []
 
         return get_section_lines(
-            data,
+            prepared_data,
             section_levels,
             height_tolerance=SECTION_BUILD_HEIGHT_TOLERANCE,
         )
@@ -1393,6 +1413,131 @@ class MainWindow(QMainWindow):
             self.last_open_dir = os.path.dirname(file_path)
             self._paths_settings.setValue('last_open_dir', self.last_open_dir)
             self.load_file(file_path)
+
+    @staticmethod
+    def _deduplicate_zero_station_rows(data: Optional[pd.DataFrame]) -> tuple[pd.DataFrame, int]:
+        if not isinstance(data, pd.DataFrame):
+            return pd.DataFrame(), 0
+        if data.empty or not {'is_station', 'x', 'y'}.issubset(data.columns):
+            return data.copy(deep=True), 0
+
+        normalized = data.copy(deep=True)
+        station_mask = normalized['is_station'].fillna(False).astype(bool)
+        x_values = pd.to_numeric(normalized['x'], errors='coerce').round(6)
+        y_values = pd.to_numeric(normalized['y'], errors='coerce').round(6)
+        zero_station_indices = normalized.index[station_mask & (x_values == 0.0) & (y_values == 0.0)].tolist()
+        if len(zero_station_indices) <= 1:
+            return normalized.reset_index(drop=True), 0
+
+        normalized = normalized.drop(index=zero_station_indices[1:]).reset_index(drop=True)
+        return normalized, len(zero_station_indices) - 1
+
+    def _merge_second_station_import_context(
+        self,
+        second_station_context: Optional[Dict[str, Any]],
+    ) -> Optional[Dict[str, Any]]:
+        merged_context = copy.deepcopy(self.import_context) or {}
+        if second_station_context:
+            merged_context['second_station_import'] = copy.deepcopy(second_station_context)
+        return merged_context or None
+
+    def _merge_second_station_import_diagnostics(
+        self,
+        second_station_diagnostics: Optional[Dict[str, Any]],
+        transformation_audit: Optional[Dict[str, Any]],
+    ) -> Optional[Dict[str, Any]]:
+        merged_diagnostics = copy.deepcopy(self.import_diagnostics) or {}
+        details = copy.deepcopy(merged_diagnostics.get('details') or {})
+
+        if second_station_diagnostics:
+            details['second_station_import'] = copy.deepcopy(second_station_diagnostics)
+        if transformation_audit is not None:
+            details['second_station_audit'] = copy.deepcopy(transformation_audit)
+            transformation_quality = transformation_audit.get('transformation_quality')
+            if transformation_quality is not None:
+                merged_diagnostics['transformation_quality'] = copy.deepcopy(transformation_quality)
+        if details:
+            merged_diagnostics['details'] = details
+
+        return merged_diagnostics or None
+
+    def _apply_second_station_visualization(self, visualization_data: Optional[Dict[str, Any]]) -> None:
+        if self.editor_3d is not None and hasattr(self.editor_3d, 'set_belt_connection_lines'):
+            self.editor_3d.set_belt_connection_lines(visualization_data or {})
+
+        if not visualization_data or not hasattr(self, 'line_angle_spin'):
+            return
+
+        try:
+            line1 = visualization_data.get('line1') or {}
+            line2 = visualization_data.get('line2') or {}
+            start1 = np.asarray(line1.get('start'), dtype=float)
+            end1 = np.asarray(line1.get('end'), dtype=float)
+            start2 = np.asarray(line2.get('start'), dtype=float)
+            end2 = np.asarray(line2.get('end'), dtype=float)
+            if start1.shape != (3,) or end1.shape != (3,) or start2.shape != (3,) or end2.shape != (3,):
+                return
+
+            direction1 = end1[:2] - start1[:2]
+            direction2 = end2[:2] - start2[:2]
+            norm1 = float(np.linalg.norm(direction1))
+            norm2 = float(np.linalg.norm(direction2))
+            if norm1 <= 1e-9 or norm2 <= 1e-9:
+                return
+
+            direction1 = direction1 / norm1
+            direction2 = direction2 / norm2
+            dot = float(np.clip(np.dot(direction1, direction2), -1.0, 1.0))
+            det = float(direction1[0] * direction2[1] - direction1[1] * direction2[0])
+            self.line_angle_spin.setValue(round(float(np.degrees(np.arctan2(det, dot))), 1))
+        except (TypeError, ValueError, KeyError):
+            logger.debug("Не удалось обновить угол между линиями после импорта второй станции", exc_info=True)
+
+    def _apply_second_station_import_result(
+        self,
+        merged_data: pd.DataFrame,
+        *,
+        visualization_data: Optional[Dict[str, Any]],
+        second_station_context: Optional[Dict[str, Any]],
+        second_station_diagnostics: Optional[Dict[str, Any]],
+        transformation_audit: Optional[Dict[str, Any]],
+    ) -> pd.DataFrame:
+        normalized_data, removed_zero_stations = self._deduplicate_zero_station_rows(merged_data)
+        if removed_zero_stations:
+            logger.info("Удалены лишние точки стояния в (0, 0): %s", removed_zero_stations)
+
+        current_sections = self._clone_section_data(
+            getattr(self.editor_3d, 'section_data', []) if self.editor_3d is not None else []
+        )
+        rebuilt_sections = (
+            self._rebuild_section_data_from_data(normalized_data, current_sections)
+            if current_sections
+            else []
+        )
+
+        old_state = self._capture_main_window_undo_state()
+        new_state = self._compose_main_window_undo_state(
+            old_state,
+            raw_data=normalized_data,
+            processed_data=None,
+            import_context=self._merge_second_station_import_context(second_station_context),
+            import_diagnostics=self._merge_second_station_import_diagnostics(
+                second_station_diagnostics,
+                transformation_audit,
+            ),
+            transformation_audit=transformation_audit,
+            section_data=rebuilt_sections,
+        )
+        if not self._execute_main_window_state_command(
+            description='Импорт второй станции',
+            old_state=old_state,
+            new_state=new_state,
+        ):
+            raise RuntimeError('Не удалось зафиксировать импорт второй станции в undo/redo')
+
+        self._apply_second_station_visualization(visualization_data)
+        self._mark_unsaved()
+        return normalized_data
     
     def import_second_station(self):
         """Импорт данных с другой точки стояния"""
@@ -1514,6 +1659,65 @@ class MainWindow(QMainWindow):
                     'Не удалось объединить данные.'
                 )
             
+    def import_second_station(self):
+        """Импорт данных со второй точки стояния."""
+        if self.raw_data is None or self.raw_data.empty:
+            QMessageBox.warning(
+                self,
+                'Нет данных',
+                'Сначала загрузите основной файл с точками.'
+            )
+            return
+
+        belt_count_from_first = self.expected_belt_count
+        if belt_count_from_first is None:
+            belt_count_from_first = self.belt_count_spin.value() if self.belt_count_spin else 4
+            logger.warning(
+                "Количество поясов не было установлено, используем значение из spinbox: %s",
+                belt_count_from_first,
+            )
+        else:
+            logger.info(
+                "Используем количество поясов из первого импорта: %s",
+                belt_count_from_first,
+            )
+
+        wizard = SecondStationImportWizard(self.raw_data, self, belt_count_from_first_import=belt_count_from_first)
+        if wizard.exec() != QDialog.DialogCode.Accepted:
+            return
+
+        merged_data = wizard.get_result_data()
+        if merged_data is None or merged_data.empty:
+            QMessageBox.warning(
+                self,
+                'Ошибка',
+                'Не удалось объединить данные.'
+            )
+            return
+
+        try:
+            normalized_data = self._apply_second_station_import_result(
+                merged_data,
+                visualization_data=wizard.get_visualization_data(),
+                second_station_context=wizard.get_second_station_import_context(),
+                second_station_diagnostics=wizard.get_second_station_import_diagnostics(),
+                transformation_audit=wizard.get_transformation_audit(),
+            )
+        except (DataLoadError, ValueError, KeyError, RuntimeError) as e:
+            logger.warning("Ошибка при применении импорта второй станции: %s", e, exc_info=True)
+            QMessageBox.warning(
+                self,
+                'Ошибка',
+                f'Не удалось применить импорт: {e}'
+            )
+            return
+
+        self.statusBar.showMessage(
+            f'Импортировано со второй точки стояния: {len(normalized_data)} точек',
+            3000,
+        )
+        logger.info("Импорт со второй точки стояния: %s точек", len(normalized_data))
+
     def get_settings_file_path(self, data_file_path: str) -> str:
         """Получить путь к файлу настроек для данного файла данных"""
         base_name = os.path.splitext(data_file_path)[0]
@@ -4214,114 +4418,64 @@ class MainWindow(QMainWindow):
         event.accept()
 
     def on_build_missing_belt(self):
-        """Достроить недостающий пояс на текущих данных.
-        
-        Использует ту же логику, что и галочка в окне импорта с другой точки стояния:
-        1. Сначала пробует зеркальный метод (если есть данные визуализации)
-        2. Если зеркальный метод не сработал, использует метод параллельных линий
-        """
+        """Интерактивно достроить глобально отсутствующий vertical face track."""
         if self.raw_data is None or self.raw_data.empty:
             return
         try:
-            import logging
-            import numpy as np
-            import pandas as pd
-            from core.belt_completion import complete_missing_belt_parallel_lines, complete_missing_belt_mirror
-            
-            faces = int(self.expected_belt_count or 4)
-            rd = self.raw_data.copy()
-            
-            # Ищем отсутствующий пояс
-            target_belt = None
-            if 'belt' in rd.columns:
-                present = set(int(b) for b in rd['belt'].dropna().unique())
-                for b in range(1, faces+1):
-                    if b not in present:
-                        target_belt = b
-                        break
-            if target_belt is None:
-                target_belt = 3 if faces >= 3 else 2
-            
-            logging.getLogger(__name__).info(f"[build_belt] Ручная достройка: faces={faces}, target_belt={target_belt}")
-            
-            # Пробуем получить данные визуализации из editor_3d для зеркального метода
-            visualization_data = None
-            if hasattr(self, 'editor_3d') and hasattr(self.editor_3d, 'belt_connection_lines'):
-                # Пытаемся получить сохраненные данные визуализации
-                # (они могут быть сохранены после импорта с другой точки стояния)
-                try:
-                    # Проверяем, есть ли линии соединения в editor_3d
-                    if hasattr(self.editor_3d, '_last_visualization_data'):
-                        visualization_data = self.editor_3d._last_visualization_data
-                except AttributeError:
-                    pass
-            
-            merged = rd
-            gen = pd.DataFrame()
-            
-            # Сначала пробуем зеркальный метод (если есть данные визуализации)
-            if visualization_data:
-                line1 = visualization_data.get('line1')
-                line2 = visualization_data.get('line2')
-                if line1 and line2:
-                    pa = np.array(line1['end']) if 'end' in line1 else None
-                    pb = np.array(line2['end']) if 'end' in line2 else None
-                    if pa is not None and pb is not None:
-                        logging.getLogger(__name__).info(f"[mirror] Запуск зеркального метода: A={pa}, B={pb}")
-                        try:
-                            merged, gen = complete_missing_belt_mirror(
-                                rd, 
-                                faces=faces, 
-                                target_belt=target_belt, 
-                                point_a=pa, 
-                                point_b=pb, 
-                                source_belt=1, 
-                                tolerance=0.15
-                            )
-                        except Exception as e:
-                            logging.getLogger(__name__).warning(f"[mirror] Ошибка зеркального метода: {e}")
-                            gen = pd.DataFrame()  # Сбрасываем, чтобы попробовать параллельные линии
-            
-            # Если зеркальный метод не сработал — используем параллельные линии
-            if gen is None or gen.empty:
-                logging.getLogger(__name__).info(f"[parallel_lines] Запуск метода параллельных линий")
-                merged, gen = complete_missing_belt_parallel_lines(
-                    rd, 
-                    faces=faces, 
-                    target_belt=target_belt, 
-                    tolerance=0.15
-                )
-            
-            if gen is not None and not gen.empty:
-                self.raw_data = merged
-                self.editor_3d.set_data(self.raw_data)
-                
-                # Визуализация поли-линии для пояса
-                try:
-                    bdf = self.raw_data[self.raw_data['belt'] == target_belt]
-                    if bdf is not None and not bdf.empty:
-                        from core.planar_orientation import extract_reference_station_xy, sort_points_clockwise
+            from gui.belt_completion_dialog import BeltCompletionDialog
 
-                        ordered = sort_points_clockwise(
-                            bdf,
-                            station_xy=extract_reference_station_xy(self.raw_data),
-                        )[['x', 'y', 'z']].to_numpy(dtype=float)
-                        self.editor_3d.set_belt_polyline(int(target_belt), ordered)
-                except (AttributeError, KeyError, ValueError, IndexError) as e:
-                    logger.debug(f"Не удалось создать полилинию для пояса {target_belt}: {e}")
-                
-                if hasattr(self, 'data_table') and self.data_table is not None:
-                    self.data_table.set_data(self.raw_data)
-                
-                self.update_analysis_widgets()
-                logging.getLogger(__name__).info(f"Достроен пояс {target_belt}: добавлено {len(gen)} точек")
-                self.statusBar.showMessage(f"Достроен пояс {target_belt}: добавлено {len(gen)} точек", 3000)
-            else:
-                logging.getLogger(__name__).warning("[build_belt] Не удалось достроить пояс — нет новых точек")
-                self.statusBar.showMessage("Не удалось достроить пояс — нет новых точек", 3000)
-        except (CalculationError, GroupingError, ValueError, KeyError, AttributeError) as e:
-            import logging
-            logging.getLogger(__name__).error(f"Ошибка достройки пояса: {e}", exc_info=True)
+            suggested_faces = self.tower_faces_count or self.expected_belt_count
+            dialog = BeltCompletionDialog(
+                self.raw_data,
+                blueprint=self._tower_blueprint,
+                suggested_faces=int(suggested_faces) if suggested_faces else None,
+                parent=self,
+            )
+            if dialog.exec() != QDialog.DialogCode.Accepted or dialog.completer is None:
+                return
+
+            merged, gen = dialog.completer.preview(z_method=dialog.z_method)
+            merged = normalize_working_height_levels(merged)
+            if gen is None or gen.empty:
+                logger.warning("Достройка пояса не добавила новых точек")
+                self.statusBar.showMessage("Новые точки не добавлены: отсутствует глобально пропущенный пояс", 4000)
+                return
+
+            current_sections = self._clone_section_data(
+                getattr(self.editor_3d, 'section_data', []) if self.editor_3d is not None else []
+            )
+            rebuilt_sections = self._rebuild_section_data_from_data(merged, current_sections)
+            updated_blueprint = dialog.completer.to_blueprint(existing_blueprint=self._tower_blueprint)
+
+            old_state = self._capture_main_window_undo_state()
+            new_state = self._compose_main_window_undo_state(
+                old_state,
+                raw_data=merged,
+                processed_data=None,
+                tower_faces_count=max((spec.faces for spec in dialog.completer.part_specs), default=self.tower_faces_count or 4),
+                tower_blueprint_state=updated_blueprint.to_dict() if updated_blueprint is not None else None,
+                section_data=rebuilt_sections,
+            )
+
+            if not self._execute_main_window_state_command(
+                description='Достройка пояса',
+                old_state=old_state,
+                new_state=new_state,
+            ):
+                raise RuntimeError('Не удалось зафиксировать достройку пояса в undo/redo')
+
+            self._tower_blueprint = updated_blueprint
+            self._mark_unsaved()
+
+            generated_tracks = sorted({int(value) for value in pd.to_numeric(gen.get('face_track'), errors='coerce').dropna().astype(int)})
+            track_text = ", ".join(str(track) for track in generated_tracks) if generated_tracks else "?"
+            self.statusBar.showMessage(
+                f"Достроен пояс {track_text}: добавлено {len(gen)} точек",
+                5000,
+            )
+        except (CalculationError, GroupingError, RuntimeError, ValueError, KeyError, AttributeError) as e:
+            logger.error(f"Ошибка достройки пояса: {e}", exc_info=True)
+            QMessageBox.warning(self, 'Ошибка достройки', f'Не удалось достроить пояс:\n{e}')
             self.statusBar.showMessage(f"Ошибка достройки пояса: {e}", 5000)
 
     def on_active_station_changed(self, station_id):

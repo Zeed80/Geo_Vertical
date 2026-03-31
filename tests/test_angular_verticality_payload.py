@@ -205,6 +205,151 @@ def _build_single_station_fixture():
     return widget, single_station_data, processed_results, editor
 
 
+def _build_single_station_generated_center_fixture():
+    section_data = [
+        {
+            "name": "0",
+            "height": 0.0,
+            "points": [(-1.0, 0.0, 0.0), (0.0, 1.0, 0.0), (1.0, 0.0, 0.0), (0.0, -1.0, 0.0)],
+            "belt_nums": [1, 2, 3, 4],
+            "section_num": 0,
+            "tower_part": 1,
+            "center_xy": (0.0, 0.0),
+            "center_z": 0.0,
+        },
+        {
+            "name": "1",
+            "height": 10.0,
+            "points": [(-1.0, 0.0, 10.0), (5.0, 1.0, 10.0), (1.0, 0.0, 10.0), (5.0, -1.0, 10.0)],
+            "belt_nums": [1, 2, 3, 4],
+            "section_num": 1,
+            "tower_part": 1,
+            "center_xy": (0.0, 0.0),
+            "center_z": 10.0,
+        },
+    ]
+    editor = _EditorStub(section_data)
+    widget = DataTableWidget(editor)
+
+    raw_data = pd.DataFrame(
+        [
+            {
+                "name": "ST1",
+                "x": -10.0,
+                "y": 0.0,
+                "z": 1.5,
+                "is_station": True,
+                "station_role": "primary",
+                "belt": None,
+                "point_index": 1,
+            },
+            {
+                "name": "B0-1",
+                "x": -1.0,
+                "y": 0.0,
+                "z": 0.0,
+                "belt": 1,
+                "face_track": 1,
+                "faces": 4,
+                "is_station": False,
+                "point_index": 2,
+                "tower_part": 1,
+            },
+            {
+                "name": "B0-2",
+                "x": 0.0,
+                "y": 1.0,
+                "z": 0.0,
+                "belt": 2,
+                "face_track": 2,
+                "faces": 4,
+                "is_station": False,
+                "point_index": 3,
+                "tower_part": 1,
+            },
+            {
+                "name": "B0-3",
+                "x": 1.0,
+                "y": 0.0,
+                "z": 0.0,
+                "belt": 3,
+                "face_track": 3,
+                "faces": 4,
+                "is_station": False,
+                "point_index": 4,
+                "tower_part": 1,
+            },
+            {
+                "name": "B0-4",
+                "x": 0.0,
+                "y": -1.0,
+                "z": 0.0,
+                "belt": 4,
+                "face_track": 4,
+                "faces": 4,
+                "is_station": False,
+                "point_index": 5,
+                "tower_part": 1,
+            },
+            {
+                "name": "B1-1",
+                "x": -1.0,
+                "y": 0.0,
+                "z": 10.0,
+                "belt": 1,
+                "face_track": 1,
+                "faces": 4,
+                "is_station": False,
+                "point_index": 6,
+                "tower_part": 1,
+            },
+            {
+                "name": "B1-2",
+                "x": 5.0,
+                "y": 1.0,
+                "z": 10.0,
+                "belt": 2,
+                "face_track": 2,
+                "faces": 4,
+                "is_station": False,
+                "point_index": 7,
+                "tower_part": 1,
+                "is_generated": True,
+                "generated_by": "section_generation",
+            },
+            {
+                "name": "B1-3",
+                "x": 1.0,
+                "y": 0.0,
+                "z": 10.0,
+                "belt": 3,
+                "face_track": 3,
+                "faces": 4,
+                "is_station": False,
+                "point_index": 8,
+                "tower_part": 1,
+            },
+            {
+                "name": "B1-4",
+                "x": 5.0,
+                "y": -1.0,
+                "z": 10.0,
+                "belt": 4,
+                "face_track": 4,
+                "faces": 4,
+                "is_station": False,
+                "point_index": 9,
+                "tower_part": 1,
+                "is_generated": True,
+                "generated_by": "face_track_completion",
+            },
+        ]
+    )
+    widget.set_data(raw_data)
+    widget.set_processed_results(None)
+    return widget, raw_data, editor
+
+
 def _build_real_example_fixture(*, add_second_station: bool = False, attach_processed_to_table: bool = True):
     loaded = load_survey_data(str(EXAMPLES_DIR / "острогожск_РРС-11.jxl"))
     wizard = DataImportWizard(loaded.data, import_payload=loaded.to_context_dict())
@@ -564,6 +709,32 @@ def test_angular_verticality_requires_two_stations_before_section_aggregation():
     assert upper_section["total_deviation"] == pytest.approx(12.6491106407, abs=0.05)
 
 
+def test_single_station_payload_falls_back_to_current_sections_without_processed_results():
+    widget, _, _, _ = _build_single_station_fixture()
+    widget.set_processed_results(None)
+
+    payload = widget.get_angular_measurements()
+
+    assert payload["x"]
+    assert payload["basis"]["has_required_stations"] is False
+    assert payload["complete"] is False
+    assert [section["section_num"] for section in payload["sections"]] == [0, 1]
+    assert {section["source"] for section in payload["sections"]} == {"sections"}
+
+
+def test_single_station_payload_uses_robust_section_center_from_current_points():
+    widget, _, _ = _build_single_station_generated_center_fixture()
+
+    payload = widget.get_angular_measurements()
+
+    upper_section = next(section for section in payload["sections"] if section["section_num"] == 1)
+    upper_rows = [row for row in payload["x"] if row.get("section_num") == 1]
+
+    assert upper_section["center_xy"] == pytest.approx((0.0, 0.0), abs=1e-9)
+    assert upper_rows
+    assert all(float(row["reference_center_sec"]) == pytest.approx(0.0, abs=1e-9) for row in upper_rows)
+
+
 def test_verticality_widget_falls_back_to_processed_centers_when_table_payload_is_incomplete():
     data_table_widget, raw_data, processed_results, editor = _build_real_example_fixture(
         attach_processed_to_table=False,
@@ -582,6 +753,22 @@ def test_verticality_widget_falls_back_to_processed_centers_when_table_payload_i
     assert actual_totals == pytest.approx(expected_totals, abs=0.05)
     assert actual_totals[0] == pytest.approx(0.0, abs=0.05)
     assert max(actual_totals) > 90.0
+
+
+def test_verticality_widget_fallback_prefers_section_center_fields_over_point_mean():
+    _, raw_data, editor = _build_single_station_generated_center_fixture()
+
+    verticality_widget = VerticalityWidget()
+    verticality_widget.data = raw_data
+    verticality_widget.processed_data = None
+    verticality_widget.editor_3d = editor
+    verticality_widget.data_table_widget = None
+
+    vertical_sections = verticality_widget._calculate_section_deviations()
+    upper_section = next(section for section in vertical_sections if section["section_num"] == 1)
+
+    assert upper_section["center_x"] == pytest.approx(0.0, abs=1e-9)
+    assert upper_section["center_y"] == pytest.approx(0.0, abs=1e-9)
 
 
 def test_real_example_with_fictive_station_keeps_baseline_verticality_from_processed_centers():
@@ -799,6 +986,22 @@ def test_angular_sections_use_current_tower_points_instead_of_stale_section_snap
     assert stale_upper_rows[1]["delta_mm"] == pytest.approx(clean_upper_rows[1]["delta_mm"], abs=1e-6)
 
 
+def test_angular_sections_match_current_points_when_snapshot_height_is_stale():
+    widget, _, editor = _build_single_station_generated_center_fixture()
+    editor.section_data[1]["height"] = 20.0
+    widget.set_processed_results(None)
+
+    payload = widget.get_angular_measurements()
+
+    upper_rows = [row for row in payload["x"] if row.get("section_num") == 1]
+    upper_section = next(section for section in payload["sections"] if section["section_num"] == 1)
+
+    assert payload["basis"]["has_required_stations"] is False
+    assert upper_rows
+    assert upper_section["height"] == pytest.approx(10.0, abs=1e-9)
+    assert upper_section["center_xy"] == pytest.approx((0.0, 0.0), abs=1e-9)
+
+
 def test_duplicate_station_geometry_is_not_treated_as_complete_angular_basis():
     widget, raw_data, _, editor = _build_single_station_fixture()
 
@@ -825,7 +1028,8 @@ def test_duplicate_station_geometry_is_not_treated_as_complete_angular_basis():
 
     assert widget.has_complete_angular_station_basis() is False
     assert payload["basis"]["has_required_stations"] is False
-    assert payload["sections"] == []
+    assert payload["sections"]
+    assert {section["source"] for section in payload["sections"]} == {"sections"}
     assert payload["complete"] is False
 
 

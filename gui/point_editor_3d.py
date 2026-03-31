@@ -23,6 +23,9 @@ import logging
 import re
 
 from gui.ui_helpers import apply_compact_button_style
+from core.calculations import approximate_tower_axis
+from core.face_track_completion import normalize_working_height_levels
+from core.point_utils import decode_part_memberships, filter_points_by_part
 from core.section_operations import get_section_lines, find_section_levels
 from core.section_state import (
     SECTION_BUILD_HEIGHT_TOLERANCE,
@@ -1852,6 +1855,89 @@ class PointEditor3DWidget(QWidget):
             tolerance=SECTION_BUILD_HEIGHT_TOLERANCE,
         )
 
+    @staticmethod
+    def _resolve_section_track_column(
+        data: pd.DataFrame,
+        *,
+        tower_part: Optional[int] = None,
+    ) -> str:
+        candidates: List[str] = []
+        if tower_part is not None:
+            candidates.extend(['part_face_track', 'part_belt'])
+        candidates.extend(['face_track', 'belt'])
+
+        for column_name in candidates:
+            if column_name not in data.columns:
+                continue
+            numeric = pd.to_numeric(data[column_name], errors='coerce').dropna()
+            if not numeric.empty and (numeric > 0).any():
+                return column_name
+
+        for column_name in candidates:
+            if column_name in data.columns:
+                return column_name
+        return 'belt'
+
+    def _canonicalize_section_mutation_data(self, *, force: bool = False) -> None:
+        if self.data is None or self.data.empty:
+            return
+
+        if 'height_level' not in self.data.columns:
+            self.data['height_level'] = 0
+
+        part_numbers: set[int] = set()
+        has_multi_part_memberships = False
+        if 'tower_part_memberships' in self.data.columns:
+            for value in self.data['tower_part_memberships'].dropna():
+                memberships = decode_part_memberships(value)
+                if len(memberships) > 1:
+                    has_multi_part_memberships = True
+                part_numbers.update(int(part_num) for part_num in memberships if int(part_num) > 0)
+
+        if 'tower_part' in self.data.columns:
+            part_values = pd.to_numeric(self.data['tower_part'], errors='coerce').dropna()
+            part_numbers.update(int(value) for value in part_values if int(value) > 0)
+
+        has_boundary_rows = False
+        if 'is_part_boundary' in self.data.columns:
+            boundary_series = self.data['is_part_boundary'].fillna(False)
+            try:
+                has_boundary_rows = bool(boundary_series.astype(bool).any())
+            except Exception:
+                has_boundary_rows = bool(boundary_series.map(lambda value: bool(value)).any())
+
+        if not part_numbers or has_multi_part_memberships or has_boundary_rows:
+            self.data = normalize_working_height_levels(
+                self.data,
+                tolerance=SECTION_BUILD_HEIGHT_TOLERANCE,
+                force=force,
+            )
+            return
+
+        normalized = self.data.copy(deep=True)
+        updated = False
+        for part_num in sorted(part_numbers):
+            part_frame = filter_points_by_part(self.data, int(part_num))
+            if part_frame.empty:
+                continue
+            normalized_part = normalize_working_height_levels(
+                part_frame,
+                tolerance=SECTION_BUILD_HEIGHT_TOLERANCE,
+                force=force,
+            )
+            normalized.loc[normalized_part.index, 'height_level'] = (
+                pd.to_numeric(normalized_part['height_level'], errors='coerce')
+                .fillna(0)
+                .astype(int)
+            )
+            updated = True
+
+        self.data = normalized if updated else normalize_working_height_levels(
+            self.data,
+            tolerance=SECTION_BUILD_HEIGHT_TOLERANCE,
+            force=force,
+        )
+
     def _resolve_section_levels(
         self,
         section_levels: Optional[List[float]] = None,
@@ -1905,7 +1991,13 @@ class PointEditor3DWidget(QWidget):
         *,
         rebuild_sections: bool = True,
         section_levels: Optional[List[float]] = None,
+        force_height_level_rebuild: bool = False,
+        emit_change: bool = True,
     ) -> None:
+        if force_height_level_rebuild:
+            self._canonicalize_section_mutation_data(force=True)
+        if self.data is not None:
+            self.index_manager.set_data(self.data)
         self.update_all_indices()
         if rebuild_sections:
             rebuilt_sections = self._rebuild_section_data(section_levels)
@@ -1914,7 +2006,8 @@ class PointEditor3DWidget(QWidget):
             self.update_section_lines()
             if self.show_central_axis:
                 self.update_central_axis()
-        self.data_changed.emit()
+        if emit_change:
+            self.data_changed.emit()
     
     def _legacy_update_section_lines(self):
         """Обновить визуализацию линий секций"""
@@ -2071,14 +2164,18 @@ class PointEditor3DWidget(QWidget):
             points = section['points']
             if len(points) == 0:
                 continue
-            
-            # Вычисляем центр секции как среднее по X и Y координатам
-            center_x = np.mean([p[0] for p in points])
-            center_y = np.mean([p[1] for p in points])
-            # Высота - среднее по Z координатам всех точек секции
-            center_z = np.mean([p[2] for p in points])
-            
-            section_centers.append((center_x, center_y, center_z))
+
+            center_xy = section.get('center_xy')
+            if center_xy is None:
+                center_xy = (
+                    float(np.mean([p[0] for p in points])),
+                    float(np.mean([p[1] for p in points])),
+                )
+            center_z = section.get('center_z')
+            if center_z is None:
+                center_z = float(np.mean([p[2] for p in points]))
+
+            section_centers.append((float(center_xy[0]), float(center_xy[1]), float(center_z)))
         
         if len(section_centers) < 2:
             logger.warning("Недостаточно секций для построения центральной оси (нужно минимум 2)")
@@ -2087,34 +2184,45 @@ class PointEditor3DWidget(QWidget):
         # Сортируем центры по высоте (Z)
         section_centers.sort(key=lambda p: p[2])
         
-        # Если есть только 2 точки, строим прямую линию
-        # Если больше - используем средний центр по X и Y для всех секций
-        if len(section_centers) >= 2:
-            # Вычисляем средний центр по X и Y (используем все точки)
-            avg_center_x = np.mean([c[0] for c in section_centers])
-            avg_center_y = np.mean([c[1] for c in section_centers])
-            
-            # Находим минимальную и максимальную высоты
-            min_z = min([c[2] for c in section_centers])
-            max_z = max([c[2] for c in section_centers])
-            
-            # Строим вертикальную линию от min_z до max_z через средний центр
+        centers_df = pd.DataFrame(section_centers, columns=['x', 'y', 'z'])
+        min_z = float(centers_df['z'].min())
+        max_z = float(centers_df['z'].max())
+
+        axis_fit = approximate_tower_axis(centers_df)
+        if axis_fit.get('valid', False):
+            min_delta = min_z - float(axis_fit['z0'])
+            max_delta = max_z - float(axis_fit['z0'])
+            axis_points = np.array([
+                [
+                    float(axis_fit['x0']) + float(axis_fit['dx']) * min_delta,
+                    float(axis_fit['y0']) + float(axis_fit['dy']) * min_delta,
+                    min_z,
+                ],
+                [
+                    float(axis_fit['x0']) + float(axis_fit['dx']) * max_delta,
+                    float(axis_fit['y0']) + float(axis_fit['dy']) * max_delta,
+                    max_z,
+                ],
+            ])
+        else:
+            avg_center_x = float(centers_df['x'].mean())
+            avg_center_y = float(centers_df['y'].mean())
             axis_points = np.array([
                 [avg_center_x, avg_center_y, min_z],
                 [avg_center_x, avg_center_y, max_z]
             ])
-            
-            # Создаем линию центральной оси
-            self.central_axis_line = gl.GLLinePlotItem(
-                pos=axis_points,
-                color=(1.0, 0.0, 0.0, 0.9),  # Красный цвет, непрозрачный
-                width=3,
-                antialias=True
-            )
-            self.glview.addItem(self.central_axis_line)
-            
-            logger.info(f"Обновлена центральная ось: от ({avg_center_x:.3f}, {avg_center_y:.3f}, {min_z:.3f}) "
-                       f"до ({avg_center_x:.3f}, {avg_center_y:.3f}, {max_z:.3f})")
+
+        # Создаем линию центральной оси
+        self.central_axis_line = gl.GLLinePlotItem(
+            pos=axis_points,
+            color=(1.0, 0.0, 0.0, 0.9),  # Красный цвет, непрозрачный
+            width=3,
+            antialias=True
+        )
+        self.glview.addItem(self.central_axis_line)
+
+        logger.info(f"Обновлена центральная ось: от ({axis_points[0, 0]:.3f}, {axis_points[0, 1]:.3f}, {axis_points[0, 2]:.3f}) "
+                   f"до ({axis_points[1, 0]:.3f}, {axis_points[1, 1]:.3f}, {axis_points[1, 2]:.3f})")
     
     def update_data_table_sections(self):
         """Обновляет таблицу секций в главном окне"""
@@ -3002,9 +3110,11 @@ class PointEditor3DWidget(QWidget):
                 return
 
             after_levels = self._current_section_heights()
-            self.index_manager.set_data(self.data)
-            rebuilt_sections = self._rebuild_section_data(after_levels)
-            self.set_section_lines(rebuilt_sections)
+            self._refresh_after_section_mutation(
+                section_levels=after_levels,
+                force_height_level_rebuild=True,
+                emit_change=False,
+            )
             tx.commit()
 
     def align_section_dialog(self):
@@ -3200,9 +3310,11 @@ class PointEditor3DWidget(QWidget):
         if before_data is None or self.data is None or before_data.equals(self.data):
             return
 
-        self.index_manager.set_data(self.data)
-        rebuilt_sections = self._rebuild_section_data(self._current_section_heights())
-        self.set_section_lines(rebuilt_sections)
+        self._refresh_after_section_mutation(
+            section_levels=self._current_section_heights(),
+            force_height_level_rebuild=True,
+            emit_change=False,
+        )
 
     def delete_section_dialog(self):
         """Начинает интерактивный режим удаления конкретной секции"""
@@ -3253,12 +3365,11 @@ class PointEditor3DWidget(QWidget):
                 if removed_points_count > 0:
                     self.data = self.data.loc[~target_mask].copy().reset_index(drop=True)
 
-                self.index_manager.set_data(self.data)
                 self.update_3d_view()
-                rebuilt_sections = self._rebuild_section_data(remaining_levels)
-                self.set_section_lines(rebuilt_sections)
-                self.data_changed.emit()
-                self.update_all_indices()
+                self._refresh_after_section_mutation(
+                    section_levels=remaining_levels,
+                    force_height_level_rebuild=True,
+                )
                 tx.commit()
 
                 self.info_label.setText(
@@ -3583,11 +3694,6 @@ class PointEditor3DWidget(QWidget):
                     data_without_station['is_station'] = station_mask
                     data_without_station = data_without_station[~station_mask]
 
-                available_belts = sorted(data_without_station['belt'].dropna().unique())
-                if not available_belts:
-                    self.info_label.setText('⚠ Нет поясов для добавления секции')
-                    return
-
                 self._ensure_point_indices()
                 added_count = 0
                 section_part = tower_part
@@ -3637,6 +3743,179 @@ class PointEditor3DWidget(QWidget):
                     self.data['tower_part_memberships'] = None
                 if 'is_part_boundary' not in self.data.columns:
                     self.data['is_part_boundary'] = False
+
+                source_points = data_without_station.copy()
+                if section_part is not None:
+                    part_points = filter_points_by_part(source_points, int(section_part))
+                    if not part_points.empty:
+                        source_points = part_points
+
+                track_column = self._resolve_section_track_column(
+                    source_points,
+                    tower_part=section_part,
+                )
+                if track_column not in source_points.columns:
+                    self.info_label.setText('⚠ Нет треков/поясов для добавления секции')
+                    return
+
+                numeric_tracks = pd.to_numeric(source_points[track_column], errors='coerce').dropna()
+                available_tracks = sorted(int(value) for value in numeric_tracks.unique() if int(value) > 0)
+                if not available_tracks:
+                    self.info_label.setText('⚠ Нет поясов для добавления секции')
+                    return
+
+                for track_num in available_tracks:
+                    track_mask = pd.to_numeric(source_points[track_column], errors='coerce') == track_num
+                    track_points = source_points.loc[track_mask].copy()
+                    if len(track_points) < 2:
+                        logger.warning(
+                            "На треке %s (%s) недостаточно точек для интерполяции",
+                            track_num,
+                            track_column,
+                        )
+                        continue
+
+                    track_points_sorted = track_points.sort_values('z')
+                    points_below = track_points_sorted[track_points_sorted['z'] < section_height]
+                    points_above = track_points_sorted[track_points_sorted['z'] > section_height]
+
+                    if points_below.empty:
+                        p1 = track_points_sorted.iloc[0]
+                        p2 = track_points_sorted.iloc[1]
+                    elif points_above.empty:
+                        p1 = track_points_sorted.iloc[-2]
+                        p2 = track_points_sorted.iloc[-1]
+                    else:
+                        p1 = points_below.iloc[-1]
+                        p2 = points_above.iloc[0]
+
+                    if abs(float(p2['z']) - float(p1['z'])) < 1e-6:
+                        new_x = (float(p1['x']) + float(p2['x'])) / 2.0
+                        new_y = (float(p1['y']) + float(p2['y'])) / 2.0
+                    else:
+                        ratio = (float(section_height) - float(p1['z'])) / (float(p2['z']) - float(p1['z']))
+                        new_x = float(p1['x']) + ratio * (float(p2['x']) - float(p1['x']))
+                        new_y = float(p1['y']) + ratio * (float(p2['y']) - float(p1['y']))
+
+                    template_source = p1 if abs(float(p1['z']) - float(section_height)) <= abs(float(p2['z']) - float(section_height)) else p2
+                    new_point = dict(template_source.to_dict())
+
+                    resolved_part = section_part
+                    source_part_value = pd.to_numeric(pd.Series([template_source.get('tower_part')]), errors='coerce').iloc[0]
+                    if resolved_part is None and pd.notna(source_part_value):
+                        resolved_part = int(source_part_value)
+
+                    resolved_segment = section_segment
+                    source_segment_value = pd.to_numeric(pd.Series([template_source.get('segment')]), errors='coerce').iloc[0]
+                    if resolved_segment is None and pd.notna(source_segment_value):
+                        resolved_segment = int(source_segment_value)
+
+                    membership_parts: List[int] = []
+                    if resolved_part is not None:
+                        membership_parts = [int(resolved_part)]
+                    else:
+                        membership_parts = decode_part_memberships(template_source.get('tower_part_memberships'))
+                        if not membership_parts and pd.notna(source_part_value):
+                            membership_parts = [int(source_part_value)]
+
+                    belt_value = pd.to_numeric(pd.Series([template_source.get('belt')]), errors='coerce').iloc[0]
+                    assigned_belt = int(belt_value) if pd.notna(belt_value) and int(belt_value) > 0 else int(track_num)
+
+                    face_track_value = pd.to_numeric(pd.Series([template_source.get('face_track')]), errors='coerce').iloc[0]
+                    part_face_track_value = pd.to_numeric(pd.Series([template_source.get('part_face_track')]), errors='coerce').iloc[0]
+                    part_belt_value = pd.to_numeric(pd.Series([template_source.get('part_belt')]), errors='coerce').iloc[0]
+
+                    new_point['name'] = (
+                        f"S{int(round(section_height))}_P{int(resolved_part)}_B{assigned_belt}"
+                        if resolved_part is not None else f"S{int(round(section_height))}_B{assigned_belt}"
+                    )
+                    new_point['x'] = float(new_x)
+                    new_point['y'] = float(new_y)
+                    new_point['z'] = float(section_height)
+                    new_point['belt'] = assigned_belt
+                    new_point['point_index'] = self._get_next_point_index()
+                    new_point['height_level'] = 0
+                    new_point['is_section_generated'] = True
+                    new_point['is_generated'] = True
+                    new_point['generated_by'] = 'section_generation'
+
+                    if 'is_station' in self.data.columns:
+                        new_point['is_station'] = False
+                    if 'is_auxiliary' in self.data.columns:
+                        new_point['is_auxiliary'] = False
+                    if 'is_control' in self.data.columns:
+                        new_point['is_control'] = False
+                    if 'station_role' in self.data.columns:
+                        new_point['station_role'] = None
+                    if 'tower_part' in self.data.columns:
+                        new_point['tower_part'] = resolved_part
+                    if 'segment' in self.data.columns:
+                        new_point['segment'] = resolved_segment
+                    if 'is_part_boundary' in self.data.columns:
+                        new_point['is_part_boundary'] = False
+                    if 'tower_part_memberships' in self.data.columns:
+                        new_point['tower_part_memberships'] = (
+                            json.dumps(sorted(set(int(part) for part in membership_parts)), ensure_ascii=False)
+                            if membership_parts else None
+                        )
+                    if 'face_track' in self.data.columns:
+                        if pd.notna(face_track_value) and int(face_track_value) > 0:
+                            new_point['face_track'] = int(face_track_value)
+                        elif track_column == 'face_track':
+                            new_point['face_track'] = int(track_num)
+                    if 'part_face_track' in self.data.columns:
+                        if pd.notna(part_face_track_value) and int(part_face_track_value) > 0:
+                            new_point['part_face_track'] = int(part_face_track_value)
+                        elif track_column == 'part_face_track':
+                            new_point['part_face_track'] = int(track_num)
+                    if 'part_belt' in self.data.columns:
+                        if pd.notna(part_belt_value) and int(part_belt_value) > 0:
+                            new_point['part_belt'] = int(part_belt_value)
+                        elif track_column in {'part_belt', 'part_face_track'}:
+                            new_point['part_belt'] = int(track_num)
+                        else:
+                            new_point['part_belt'] = assigned_belt
+                    if 'part_belt_assignments' in self.data.columns:
+                        assignment_belt = new_point.get('part_belt', assigned_belt)
+                        new_point['part_belt_assignments'] = (
+                            json.dumps(
+                                {str(int(part)): int(assignment_belt) for part in membership_parts},
+                                ensure_ascii=False,
+                            )
+                            if membership_parts else None
+                        )
+                    if 'faces' in self.data.columns and pd.isna(new_point.get('faces')):
+                        face_values = pd.to_numeric(track_points.get('faces'), errors='coerce').dropna()
+                        if not face_values.empty:
+                            new_point['faces'] = int(face_values.iloc[0])
+
+                    self.data = pd.concat([self.data, pd.DataFrame([new_point])], ignore_index=True)
+                    added_count += 1
+
+                if added_count == 0:
+                    self.info_label.setText('⚠ Не удалось добавить точки секции')
+                    return
+
+                self._ensure_point_indices()
+                requested_heights = sorted(
+                    [
+                        float(section.get('height'))
+                        for section in self.section_data
+                        if section.get('height') is not None
+                    ] + [float(section_height)]
+                )
+                self.update_3d_view()
+                self._refresh_after_section_mutation(
+                    section_levels=requested_heights,
+                    force_height_level_rebuild=True,
+                )
+                tx.commit()
+
+                self.info_label.setText(
+                    f'✓ Секция добавлена! Z={section_height:.3f} м, добавлено точек: {added_count}'
+                )
+                logger.info("Добавлена секция на высоте %.3f м: %s точек", section_height, added_count)
+                return
 
                 for belt_value in available_belts:
                     belt_num = int(belt_value)
@@ -5186,13 +5465,20 @@ class PointEditor3DWidget(QWidget):
             
             self.section_data.append(section_dict)
 
-        if self.data is not None and not self.data.empty and self.section_data:
-            section_levels = [
-                float(section.get('height'))
-                for section in snapshot_sections
-                if section.get('height') is not None
-            ]
-            self.section_data = self._rebuild_section_data(section_levels)
+        if self.data is not None and not self.data.empty:
+            has_active_sections = bool(self.section_data) or bool(build_section_generated_mask(self.data).any())
+            if has_active_sections:
+                self._canonicalize_section_mutation_data(force=True)
+                section_levels = [
+                    float(section.get('height'))
+                    for section in snapshot_sections
+                    if section.get('height') is not None
+                ]
+                if section_levels:
+                    self.section_data = self._rebuild_section_data(section_levels)
+                else:
+                    detected_levels = self._resolve_section_levels(fallback_to_detected=True)
+                    self.section_data = self._rebuild_section_data(detected_levels) if detected_levels else []
 
         self.show_central_axis = snapshot.get('show_central_axis', False)
         self.set_xy_plane_state(snapshot.get('xy_plane_state'), update_geometry=False)

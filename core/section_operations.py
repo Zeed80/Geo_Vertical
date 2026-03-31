@@ -9,13 +9,14 @@ import logging
 import numpy as np
 import pandas as pd
 
+from core.face_track_completion import normalize_working_height_levels
 from core.point_utils import (
     build_is_station_mask as _build_is_station_mask,
 )
 from core.point_utils import (
     build_working_tower_mask as _build_working_tower_mask,
 )
-from core.section_state import SECTION_BUILD_HEIGHT_TOLERANCE
+from core.section_state import SECTION_BUILD_HEIGHT_TOLERANCE, deduplicate_section_heights
 
 logger = logging.getLogger(__name__)
 
@@ -432,6 +433,147 @@ def _section_working_data(data: pd.DataFrame) -> pd.DataFrame:
     return data[_build_working_tower_mask(data)].copy()
 
 
+def _fit_section_center_xy(points: list[tuple[float, float, float]]) -> tuple[float, float]:
+    if not points:
+        return (0.0, 0.0)
+
+    xy = np.asarray([(float(p[0]), float(p[1])) for p in points], dtype=float)
+    if len(xy) < 3:
+        center_xy = np.mean(xy, axis=0)
+        return (float(center_xy[0]), float(center_xy[1]))
+
+    matrix_a = np.column_stack([2.0 * xy[:, 0], 2.0 * xy[:, 1], np.ones(len(xy))])
+    vector_b = xy[:, 0] ** 2 + xy[:, 1] ** 2
+    try:
+        solution, _, rank, singular_values = np.linalg.lstsq(matrix_a, vector_b, rcond=None)
+        condition = (
+            float(singular_values[0] / max(singular_values[-1], 1e-12))
+            if len(singular_values) >= 2
+            else 1.0
+        )
+        if rank < 2 or condition > 1e10:
+            raise ValueError("degenerate section center fit")
+        cx, cy, _ = solution
+        return (float(cx), float(cy))
+    except (np.linalg.LinAlgError, ValueError):
+        center_xy = np.mean(xy, axis=0)
+        return (float(center_xy[0]), float(center_xy[1]))
+
+
+def _row_numeric_int(row: pd.Series | dict, column_name: str) -> int | None:
+    raw_value = row.get(column_name) if hasattr(row, "get") else None
+    numeric = pd.to_numeric(pd.Series([raw_value]), errors="coerce").iloc[0]
+    if pd.isna(numeric):
+        return None
+    return int(numeric)
+
+
+def _resolve_entry_height_level(entry: dict) -> int | None:
+    rows_map = entry.get("rows", {})
+    level_counts: dict[int, int] = {}
+    for row in rows_map.values():
+        height_level = _row_numeric_int(row, "height_level")
+        if height_level is None or height_level <= 0:
+            continue
+        level_counts[height_level] = level_counts.get(height_level, 0) + 1
+
+    if not level_counts:
+        return None
+
+    return max(level_counts.items(), key=lambda item: (item[1], -item[0]))[0]
+
+
+def _row_generation_penalty(row: pd.Series | dict) -> int:
+    generated_by = str(row.get("generated_by") or "").strip().lower() if hasattr(row, "get") else ""
+    is_section_generated = bool(row.get("is_section_generated")) if hasattr(row, "get") else False
+    is_generated = bool(row.get("is_generated")) if hasattr(row, "get") else False
+
+    if generated_by == "face_track_completion":
+        return 3
+    if generated_by == "section_generation" or is_section_generated:
+        return 2
+    if is_generated:
+        return 1
+    return 0
+
+
+def _resolve_section_track_number(row: pd.Series | dict) -> int | None:
+    face_track = _row_numeric_int(row, "face_track")
+    if face_track is not None and face_track > 0:
+        return face_track
+    belt_num = _row_numeric_int(row, "belt")
+    if belt_num is not None and belt_num > 0:
+        return belt_num
+    return None
+
+
+def _resolve_section_face_count(selected_rows: list[pd.Series]) -> int | None:
+    face_values: list[int] = []
+    for row in selected_rows:
+        faces = _row_numeric_int(row, "faces")
+        if faces is not None and faces >= 3:
+            face_values.append(faces)
+
+    if face_values:
+        counts = pd.Series(face_values).value_counts()
+        return int(counts.index[0])
+
+    track_values = sorted(
+        {
+            track
+            for track in (_resolve_section_track_number(row) for row in selected_rows)
+            if track is not None and track > 0
+        }
+    )
+    if len(track_values) >= 4 and len(track_values) % 2 == 0:
+        return len(track_values)
+    return None
+
+
+def _resolve_section_center_xy(selected_rows: list[pd.Series], points: list[tuple[float, float, float]]) -> tuple[float, float]:
+    if not selected_rows:
+        return _fit_section_center_xy(points)
+
+    face_count = _resolve_section_face_count(selected_rows)
+    if face_count is None or face_count < 4 or face_count % 2 != 0:
+        return _fit_section_center_xy(points)
+
+    rows_by_track: dict[int, pd.Series] = {}
+    for row in selected_rows:
+        track_num = _resolve_section_track_number(row)
+        if track_num is None:
+            continue
+        existing = rows_by_track.get(track_num)
+        if existing is None or _row_generation_penalty(row) < _row_generation_penalty(existing):
+            rows_by_track[track_num] = row
+
+    opposite_offset = face_count // 2
+    midpoint_candidates: list[tuple[float, float, int]] = []
+    for track_num, row in rows_by_track.items():
+        opposite_track = ((track_num - 1 + opposite_offset) % face_count) + 1
+        opposite_row = rows_by_track.get(opposite_track)
+        if opposite_row is None or track_num > opposite_track:
+            continue
+        midpoint_candidates.append(
+            (
+                (float(row["x"]) + float(opposite_row["x"])) / 2.0,
+                (float(row["y"]) + float(opposite_row["y"])) / 2.0,
+                _row_generation_penalty(row) + _row_generation_penalty(opposite_row),
+            )
+        )
+
+    if midpoint_candidates:
+        best_penalty = min(candidate[2] for candidate in midpoint_candidates)
+        best_midpoints = np.asarray(
+            [(candidate[0], candidate[1]) for candidate in midpoint_candidates if candidate[2] == best_penalty],
+            dtype=float,
+        )
+        if len(best_midpoints):
+            return (float(best_midpoints[:, 0].mean()), float(best_midpoints[:, 1].mean()))
+
+    return _fit_section_center_xy(points)
+
+
 def _extract_tower_parts(data: pd.DataFrame) -> list[int]:
     from core.point_utils import decode_part_memberships as _decode_part_memberships
 
@@ -498,6 +640,11 @@ def _build_section_entries(
         if group.empty:
             continue
         group[belt_col] = numeric_belts.loc[group.index].astype(int)
+        group = normalize_working_height_levels(
+            group,
+            tolerance=base_tolerance,
+            force=True,
+        )
 
         # --- height_level-based grouping (preferred) ---
         if 'height_level' in group.columns:
@@ -633,25 +780,28 @@ def _resolve_requested_section_entries(
     if not section_levels:
         return []
 
+    requested_levels = deduplicate_section_heights(
+        [float(level) for level in section_levels],
+        tolerance=base_tolerance,
+    )
     matched_entries: list[dict] = []
     used_ids: set[int] = set()
     groups = _iter_section_groups(_section_working_data(data))
 
-    for requested_height in sorted(section_levels):
-        best_idx = None
-        best_diff = None
+    for requested_height in sorted(requested_levels):
+        candidate_matches: list[tuple[float, int]] = []
         for idx, entry in enumerate(derived_entries):
             diff = abs(float(entry['height']) - float(requested_height))
             if diff <= max(float(entry['tolerance']), base_tolerance * 2.0):
-                if best_diff is None or diff < best_diff:
-                    best_idx = idx
-                    best_diff = diff
+                candidate_matches.append((diff, idx))
 
-        if best_idx is not None:
-            if best_idx not in used_ids:
-                matched_entries.append(derived_entries[best_idx])
-                used_ids.add(best_idx)
-            continue
+        if candidate_matches:
+            candidate_matches.sort(key=lambda item: (item[0], item[1]))
+            selected_idx = next((idx for _, idx in candidate_matches if idx not in used_ids), None)
+            if selected_idx is not None:
+                matched_entries.append(derived_entries[selected_idx])
+                used_ids.add(selected_idx)
+                continue
 
         applicable_parts: list[int] = []
         for part_num, group in groups:
@@ -740,6 +890,7 @@ def add_missing_points_for_sections(
     for entry in target_entries:
         section_height = float(entry['height'])
         section_tolerance = float(entry['tolerance'])
+        section_height_level = _resolve_entry_height_level(entry)
         current_working = _section_working_data(result_data)
         groups = _iter_section_groups(current_working)
         target_parts = entry['parts'] if entry['parts'] else [None]
@@ -788,7 +939,8 @@ def add_missing_points_for_sections(
                     new_x = float(p1['x']) + ratio * (float(p2['x']) - float(p1['x']))
                     new_y = float(p1['y']) + ratio * (float(p2['y']) - float(p1['y']))
 
-                template_row = belt_points.iloc[0].to_dict()
+                template_source = p1 if abs(float(p1['z']) - section_height) <= abs(float(p2['z']) - section_height) else p2
+                template_row = template_source.to_dict()
                 next_point_index = 0
                 if 'point_index' in result_data.columns:
                     valid_indices = pd.to_numeric(result_data['point_index'], errors='coerce').dropna()
@@ -801,18 +953,29 @@ def add_missing_points_for_sections(
                 template_row['z'] = float(section_height)
                 template_row['belt'] = int(belt_num)
                 template_row['is_section_generated'] = True
+                template_row['is_generated'] = True
+                template_row['generated_by'] = 'section_generation'
                 if 'point_index' in result_data.columns:
                     template_row['point_index'] = next_point_index + 1
                 if 'is_station' in result_data.columns:
                     template_row['is_station'] = False
+                if section_height_level is not None and 'height_level' in result_data.columns:
+                    template_row['height_level'] = int(section_height_level)
                 if 'tower_part' in result_data.columns and part_num is not None:
                     template_row['tower_part'] = int(part_num)
                 if 'part_belt' in result_data.columns:
-                    template_row['part_belt'] = int(belt_num)
+                    part_belt_value = _row_numeric_int(template_source, 'part_belt')
+                    template_row['part_belt'] = int(part_belt_value if part_belt_value is not None else belt_num)
                 if 'tower_part_memberships' in result_data.columns and part_num is not None:
                     template_row['tower_part_memberships'] = json.dumps([int(part_num)], ensure_ascii=False)
                 if 'part_belt_assignments' in result_data.columns and part_num is not None:
-                    template_row['part_belt_assignments'] = json.dumps({str(int(part_num)): int(belt_num)}, ensure_ascii=False)
+                    part_belt_assignment = _row_numeric_int(template_source, 'part_belt')
+                    if part_belt_assignment is None:
+                        part_belt_assignment = int(belt_num)
+                    template_row['part_belt_assignments'] = json.dumps(
+                        {str(int(part_num)): int(part_belt_assignment)},
+                        ensure_ascii=False,
+                    )
                 if 'faces' in result_data.columns and pd.isna(template_row.get('faces')):
                     face_values = pd.to_numeric(part_points.get('faces'), errors='coerce').dropna() if 'faces' in part_points.columns else pd.Series(dtype=float)
                     if not face_values.empty:
@@ -916,11 +1079,14 @@ def get_section_lines(
                 if segment_num is not None:
                     segment_counts[segment_num] = segment_counts.get(segment_num, 0) + 1
 
+        actual_height = float(np.mean([point[2] for point in points])) if points else float(entry['height'])
         section_info = {
-            'height': float(entry['height']),
+            'height': actual_height,
             'points': points,
             'belt_nums': belt_nums,
             'section_num': section_num,
+            'center_xy': _resolve_section_center_xy(selected_rows, points),
+            'center_z': actual_height,
         }
 
         if all_parts:

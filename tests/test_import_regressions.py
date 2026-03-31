@@ -66,6 +66,41 @@ def _prepare_simple_single_station_data() -> pd.DataFrame:
     return data
 
 
+def _build_partial_face_track_input(*, include_height_level: bool = True) -> pd.DataFrame:
+    rows = []
+    point_index = 1
+    corners = {
+        1: (0.0, 0.0),
+        2: (2.0, 0.0),
+        3: (2.0, 2.0),
+    }
+    for height_level, z_value in ((1, 0.0), (2, 10.0)):
+        for track_num, (x_value, y_value) in corners.items():
+            row = {
+                "name": f"P{point_index}",
+                "x": x_value,
+                "y": y_value,
+                "z": z_value,
+                "belt": track_num,
+                "face_track": track_num,
+                "part_belt": track_num,
+                "part_face_track": track_num,
+                "faces": 4,
+                "point_index": point_index,
+                "is_station": False,
+                "is_auxiliary": False,
+                "is_control": False,
+                "tower_part": 1,
+                "tower_part_memberships": json.dumps([1], ensure_ascii=False),
+                "is_part_boundary": False,
+            }
+            if include_height_level:
+                row["height_level"] = height_level
+            rows.append(row)
+            point_index += 1
+    return pd.DataFrame(rows)
+
+
 def _finalize_import_for_calculations(relative_path: str) -> pd.DataFrame:
     app = QApplication.instance() or QApplication([])
     loaded = load_survey_data(str(EXAMPLES_DIR / relative_path))
@@ -554,6 +589,59 @@ def test_second_station_wizard_method1_merge_uses_remapped_belts(monkeypatch):
     merged_second = wizard.result_data[wizard.result_data["name"].astype(str).isin(second_names)]
     merged_belts = sorted(int(value) for value in merged_second["belt"].dropna().unique())
     assert 4 in merged_belts
+
+    wizard.reject()
+    app.processEvents()
+
+
+def test_second_station_wizard_prepare_final_result_data_autocomplete_generates_canonical_rows(monkeypatch):
+    app = QApplication.instance() or QApplication([])
+    monkeypatch.setattr(QMessageBox, "information", staticmethod(lambda *args, **kwargs: QMessageBox.StandardButton.Ok))
+    monkeypatch.setattr(QMessageBox, "warning", staticmethod(lambda *args, **kwargs: QMessageBox.StandardButton.Ok))
+
+    partial_data = _build_partial_face_track_input(include_height_level=False)
+    wizard = SecondStationImportWizard(partial_data, belt_count_from_first_import=4)
+    wizard.autocomplete_belt_checkbox.setChecked(True)
+
+    prepared = wizard._prepare_final_result_data(partial_data.copy())
+    working = prepared.loc[build_working_tower_mask(prepared)].copy()
+    generated = (
+        working.loc[working["generated_by"].astype(str) == "face_track_completion"]
+        .sort_values("height_level")
+        .reset_index(drop=True)
+    )
+
+    assert len(generated) == 2
+    assert sorted(generated["face_track"].dropna().astype(int).unique().tolist()) == [4]
+    assert generated["part_belt"].dropna().astype(int).tolist() == [4, 4]
+    assert generated["part_face_track"].dropna().astype(int).tolist() == [4, 4]
+    assert generated["height_level"].dropna().astype(int).tolist() == [1, 2]
+    assert generated["point_index"].notna().all()
+    assert working["height_level"].dropna().astype(int).nunique() == 2
+
+    wizard.reject()
+    app.processEvents()
+
+
+def test_second_station_wizard_prepare_final_result_data_backfills_canonical_columns_without_autocomplete(monkeypatch):
+    app = QApplication.instance() or QApplication([])
+    monkeypatch.setattr(QMessageBox, "information", staticmethod(lambda *args, **kwargs: QMessageBox.StandardButton.Ok))
+    monkeypatch.setattr(QMessageBox, "warning", staticmethod(lambda *args, **kwargs: QMessageBox.StandardButton.Ok))
+
+    partial_data = _build_partial_face_track_input(include_height_level=False).drop(
+        columns=["face_track", "part_face_track"]
+    )
+    wizard = SecondStationImportWizard(partial_data, belt_count_from_first_import=4)
+    wizard.autocomplete_belt_checkbox.setChecked(False)
+
+    prepared = wizard._prepare_final_result_data(partial_data.copy())
+    working = prepared.loc[build_working_tower_mask(prepared)].copy()
+
+    assert sorted(working["face_track"].dropna().astype(int).unique().tolist()) == [1, 2, 3]
+    assert sorted(working["part_face_track"].dropna().astype(int).unique().tolist()) == [1, 2, 3]
+    assert sorted(working["height_level"].dropna().astype(int).unique().tolist()) == [1, 2]
+    assert working["tower_part_memberships"].notna().all()
+    assert working["point_index"].notna().all()
 
     wizard.reject()
     app.processEvents()

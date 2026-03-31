@@ -604,7 +604,7 @@ class DataTableWidget(QWidget):
         for signal in (self.station_table.itemChanged, self.tower_table.itemChanged):
             try:
                 signal.disconnect()
-            except RuntimeError:
+            except (RuntimeError, TypeError):
                 pass
         
         # Разделяем данные на точки стояния и точки башни
@@ -822,12 +822,18 @@ class DataTableWidget(QWidget):
             
             # Вычисляем центр секции
             points = section['points']
-            if len(points) > 0:
+            center_xy = section.get('center_xy')
+            center_z = section.get('center_z')
+            if center_xy is not None:
+                center_x = float(center_xy[0])
+                center_y = float(center_xy[1])
+            elif len(points) > 0:
                 center_x = np.mean([p[0] for p in points])
                 center_y = np.mean([p[1] for p in points])
-                center_z = np.mean([p[2] for p in points])
             else:
-                center_x = center_y = center_z = 0.0
+                center_x = center_y = 0.0
+            if center_z is None:
+                center_z = float(np.mean([p[2] for p in points])) if len(points) > 0 else 0.0
             
             # Центр X, Y, Z
             item = QTableWidgetItem(f"{center_x:.6f}")
@@ -1536,6 +1542,52 @@ class DataTableWidget(QWidget):
                 if 'y' in axis_values:
                     section['deviation_y'] = float(axis_values['y'])
 
+    @staticmethod
+    def _section_snapshot_mean_z(section: Dict[str, Any]) -> Optional[float]:
+        points = section.get('points', []) if isinstance(section, dict) else []
+        if not isinstance(points, (list, tuple)) or not points:
+            return None
+
+        z_values: List[float] = []
+        for point in points:
+            if not isinstance(point, (list, tuple)) or len(point) < 3:
+                continue
+            try:
+                z_value = float(point[2])
+            except (TypeError, ValueError):
+                continue
+            if np.isfinite(z_value):
+                z_values.append(z_value)
+
+        if not z_values:
+            return None
+        return float(np.mean(z_values))
+
+    @classmethod
+    def _section_height_candidates(cls, section: Dict[str, Any]) -> List[float]:
+        candidates: List[float] = []
+        raw_values = [
+            section.get('center_z'),
+            section.get('height'),
+            cls._section_snapshot_mean_z(section),
+        ]
+        for raw_value in raw_values:
+            try:
+                candidate = float(raw_value)
+            except (TypeError, ValueError):
+                continue
+            if not np.isfinite(candidate):
+                continue
+            if any(abs(existing - candidate) <= 1e-6 for existing in candidates):
+                continue
+            candidates.append(candidate)
+        return candidates
+
+    @classmethod
+    def _section_sort_height(cls, section: Dict[str, Any]) -> float:
+        candidates = cls._section_height_candidates(section)
+        return candidates[0] if candidates else 0.0
+
     def _match_section_points_from_tower_data(
         self,
         section: Dict[str, Any],
@@ -1545,15 +1597,13 @@ class DataTableWidget(QWidget):
         if tower_df is None or tower_df.empty or 'z' not in tower_df.columns:
             return pd.DataFrame(columns=['x', 'y', 'z', 'belt'])
 
-        try:
-            section_height = float(section.get('height', 0.0) or 0.0)
-        except (TypeError, ValueError):
+        section_heights = self._section_height_candidates(section)
+        if not section_heights:
             return pd.DataFrame(columns=['x', 'y', 'z', 'belt'])
 
         numeric_z = pd.to_numeric(tower_df['z'], errors='coerce')
-        mask = numeric_z.notna() & (numeric_z.sub(section_height).abs() <= float(tolerance))
-
         section_memberships = self._extract_part_memberships(section)
+        part_mask = pd.Series(True, index=tower_df.index)
         if section_memberships:
             part_mask = pd.Series(False, index=tower_df.index)
             if 'tower_part_memberships' in tower_df.columns:
@@ -1565,20 +1615,29 @@ class DataTableWidget(QWidget):
             if 'tower_part' in tower_df.columns:
                 numeric_parts = pd.to_numeric(tower_df['tower_part'], errors='coerce')
                 part_mask |= numeric_parts.isin(section_memberships)
-            if part_mask.any():
-                mask &= part_mask
 
         belt_sequence = section.get('belt_nums', []) if isinstance(section.get('belt_nums'), (list, tuple)) else []
+        belt_mask = pd.Series(True, index=tower_df.index)
         if belt_sequence and 'belt' in tower_df.columns:
             belt_values = [self._safe_int(value) for value in belt_sequence]
             belt_values = [value for value in belt_values if value is not None]
             if belt_values:
                 numeric_belts = pd.to_numeric(tower_df['belt'], errors='coerce')
                 belt_mask = numeric_belts.isin(belt_values)
-                if (mask & belt_mask).any():
-                    mask &= belt_mask
 
-        points_df = tower_df[mask].copy()
+        points_df = pd.DataFrame(columns=['x', 'y', 'z', 'belt'])
+        for section_height in section_heights:
+            mask = numeric_z.notna() & (numeric_z.sub(section_height).abs() <= float(tolerance))
+            if section_memberships and part_mask.any():
+                mask &= part_mask
+            if belt_sequence and 'belt' in tower_df.columns and (mask & belt_mask).any():
+                mask &= belt_mask
+            candidate_df = tower_df[mask].copy()
+            if candidate_df.empty:
+                continue
+            points_df = candidate_df
+            break
+
         if points_df.empty:
             return pd.DataFrame(columns=['x', 'y', 'z', 'belt'])
 
@@ -1616,7 +1675,7 @@ class DataTableWidget(QWidget):
         tower_df = tower_data.copy() if isinstance(tower_data, pd.DataFrame) else pd.DataFrame()
 
         if self.editor_3d and hasattr(self.editor_3d, 'section_data') and self.editor_3d.section_data:
-            sections = sorted(self.editor_3d.section_data or [], key=lambda s: s.get('height', 0.0))
+            sections = sorted(self.editor_3d.section_data or [], key=self._section_sort_height)
             self._ensure_section_numbers(sections)
             matched_current_sections = 0
 
@@ -1633,7 +1692,11 @@ class DataTableWidget(QWidget):
 
                 section_num = self._safe_int(section.get('section_num'), index)
                 part_memberships = self._extract_part_memberships(section)
-                section_height = float(points_df['z'].mean()) if not points_df.empty and 'z' in points_df.columns else float(section.get('height', 0.0) or 0.0)
+                section_height = (
+                    float(points_df['z'].mean())
+                    if not points_df.empty and 'z' in points_df.columns
+                    else self._section_sort_height(section)
+                )
                 section_entries.append({
                     'section_key': self._make_section_key(section_num, section_height),
                     'section_num': section_num,

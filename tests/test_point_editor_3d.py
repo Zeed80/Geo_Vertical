@@ -111,6 +111,8 @@ class _EditorAddSectionStub:
         self._build_is_station_mask = PointEditor3DWidget._build_is_station_mask
         self._validate_new_section_height = PointEditor3DWidget._validate_new_section_height
         self._current_section_heights = MethodType(PointEditor3DWidget._current_section_heights, self)
+        self._resolve_section_track_column = PointEditor3DWidget._resolve_section_track_column
+        self._canonicalize_section_mutation_data = MethodType(PointEditor3DWidget._canonicalize_section_mutation_data, self)
         self._resolve_section_levels = MethodType(PointEditor3DWidget._resolve_section_levels, self)
         self._rebuild_section_data = MethodType(PointEditor3DWidget._rebuild_section_data, self)
         self._refresh_after_section_mutation = MethodType(PointEditor3DWidget._refresh_after_section_mutation, self)
@@ -183,6 +185,57 @@ def test_add_section_rebuilds_section_data_and_preserves_point_schema():
     assert editor.data_changed.calls == 1
 
 
+def test_add_section_reindexes_height_levels_and_marks_generated_metadata():
+    rows = []
+    point_index = 1
+    for height_level, z_value in enumerate((0.0, 10.0), start=1):
+        for track_num, (x_value, y_value) in enumerate(((0.0, 0.0), (2.0, 0.0), (2.0, 2.0), (0.0, 2.0)), start=1):
+            rows.append(
+                {
+                    'name': f'P{point_index}',
+                    'x': x_value + z_value * 0.01,
+                    'y': y_value + z_value * 0.02,
+                    'z': z_value,
+                    'belt': track_num,
+                    'face_track': track_num,
+                    'part_belt': track_num,
+                    'part_face_track': track_num,
+                    'faces': 4,
+                    'height_level': height_level,
+                    'point_index': point_index,
+                    'is_station': False,
+                    'is_auxiliary': False,
+                    'is_control': False,
+                    'is_generated': False,
+                    'generated_by': '',
+                    'tower_part': 1,
+                    'segment': 1,
+                    'tower_part_memberships': json.dumps([1], ensure_ascii=False),
+                    'is_part_boundary': False,
+                }
+            )
+            point_index += 1
+
+    data = pd.DataFrame(rows)
+    section_data = get_section_lines(data, [0.0, 10.0], height_tolerance=0.3)
+    editor = _EditorAddSectionStub(data, section_data)
+
+    PointEditor3DWidget._add_section_impl(editor, 5.0, tower_part=1, placement='absolute')
+
+    new_rows = editor.data[np.isclose(editor.data['z'], 5.0)].copy()
+    assert len(new_rows) == 4
+    assert set(new_rows['generated_by']) == {'section_generation'}
+    assert set(new_rows['is_generated'].astype(bool)) == {True}
+    assert set(new_rows['is_section_generated'].astype(bool)) == {True}
+
+    level_by_height = (
+        editor.data.groupby(editor.data['z'].round(6))['height_level']
+        .agg(lambda values: sorted(set(int(value) for value in values)))
+        .to_dict()
+    )
+    assert level_by_height == {0.0: [1], 5.0: [2], 10.0: [3]}
+
+
 class _EditorDeleteSectionStub:
     def __init__(self, data: pd.DataFrame, section_data: list[dict]):
         self.data = data.copy(deep=True)
@@ -193,8 +246,10 @@ class _EditorDeleteSectionStub:
         self.show_central_axis = False
         self.section_deletion_mode = True
         self._current_section_heights = MethodType(PointEditor3DWidget._current_section_heights, self)
+        self._canonicalize_section_mutation_data = MethodType(PointEditor3DWidget._canonicalize_section_mutation_data, self)
         self._resolve_section_levels = MethodType(PointEditor3DWidget._resolve_section_levels, self)
         self._rebuild_section_data = MethodType(PointEditor3DWidget._rebuild_section_data, self)
+        self._refresh_after_section_mutation = MethodType(PointEditor3DWidget._refresh_after_section_mutation, self)
 
     @contextmanager
     def undo_transaction(self, _description):
@@ -388,6 +443,64 @@ class _DataTableEditorStub:
         self.active_station_index = value
 
 
+class _GLViewAxisStub:
+    def __init__(self):
+        self.added_items = []
+        self.removed_items = []
+
+    def addItem(self, item):
+        self.added_items.append(item)
+
+    def removeItem(self, item):
+        self.removed_items.append(item)
+
+
+class _AxisLineStub:
+    def __init__(self, pos, color, width, antialias):
+        self.pos = np.asarray(pos, dtype=float)
+        self.color = color
+        self.width = width
+        self.antialias = antialias
+
+
+class _EditorCentralAxisStub:
+    def __init__(self, section_data):
+        self.section_data = [dict(section) for section in section_data]
+        self.show_central_axis = True
+        self.central_axis_line = None
+        self.glview = _GLViewAxisStub()
+
+
+def test_update_central_axis_uses_section_centers_for_axis_fit(monkeypatch):
+    monkeypatch.setattr('gui.point_editor_3d.gl.GLLinePlotItem', _AxisLineStub)
+
+    section_data = [
+        {
+            'points': [(10.0, 0.0, 0.0), (10.0, 1.0, 0.0), (10.0, -1.0, 0.0)],
+            'center_xy': (0.0, 0.0),
+            'center_z': 0.0,
+        },
+        {
+            'points': [(20.0, 0.0, 10.0), (20.0, 1.0, 10.0), (20.0, -1.0, 10.0)],
+            'center_xy': (1.0, -0.5),
+            'center_z': 10.0,
+        },
+        {
+            'points': [(30.0, 0.0, 20.0), (30.0, 1.0, 20.0), (30.0, -1.0, 20.0)],
+            'center_xy': (2.0, -1.0),
+            'center_z': 20.0,
+        },
+    ]
+    editor = _EditorCentralAxisStub(section_data)
+
+    PointEditor3DWidget.update_central_axis(editor)
+
+    assert editor.central_axis_line is not None
+    assert len(editor.glview.added_items) == 1
+    assert np.allclose(editor.central_axis_line.pos[0], [0.0, 0.0, 0.0], atol=1e-6)
+    assert np.allclose(editor.central_axis_line.pos[1], [2.0, -1.0, 20.0], atol=1e-6)
+
+
 def test_data_table_set_data_without_stations_still_populates_tower_and_sections():
     data = pd.DataFrame(
         [
@@ -407,3 +520,37 @@ def test_data_table_set_data_without_stations_still_populates_tower_and_sections
     assert table.tower_parts_tabs.count() == 1
     part_table = table.tower_parts_tabs.widget(0)
     assert part_table.rowCount() == len(data)
+
+
+def test_data_table_set_data_does_not_fail_when_itemchanged_is_already_disconnected():
+    data = pd.DataFrame(
+        [
+            {'name': 'P1', 'x': 0.0, 'y': 0.0, 'z': 0.0, 'belt': 1, 'point_index': 1, 'is_station': False},
+            {'name': 'P2', 'x': 1.0, 'y': 0.0, 'z': 10.0, 'belt': 2, 'point_index': 2, 'is_station': False},
+        ]
+    )
+    table = DataTableWidget(editor_3d=_DataTableEditorStub([]))
+
+    table.on_tower_mode_toggled(True)
+    table.set_data(data)
+
+    assert len(table._current_tower_data) == len(data)
+
+
+def test_data_table_sections_table_uses_section_center_fields():
+    section_data = [
+        {
+            'height': 10.0,
+            'points': [(10.0, 10.0, 10.0), (12.0, 10.0, 10.0), (12.0, 12.0, 10.0), (10.0, 12.0, 10.0)],
+            'belt_nums': [1, 2, 3, 4],
+            'center_xy': (1.25, -2.5),
+            'center_z': 10.5,
+        }
+    ]
+    table = DataTableWidget(editor_3d=_DataTableEditorStub(section_data))
+
+    table.update_sections_table()
+
+    assert table.sections_table.item(0, 4).text() == '1.250000'
+    assert table.sections_table.item(0, 5).text() == '-2.500000'
+    assert table.sections_table.item(0, 6).text() == '10.500'

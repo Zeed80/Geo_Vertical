@@ -11,6 +11,7 @@ import pandas as pd
 
 from core.calculations import calculate_local_coordinate_system
 from core.normatives import get_vertical_tolerance
+from core.section_operations import _resolve_section_center_xy
 from core.services.verticality_sections import build_verticality_check_from_sections
 
 
@@ -73,7 +74,9 @@ class AngularVerticalityBuilder:
         payload["basis"] = basis
         has_required_stations = bool(basis.get("has_required_stations"))
         has_authoritative_stations = bool(basis.get("has_authoritative_stations", has_required_stations))
-        fallback_sections = self._build_sections_from_processed_results(section_entries)
+        processed_fallback_sections = self._build_sections_from_processed_results(section_entries)
+        snapshot_fallback_sections = self._build_sections_from_section_entries(section_entries)
+        fallback_sections = processed_fallback_sections or snapshot_fallback_sections
 
         for axis in ("x", "y"):
             station_coords = self._get_station_for_axis(axis)
@@ -95,6 +98,7 @@ class AngularVerticalityBuilder:
                         part_memberships=section.get("part_memberships"),
                         section_height=section.get("height"),
                         belt_sequence=section.get("belt_sequence"),
+                        preferred_center_xy=section.get("preferred_center_xy"),
                     )
                 )
 
@@ -110,7 +114,7 @@ class AngularVerticalityBuilder:
             if has_authoritative_stations:
                 merged_sections = self._merge_station_sections_with_fallback(station_sections, fallback_sections)
             else:
-                merged_sections = fallback_sections or station_sections
+                merged_sections = processed_fallback_sections or station_sections or snapshot_fallback_sections
         else:
             merged_sections = fallback_sections
 
@@ -255,6 +259,52 @@ class AngularVerticalityBuilder:
             return 1.0
         return 1000.0 if float(np.nanmax(np.abs(valid))) < 2.0 else 1.0
 
+    @staticmethod
+    def _section_snapshot_mean_z(section: dict[str, Any]) -> float | None:
+        points = section.get("points", []) if isinstance(section, dict) else []
+        if not isinstance(points, (list, tuple)) or not points:
+            return None
+
+        z_values: list[float] = []
+        for point in points:
+            if not isinstance(point, (list, tuple)) or len(point) < 3:
+                continue
+            try:
+                z_value = float(point[2])
+            except (TypeError, ValueError):
+                continue
+            if np.isfinite(z_value):
+                z_values.append(z_value)
+
+        if not z_values:
+            return None
+        return float(np.mean(z_values))
+
+    @classmethod
+    def _section_height_candidates(cls, section: dict[str, Any]) -> list[float]:
+        candidates: list[float] = []
+        raw_values = [
+            section.get("center_z"),
+            section.get("height"),
+            cls._section_snapshot_mean_z(section),
+        ]
+        for raw_value in raw_values:
+            try:
+                candidate = float(raw_value)
+            except (TypeError, ValueError):
+                continue
+            if not np.isfinite(candidate):
+                continue
+            if any(abs(existing - candidate) <= 1e-6 for existing in candidates):
+                continue
+            candidates.append(candidate)
+        return candidates
+
+    @classmethod
+    def _section_sort_height(cls, section: dict[str, Any]) -> float:
+        candidates = cls._section_height_candidates(section)
+        return candidates[0] if candidates else 0.0
+
     def _match_section_points_from_tower_data(
         self,
         section: dict[str, Any],
@@ -264,15 +314,13 @@ class AngularVerticalityBuilder:
         if tower_df is None or tower_df.empty or "z" not in tower_df.columns:
             return pd.DataFrame(columns=["x", "y", "z", "belt"])
 
-        try:
-            section_height = float(section.get("height", 0.0) or 0.0)
-        except (TypeError, ValueError):
+        section_heights = self._section_height_candidates(section)
+        if not section_heights:
             return pd.DataFrame(columns=["x", "y", "z", "belt"])
 
         numeric_z = pd.to_numeric(tower_df["z"], errors="coerce")
-        mask = numeric_z.notna() & (numeric_z.sub(section_height).abs() <= float(tolerance))
-
         section_memberships = self._extract_part_memberships(section)
+        part_mask = pd.Series(True, index=tower_df.index)
         if section_memberships:
             part_mask = pd.Series(False, index=tower_df.index)
             if "tower_part_memberships" in tower_df.columns:
@@ -284,20 +332,29 @@ class AngularVerticalityBuilder:
             if "tower_part" in tower_df.columns:
                 numeric_parts = pd.to_numeric(tower_df["tower_part"], errors="coerce")
                 part_mask |= numeric_parts.isin(section_memberships)
-            if part_mask.any():
-                mask &= part_mask
 
         belt_sequence = section.get("belt_nums", []) if isinstance(section.get("belt_nums"), (list, tuple)) else []
+        belt_mask = pd.Series(True, index=tower_df.index)
         if belt_sequence and "belt" in tower_df.columns:
             belt_values = [self._safe_int(value) for value in belt_sequence]
             belt_values = [value for value in belt_values if value is not None]
             if belt_values:
                 numeric_belts = pd.to_numeric(tower_df["belt"], errors="coerce")
                 belt_mask = numeric_belts.isin(belt_values)
-                if (mask & belt_mask).any():
-                    mask &= belt_mask
 
-        points_df = tower_df[mask].copy()
+        points_df = pd.DataFrame(columns=["x", "y", "z", "belt"])
+        for section_height in section_heights:
+            mask = numeric_z.notna() & (numeric_z.sub(section_height).abs() <= float(tolerance))
+            if section_memberships and part_mask.any():
+                mask &= part_mask
+            if belt_sequence and "belt" in tower_df.columns and (mask & belt_mask).any():
+                mask &= belt_mask
+            candidate_df = tower_df[mask].copy()
+            if candidate_df.empty:
+                continue
+            points_df = candidate_df
+            break
+
         if points_df.empty:
             return pd.DataFrame(columns=["x", "y", "z", "belt"])
 
@@ -337,12 +394,36 @@ class AngularVerticalityBuilder:
                 points_df["belt"] = [None] * len(points_df)
         return points_df
 
+    @staticmethod
+    def _resolve_points_center_xy(
+        points_df: pd.DataFrame | None,
+        fallback_center_xy: tuple[float, float] | None = None,
+    ) -> tuple[float, float] | None:
+        if points_df is None or points_df.empty or "x" not in points_df.columns or "y" not in points_df.columns:
+            return fallback_center_xy
+
+        selected_rows = [row for _, row in points_df.iterrows()]
+        points = [
+            (float(row["x"]), float(row["y"]), float(row["z"]))
+            for _, row in points_df.iterrows()
+            if pd.notna(row.get("x")) and pd.notna(row.get("y")) and pd.notna(row.get("z"))
+        ]
+        if not points:
+            return fallback_center_xy
+
+        try:
+            center_xy = _resolve_section_center_xy(selected_rows, points)
+            return (float(center_xy[0]), float(center_xy[1]))
+        except Exception:
+            mean_xy = points_df[["x", "y"]].mean().to_numpy(dtype=float)
+            return (float(mean_xy[0]), float(mean_xy[1]))
+
     def _prepare_angular_sections(self, tower_data: pd.DataFrame | None) -> list[dict[str, Any]]:
         section_entries: list[dict[str, Any]] = []
         tower_df = tower_data.copy() if isinstance(tower_data, pd.DataFrame) else pd.DataFrame()
 
         if self.section_snapshots:
-            sections = sorted(self.section_snapshots, key=lambda s: s.get("height", 0.0))
+            sections = sorted(self.section_snapshots, key=self._section_sort_height)
             self._ensure_section_numbers(sections)
             matched_current_sections = 0
 
@@ -358,10 +439,18 @@ class AngularVerticalityBuilder:
                 belt_sequence = section.get("belt_nums", []) if isinstance(section.get("belt_nums"), (list, tuple)) else None
                 section_num = self._safe_int(section.get("section_num"), index)
                 part_memberships = self._extract_part_memberships(section)
+                snapshot_center_xy = None
+                raw_center_xy = section.get("center_xy")
+                if isinstance(raw_center_xy, (list, tuple)) and len(raw_center_xy) >= 2:
+                    try:
+                        snapshot_center_xy = (float(raw_center_xy[0]), float(raw_center_xy[1]))
+                    except (TypeError, ValueError):
+                        snapshot_center_xy = None
+                preferred_center_xy = self._resolve_points_center_xy(points_df, snapshot_center_xy)
                 if not points_df.empty and "z" in points_df.columns:
                     section_height = float(points_df["z"].mean())
                 else:
-                    section_height = float(section.get("height", 0.0) or 0.0)
+                    section_height = self._section_sort_height(section)
                 section_entries.append(
                     {
                         "section_key": self._make_section_key(section_num, section_height),
@@ -372,6 +461,8 @@ class AngularVerticalityBuilder:
                         "belt_sequence": belt_sequence,
                         "part_memberships": part_memberships,
                         "part_num": part_memberships[0] if part_memberships else None,
+                        "preferred_center_xy": preferred_center_xy,
+                        "points_count": int(len(points_df)) if points_df is not None else 0,
                     }
                 )
             if section_entries and matched_current_sections:
@@ -389,6 +480,7 @@ class AngularVerticalityBuilder:
             if "belt" not in points_df.columns:
                 points_df["belt"] = [None] * len(points_df)
             part_memberships = self._extract_part_memberships(points_df)
+            preferred_center_xy = self._resolve_points_center_xy(points_df)
             section_entries.append(
                 {
                     "section_key": self._make_section_key(index, height),
@@ -399,9 +491,50 @@ class AngularVerticalityBuilder:
                     "belt_sequence": None,
                     "part_memberships": part_memberships,
                     "part_num": part_memberships[0] if part_memberships else None,
+                    "preferred_center_xy": preferred_center_xy,
+                    "points_count": int(len(points_df)),
                 }
             )
         return section_entries
+
+    def _build_sections_from_section_entries(self, section_entries: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        if not section_entries:
+            return []
+
+        center_rows: list[dict[str, Any]] = []
+        for entry in section_entries:
+            center_xy = entry.get("preferred_center_xy")
+            if center_xy is None:
+                center_xy = self._resolve_points_center_xy(entry.get("points_df"))
+            if center_xy is None:
+                continue
+
+            height = entry.get("height")
+            if height is None:
+                points_df = entry.get("points_df")
+                if isinstance(points_df, pd.DataFrame) and not points_df.empty and "z" in points_df.columns:
+                    height = float(points_df["z"].mean())
+                else:
+                    height = 0.0
+
+            center_rows.append(
+                {
+                    "section_key": entry.get("section_key"),
+                    "section_num": entry.get("section_num"),
+                    "section_label": entry.get("section_label"),
+                    "height": float(height),
+                    "center_xy": (float(center_xy[0]), float(center_xy[1])),
+                    "part_num": entry.get("part_num"),
+                    "part_memberships": list(entry.get("part_memberships", []) or []),
+                    "points_count": entry.get("points_count"),
+                }
+            )
+
+        return self._build_axis_based_sections_from_centers(
+            center_rows,
+            source="sections",
+            reference_mode="best_fit",
+        )
 
     def _build_axis_based_sections_from_centers(
         self,
@@ -1134,12 +1267,16 @@ class AngularVerticalityBuilder:
         part_memberships: Iterable[int] | None,
         section_height: float | None,
         belt_sequence: Iterable[Any] | None = None,
+        preferred_center_xy: tuple[float, float] | None = None,
     ) -> list[dict[str, Any]]:
         if points_df is None or points_df.empty:
             return []
 
         station_xy = np.array([station_coords[0], station_coords[1]], dtype=float)
-        center_xy = points_df[["x", "y"]].mean().to_numpy(dtype=float)
+        if preferred_center_xy is not None:
+            center_xy = np.asarray(preferred_center_xy, dtype=float)
+        else:
+            center_xy = points_df[["x", "y"]].mean().to_numpy(dtype=float)
         view_vec = center_xy - station_xy
         view_norm = np.linalg.norm(view_vec)
         if view_norm < 1e-6:
