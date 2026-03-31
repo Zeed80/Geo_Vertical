@@ -26,6 +26,7 @@ from pathlib import Path
 from gui.data_table import DataTableWidget
 from gui.point_editor_3d import PointEditor3DWidget
 from gui.data_import_wizard import DataImportWizard
+from gui.interactive_import_wizard import InteractiveImportWizard
 from gui.second_station_import_wizard import SecondStationImportWizard
 from gui.full_report_tab import FullReportTab
 from core.data_loader import load_data_from_file, load_survey_data, validate_data
@@ -1412,7 +1413,39 @@ class MainWindow(QMainWindow):
             # Сохраняем папку, из которой был загружен файл
             self.last_open_dir = os.path.dirname(file_path)
             self._paths_settings.setValue('last_open_dir', self.last_open_dir)
-            self.load_file(file_path)
+            import_mode = self._choose_import_mode()
+            if import_mode:
+                self.load_file(file_path, import_mode=import_mode)
+
+    def _choose_import_mode(self) -> Optional[str]:
+        msg_box = QMessageBox(self)
+        msg_box.setIcon(QMessageBox.Icon.Question)
+        msg_box.setWindowTitle('Режим импорта')
+        msg_box.setText('Выберите режим загрузки файла измерений.')
+        msg_box.setInformativeText(
+            'Интерактивный режим добавляет пошаговое подтверждение конструкции, граней, '
+            'исправлений точек и секций. Простая загрузка использует текущий быстрый мастер.'
+        )
+        interactive_button = msg_box.addButton(
+            'Интерактивный режим',
+            QMessageBox.ButtonRole.AcceptRole,
+        )
+        simple_button = msg_box.addButton(
+            'Простая загрузка',
+            QMessageBox.ButtonRole.ActionRole,
+        )
+        cancel_button = msg_box.addButton(QMessageBox.StandardButton.Cancel)
+        msg_box.setDefaultButton(interactive_button)
+        msg_box.exec()
+
+        clicked = msg_box.clickedButton()
+        if clicked == interactive_button:
+            return 'interactive'
+        if clicked == simple_button:
+            return 'simple'
+        if clicked == cancel_button:
+            return None
+        return None
 
     @staticmethod
     def _deduplicate_zero_station_rows(data: Optional[pd.DataFrame]) -> tuple[pd.DataFrame, int]:
@@ -1974,7 +2007,7 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(self, 'Ошибка', 
                                f'Ошибка при удалении секций:\n{str(e)}')
     
-    def load_file(self, file_path: str, use_async: bool = True):
+    def load_file(self, file_path: str, use_async: bool = True, import_mode: str = 'simple'):
         """
         Загрузка данных из файла через мастер импорта
         
@@ -1983,11 +2016,11 @@ class MainWindow(QMainWindow):
             use_async: Использовать асинхронную загрузку (по умолчанию True)
         """
         if use_async:
-            self._load_file_async(file_path)
+            self._load_file_async(file_path, import_mode=import_mode)
         else:
-            self._load_file_sync(file_path)
-    
-    def _load_file_async(self, file_path: str):
+            self._load_file_sync(file_path, import_mode=import_mode)
+
+    def _load_file_async(self, file_path: str, import_mode: str = 'simple'):
         """Асинхронная загрузка файла через QThread"""
         from core.data_loader_async import DataLoadThread
         from PyQt6.QtWidgets import QProgressDialog
@@ -2009,11 +2042,12 @@ class MainWindow(QMainWindow):
         self.load_thread.progress.connect(progress_dialog.setValue)
         self.load_thread.progress.connect(lambda p, m: progress_dialog.setLabelText(m))
         self.load_thread.data_loaded_detailed.connect(
-            lambda loaded, import_file_path=file_path, previous_state=old_state: self._on_data_loaded_async(
+            lambda loaded, import_file_path=file_path, previous_state=old_state, selected_mode=import_mode: self._on_data_loaded_async(
                 loaded,
                 progress_dialog,
                 import_file_path,
                 previous_state,
+                selected_mode,
             )
         )
         self.load_thread.error.connect(lambda msg: self._on_load_error_async(msg, progress_dialog))
@@ -2032,11 +2066,17 @@ class MainWindow(QMainWindow):
         progress_dialog,
         import_file_path: str,
         previous_state: Dict[str, Any],
+        import_mode: str,
     ):
         """Обработка успешной загрузки данных"""
         progress_dialog.setValue(100)
         progress_dialog.close()
-        self._process_loaded_data(loaded, import_file_path=import_file_path, old_state=previous_state)
+        self._process_loaded_data(
+            loaded,
+            import_file_path=import_file_path,
+            old_state=previous_state,
+            import_mode=import_mode,
+        )
     
     def _on_load_error_async(self, error_message: str, progress_dialog):
         """Обработка ошибки загрузки"""
@@ -2044,7 +2084,7 @@ class MainWindow(QMainWindow):
         QMessageBox.critical(self, 'Ошибка загрузки', f'Ошибка загрузки файла:\n{error_message}')
         self.statusBar.showMessage('Ошибка загрузки')
     
-    def _load_file_sync(self, file_path: str):
+    def _load_file_sync(self, file_path: str, import_mode: str = 'simple'):
         """Синхронная загрузка файла (старый метод)"""
         try:
             self.statusBar.showMessage(f'Загрузка {file_path}...')
@@ -2053,7 +2093,12 @@ class MainWindow(QMainWindow):
             # Загружаем данные
             loaded = load_survey_data(file_path)
             
-            self._process_loaded_data(loaded, import_file_path=file_path, old_state=old_state)
+            self._process_loaded_data(
+                loaded,
+                import_file_path=file_path,
+                old_state=old_state,
+                import_mode=import_mode,
+            )
             
         except (DataLoadError, FileFormatError, DataValidationError, IOError, OSError) as e:
             logger.error(f"Ошибка загрузки файла: {e}", exc_info=True)
@@ -2066,6 +2111,7 @@ class MainWindow(QMainWindow):
         *,
         import_file_path: str,
         old_state: Dict[str, Any],
+        import_mode: str = 'simple',
     ):
         """Обработка загруженных данных (общий метод для синхронной и асинхронной загрузки)"""
         try:
@@ -2084,7 +2130,8 @@ class MainWindow(QMainWindow):
                 logger.info("Найдены сохраненные настройки сортировки")
             
             # Открываем мастер импорта с сохраненными настройками
-            wizard = DataImportWizard(
+            wizard_class = InteractiveImportWizard if import_mode == 'interactive' else DataImportWizard
+            wizard = wizard_class(
                 data,
                 saved_settings,
                 self,
@@ -2103,13 +2150,18 @@ class MainWindow(QMainWindow):
                 # Получаем количество поясов из настроек мастера импорта
                 sorting_settings = wizard.get_cached_sorting_settings()
                 import_audit = wizard.get_import_audit()
+                confirmed_section_data = []
+                if hasattr(wizard, 'get_confirmed_section_data'):
+                    confirmed_section_data = wizard.get_confirmed_section_data()
                 new_import_context = loaded.to_context_dict() or {}
                 new_import_diagnostics = loaded.diagnostics.to_dict()
                 new_transformation_audit = None
+                new_import_context['import_mode'] = import_mode
                 new_import_context['wizard_audit'] = import_audit
                 new_import_context['sorting_settings'] = sorting_settings or {}
                 if new_import_diagnostics is not None:
                     new_import_diagnostics['details'] = new_import_diagnostics.get('details', {})
+                    new_import_diagnostics['details']['import_mode'] = import_mode
                     new_import_diagnostics['details']['wizard_audit'] = import_audit
                     new_import_diagnostics['belt_summary'] = import_audit.get(
                         'belt_summary',
@@ -2221,20 +2273,25 @@ class MainWindow(QMainWindow):
                 logger.info(f"Загружаем данные в главное окно. Распределение по поясам: {belt_distribution.to_dict()}")
                 logger.info(f"Первые 5 строк данных:\n{processed_data[['name', 'belt']].head(10)}")
 
+                state_kwargs = {
+                    'raw_data': processed_data.copy(deep=True),
+                    'processed_data': None,
+                    'epsg_code': epsg_code,
+                    'import_context': new_import_context,
+                    'import_diagnostics': new_import_diagnostics,
+                    'transformation_audit': new_transformation_audit,
+                    'current_file_path': import_file_path,
+                    'expected_belt_count': new_expected_belt_count,
+                    'tower_faces_count': new_tower_faces_count,
+                    'tower_blueprint_state': blueprint.to_dict(),
+                    'section_data': confirmed_section_data,
+                }
+                if not confirmed_section_data:
+                    state_kwargs['original_data_before_sections'] = None
+
                 new_state = self._compose_main_window_undo_state(
                     old_state,
-                    raw_data=processed_data.copy(deep=True),
-                    processed_data=None,
-                    epsg_code=epsg_code,
-                    import_context=new_import_context,
-                    import_diagnostics=new_import_diagnostics,
-                    transformation_audit=new_transformation_audit,
-                    current_file_path=import_file_path,
-                    original_data_before_sections=None,
-                    expected_belt_count=new_expected_belt_count,
-                    tower_faces_count=new_tower_faces_count,
-                    tower_blueprint_state=blueprint.to_dict(),
-                    section_data=[],
+                    **state_kwargs,
                 )
 
                 if not self._execute_main_window_state_command(

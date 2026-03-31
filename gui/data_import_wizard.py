@@ -476,10 +476,21 @@ class DataImportWizard(QDialog):
     
     def clear_steps_container(self):
         """Очистка контейнера шагов"""
-        while self.steps_layout.count():
-            item = self.steps_layout.takeAt(0)
-            if item.widget():
-                item.widget().deleteLater()
+        def _clear_layout(layout):
+            while layout.count():
+                item = layout.takeAt(0)
+                child_widget = item.widget()
+                child_layout = item.layout()
+                if child_layout is not None:
+                    _clear_layout(child_layout)
+                    child_layout.setParent(None)
+                    if hasattr(child_layout, 'deleteLater'):
+                        child_layout.deleteLater()
+                elif child_widget is not None:
+                    child_widget.setParent(None)
+                    child_widget.deleteLater()
+
+        _clear_layout(self.steps_layout)
     
     def show_step_1(self):
         """Шаг 1: Выбор точек"""
