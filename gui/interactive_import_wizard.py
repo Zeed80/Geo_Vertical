@@ -21,10 +21,12 @@ from PyQt6.QtWidgets import (
     QPushButton,
     QScrollArea,
     QSizePolicy,
+    QSplitter,
     QTableWidget,
     QTableWidgetItem,
     QVBoxLayout,
     QWidget,
+    QAbstractItemView,
 )
 
 from core.interactive_import import (
@@ -191,6 +193,9 @@ class InteractiveImportWizard(DataImportWizard):
         self.correction_summary_label.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         layout.addWidget(self.correction_summary_label)
 
+        splitter = QSplitter(Qt.Orientation.Horizontal)
+        layout.addWidget(splitter, 1)
+
         self.correction_table = QTableWidget(0, 9)
         self.correction_table.setHorizontalHeaderLabels(
             [
@@ -219,7 +224,17 @@ class InteractiveImportWizard(DataImportWizard):
         header.setSectionResizeMode(7, QHeaderView.ResizeMode.ResizeToContents)
         self.correction_table.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         self.correction_table.setMinimumHeight(360)
-        layout.addWidget(self.correction_table, 1)
+        self.correction_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self.correction_table.itemSelectionChanged.connect(self._update_correction_preview)
+        splitter.addWidget(self.correction_table)
+
+        import pyqtgraph as pg
+        self.correction_preview_plot = pg.PlotWidget(title="Превью коррекции (XY)")
+        self.correction_preview_plot.setBackground('w' if not getattr(self, "dark_theme_enabled", False) else '#1e1e1e')
+        self.correction_preview_plot.showGrid(x=True, y=True, alpha=0.3)
+        self.correction_preview_plot.setAspectLocked(True)
+        splitter.addWidget(self.correction_preview_plot)
+        splitter.setSizes([600, 400])
 
         self._populate_correction_table()
         self._finalize_step_view()
@@ -263,6 +278,15 @@ class InteractiveImportWizard(DataImportWizard):
         self.section_summary_label.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         layout.addWidget(self.section_summary_label)
 
+        self.missing_belts_warning_label = QLabel()
+        self.missing_belts_warning_label.setWordWrap(True)
+        self.missing_belts_warning_label.setStyleSheet("color: #d32f2f; font-weight: bold; padding: 4px;")
+        self.missing_belts_warning_label.setVisible(False)
+        layout.addWidget(self.missing_belts_warning_label)
+
+        splitter = QSplitter(Qt.Orientation.Horizontal)
+        layout.addWidget(splitter, 1)
+
         self.section_table = QTableWidget(0, 6)
         self.section_table.setHorizontalHeaderLabels(
             ["Принять генерацию", "Секция", "Высота, м", "Точек", "Поясов", "Сгенерировано"]
@@ -279,10 +303,30 @@ class InteractiveImportWizard(DataImportWizard):
         header.setSectionResizeMode(5, QHeaderView.ResizeMode.ResizeToContents)
         self.section_table.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         self.section_table.setMinimumHeight(320)
-        layout.addWidget(self.section_table, 1)
+        self.section_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self.section_table.itemSelectionChanged.connect(self._update_section_preview)
+        splitter.addWidget(self.section_table)
+
+        import pyqtgraph as pg
+        self.section_preview_plot = pg.PlotWidget(title="Превью секции (XZ)")
+        self.section_preview_plot.setBackground('w' if not getattr(self, "dark_theme_enabled", False) else '#1e1e1e')
+        self.section_preview_plot.showGrid(x=True, y=True, alpha=0.3)
+        splitter.addWidget(self.section_preview_plot)
+        splitter.setSizes([600, 400])
 
         self._populate_section_table()
         self._finalize_step_view()
+
+    def _fast_copy_settings(self, settings: dict) -> dict:
+        if not settings:
+            return {}
+        result = {"belt_count": settings.get("belt_count", 4)}
+        if "assignments" in settings:
+            result["assignments"] = {k: list(v) for k, v in settings["assignments"].items()}
+        for k, v in settings.items():
+            if k not in result:
+                result[k] = v
+        return result
 
     def go_next(self):
         if self.current_step == 1:
@@ -291,7 +335,7 @@ class InteractiveImportWizard(DataImportWizard):
 
         if self.current_step == 2:
             self.sorting_settings = self.get_sorting_settings()
-            self.interactive_sorting_snapshot = copy.deepcopy(self.sorting_settings)
+            self.interactive_sorting_snapshot = self._fast_copy_settings(self.sorting_settings)
             validation_summary = self._validate_final_assignment_state()
             audit = self._build_import_audit(validation_summary)
             if audit["warnings"]:
@@ -309,6 +353,7 @@ class InteractiveImportWizard(DataImportWizard):
             DataImportWizard.finalize_data(self)
             self.interactive_base_data = self.get_result().copy()
             self.corrected_preview_data = self.interactive_base_data.copy()
+            self.interactive_thresholds = InteractiveImportThresholds.from_data(self.interactive_base_data)
             self.show_step_3()
             self._recalculate_correction_candidates()
             return
@@ -329,7 +374,7 @@ class InteractiveImportWizard(DataImportWizard):
             return
         if self.current_step == 3:
             if self.interactive_sorting_snapshot:
-                self.saved_settings = copy.deepcopy(self.interactive_sorting_snapshot)
+                self.saved_settings = self._fast_copy_settings(self.interactive_sorting_snapshot)
             self.show_step_2()
             return
         super().go_back()
@@ -444,6 +489,53 @@ class InteractiveImportWizard(DataImportWizard):
             )
         )
 
+    def _update_correction_preview(self) -> None:
+        if not hasattr(self, "correction_preview_plot"):
+            return
+        self.correction_preview_plot.clear()
+        
+        selected_items = self.correction_table.selectedItems()
+        if not selected_items:
+            return
+            
+        row_num = selected_items[0].row()
+        item = self.correction_table.item(row_num, 0)
+        if not item:
+            return
+            
+        row_idx_data = item.data(Qt.ItemDataRole.UserRole)
+        if row_idx_data is None:
+            return
+            
+        row_idx = int(row_idx_data)
+        
+        candidates = list(self.correction_review.get("candidates", []))
+        candidate = next((c for c in candidates if int(c["row_index"]) == row_idx), None)
+        if not candidate:
+            return
+            
+        curr_x, curr_y = candidate["current_x"], candidate["current_y"]
+        prop_x, prop_y = candidate["proposed_x"], candidate["proposed_y"]
+        
+        import pyqtgraph as pg
+        
+        working_mask = build_working_tower_mask(self.interactive_base_data)
+        working = self.interactive_base_data[working_mask]
+        
+        if "belt" in working.columns:
+            try:
+                belt_pts = working[pd.to_numeric(working["belt"], errors="coerce") == candidate["proposed_belt"]]
+                if not belt_pts.empty:
+                    bx = belt_pts["x"].to_numpy()
+                    by = belt_pts["y"].to_numpy()
+                    self.correction_preview_plot.plot(bx, by, pen=None, symbol='s', symbolBrush=(150, 150, 150, 150), symbolSize=8)
+            except Exception:
+                pass
+                
+        self.correction_preview_plot.plot([curr_x], [curr_y], pen=None, symbol='o', symbolBrush='r', symbolSize=12, name="Оригинал")
+        self.correction_preview_plot.plot([prop_x], [prop_y], pen=None, symbol='o', symbolBrush='g', symbolSize=12, name="Предложение")
+        self.correction_preview_plot.plot([curr_x, prop_x], [curr_y, prop_y], pen=pg.mkPen('y', width=2, style=Qt.PenStyle.DashLine))
+
     def _select_safe_corrections(self) -> None:
         self.selected_correction_rows = {
             int(candidate["row_index"])
@@ -482,9 +574,19 @@ class InteractiveImportWizard(DataImportWizard):
 
     def _build_section_preview(self) -> None:
         self.section_review = build_section_review(self.corrected_preview_data)
+        
+        # Check for missing belts warning
+        belt_count = self.belt_count
+        rows = self.section_review.get("rows", [])
+        self.missing_belts_warning = False
+        for row in rows:
+            if int(row.get("belt_count", 0)) < belt_count:
+                self.missing_belts_warning = True
+                break
+                
         generated_defaults = {
             int(row["section_num"])
-            for row in self.section_review.get("rows", [])
+            for row in rows
             if bool(row.get("apply_generated_default"))
         }
         if self.selected_generated_sections:
@@ -539,6 +641,76 @@ class InteractiveImportWizard(DataImportWizard):
                 generated_points=total_generated,
             )
         )
+        
+        if getattr(self, "missing_belts_warning", False):
+            self.missing_belts_warning_label.setText(
+                "⚠️ Внимание: На некоторых секциях не хватает точек (поясов меньше, чем требуется). "
+                "Генерация точек по неполным данным может быть неточной. "
+                "Рекомендуется загрузить съемку со второй стоянки, воспользоваться функцией 'Достроить пояс' "
+                "или пропустить этот шаг."
+            )
+            self.missing_belts_warning_label.setVisible(True)
+        else:
+            self.missing_belts_warning_label.setVisible(False)
+
+    def _update_section_preview(self) -> None:
+        if not hasattr(self, "section_preview_plot"):
+            return
+        self.section_preview_plot.clear()
+        
+        selected_items = self.section_table.selectedItems()
+        if not selected_items:
+            return
+            
+        row_num = selected_items[0].row()
+        item = self.section_table.item(row_num, 0)
+        if not item:
+            return
+            
+        section_num_data = item.data(Qt.ItemDataRole.UserRole)
+        if section_num_data is None:
+            return
+            
+        section_num = int(section_num_data)
+        
+        rows = list(self.section_review.get("rows", []))
+        section = next((r for r in rows if int(r["section_num"]) == section_num), None)
+        if not section:
+            return
+            
+        target_z = float(section["height"])
+        tolerance = float(self.section_review.get("height_tolerance", 1.10))
+        
+        data = self.section_review.get("data_with_sections")
+        if data is None or data.empty:
+            return
+            
+        mask = data["z"].sub(target_z).abs().le(tolerance)
+        section_data = data[mask]
+        
+        if section_data.empty:
+            return
+            
+        import pyqtgraph as pg
+        
+        gen_mask = pd.Series(False, index=section_data.index)
+        if "is_section_generated" in section_data.columns:
+            gen_mask = section_data["is_section_generated"].fillna(False).astype(bool)
+            
+        real_pts = section_data[~gen_mask]
+        gen_pts = section_data[gen_mask]
+        
+        if not real_pts.empty:
+            self.section_preview_plot.plot(
+                real_pts["x"].to_numpy(), real_pts["z"].to_numpy(),
+                pen=None, symbol='o', symbolBrush='b', symbolSize=10, name="Оригинал"
+            )
+            
+        if not gen_pts.empty:
+            self.section_preview_plot.plot(
+                gen_pts["x"].to_numpy(), gen_pts["z"].to_numpy(),
+                pen=None, symbol='star', symbolBrush='g', symbolSize=14, name="Сгенерировано"
+            )
 
     def _collect_selected_generated_sections(self) -> set[int]:
         selected: set[int] = set()
@@ -570,6 +742,11 @@ class InteractiveImportWizard(DataImportWizard):
         }
         self._populate_section_table()
 
+    def _skip_sections(self) -> None:
+        self.selected_generated_sections = set()
+        self._finalize_interactive_result()
+        self.accept()
+
     def _finalize_interactive_result(self) -> None:
         selected_sections = self._collect_selected_generated_sections()
         final_data, section_lines, accepted_sections = apply_section_review_selection(
@@ -579,7 +756,7 @@ class InteractiveImportWizard(DataImportWizard):
         self.filtered_data = final_data.reset_index(drop=True)
         self.confirmed_section_data = section_lines
         self.accepted_generated_sections = accepted_sections
-        self.sorting_settings = copy.deepcopy(self.interactive_sorting_snapshot)
+        self.sorting_settings = self._fast_copy_settings(self.interactive_sorting_snapshot)
         validation_summary = self._validation_summary_from_data(self.filtered_data)
         self._build_import_audit(validation_summary)
 

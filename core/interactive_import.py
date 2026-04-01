@@ -29,6 +29,40 @@ class InteractiveImportThresholds:
     min_adjacent_improvement_ratio: float = 2.0
     min_track_residual_m: float = 0.03
 
+    @classmethod
+    def from_data(cls, data: pd.DataFrame) -> "InteractiveImportThresholds":
+        """Generate adaptive thresholds based on the tower dimensions."""
+        if data is None or data.empty or not {"x", "y", "z"}.issubset(data.columns):
+            return cls()
+            
+        working_mask = build_working_tower_mask(data)
+        working = data.loc[working_mask].copy() if working_mask.any() else data.copy()
+        
+        if len(working) < 4:
+            return cls()
+            
+        # Use quantiles to be robust against outliers
+        x_q95, x_q05 = working["x"].quantile([0.95, 0.05])
+        y_q95, y_q05 = working["y"].quantile([0.95, 0.05])
+        
+        width = max(x_q95 - x_q05, y_q95 - y_q05)
+        if pd.isna(width) or width <= 0.1:
+            width = 2.0  # fallback
+            
+        # Adaptive scaling:
+        # Standard tower (2.0m width) -> max_proj ~ 0.30m (15% of width)
+        max_proj = max(0.10, min(1.5, width * 0.15))
+        z_snap = max(0.10, min(0.50, 0.10 + width * 0.02))
+        min_track = max(0.01, min(0.15, width * 0.015))
+        
+        return cls(
+            z_snap_tolerance_m=round(float(z_snap), 3),
+            max_projection_distance_m=round(float(max_proj), 3),
+            max_station_angle_deg=1.5,  # typically independent of tower size
+            min_adjacent_improvement_ratio=2.0,
+            min_track_residual_m=round(float(min_track), 3)
+        )
+
     def to_dict(self) -> dict[str, float]:
         return {key: float(value) for key, value in asdict(self).items()}
 
@@ -114,6 +148,62 @@ def _resolve_station_xy(data: pd.DataFrame) -> np.ndarray | None:
         return None
 
 
+def _robust_track_fit(xy: np.ndarray, max_trials: int = 50, inlier_threshold: float = 0.05) -> tuple[np.ndarray, np.ndarray]:
+    """Robustly fit a 2D line using a simple RANSAC approach to reject outliers."""
+    n_points = len(xy)
+    if n_points < 2:
+        return np.mean(xy, axis=0, dtype=float), np.array([1.0, 0.0], dtype=float)
+        
+    if n_points == 2:
+        direction = xy[1] - xy[0]
+        norm = float(np.linalg.norm(direction))
+        if norm > 1e-9:
+            direction = direction / norm
+        else:
+            direction = np.array([1.0, 0.0], dtype=float)
+        return np.mean(xy, axis=0, dtype=float), direction
+
+    best_inliers = 0
+    best_center = np.mean(xy, axis=0, dtype=float)
+    
+    centered = xy - best_center
+    _, _, vh = np.linalg.svd(centered, full_matrices=False)
+    best_direction = np.asarray(vh[0], dtype=float)
+
+    # Fast RANSAC
+    for _ in range(max_trials):
+        idx = np.random.choice(n_points, 2, replace=False)
+        p1, p2 = xy[idx[0]], xy[idx[1]]
+        direction = p2 - p1
+        norm = float(np.linalg.norm(direction))
+        if norm < 1e-9:
+            continue
+        direction = direction / norm
+        
+        diff = xy - p1
+        cross = diff[:, 0] * direction[1] - diff[:, 1] * direction[0]
+        distances = np.abs(cross)
+        
+        inliers = distances < inlier_threshold
+        n_inliers = int(np.sum(inliers))
+        
+        if n_inliers > best_inliers:
+            best_inliers = n_inliers
+            inlier_pts = xy[inliers]
+            best_center = np.mean(inlier_pts, axis=0, dtype=float)
+            centered_inliers = inlier_pts - best_center
+            _, _, vh_in = np.linalg.svd(centered_inliers, full_matrices=False)
+            best_direction = np.asarray(vh_in[0], dtype=float)
+
+    norm = float(np.linalg.norm(best_direction))
+    if norm > 1e-9:
+        best_direction = best_direction / norm
+    else:
+        best_direction = np.array([1.0, 0.0], dtype=float)
+        
+    return best_center, best_direction
+
+
 def _build_track_models(data: pd.DataFrame, station_xy: np.ndarray | None) -> dict[tuple[int, int], dict[str, Any]]:
     working = data.loc[build_working_tower_mask(data)].copy()
     models: dict[tuple[int, int], dict[str, Any]] = {}
@@ -132,14 +222,7 @@ def _build_track_models(data: pd.DataFrame, station_xy: np.ndarray | None) -> di
         if len(subset) < 2:
             continue
         xy = subset[["x", "y"]].to_numpy(dtype=float)
-        center = np.mean(xy, axis=0, dtype=float)
-        centered = xy - center
-        _, _, vh = np.linalg.svd(centered, full_matrices=False)
-        direction = np.asarray(vh[0], dtype=float)
-        norm = float(np.linalg.norm(direction))
-        if norm <= 1e-9:
-            continue
-        direction = direction / norm
+        center, direction = _robust_track_fit(xy)
         z_values = pd.to_numeric(subset["z"], errors="coerce").dropna().to_numpy(dtype=float)
         level_values = pd.to_numeric(subset.get("height_level"), errors="coerce").dropna().to_numpy(dtype=int)
         model: dict[str, Any] = {
@@ -246,6 +329,7 @@ def build_interactive_correction_review(
             and _MIN_MOVE_METERS < z_delta <= thresholds.z_snap_tolerance_m
             and current_residual <= thresholds.max_projection_distance_m
         ):
+            conf = int(max(50, 100 * (1.0 - z_delta / thresholds.z_snap_tolerance_m)))
             z_snap_candidate = _build_candidate(
                 row_idx=int(row_idx),
                 row=row,
@@ -258,7 +342,7 @@ def build_interactive_correction_review(
                 current_residual_m=current_residual,
                 proposed_residual_m=current_residual,
                 reason=f"Height differs from stable level by {z_delta * 1000.0:.0f} mm.",
-                safety="safe",
+                safety=f"{conf}%",
             )
 
         projection_candidate = None
@@ -282,6 +366,7 @@ def build_interactive_correction_review(
                     if projected_xy is not None:
                         move = float(np.linalg.norm(projected_xy - point_xy))
                         if _MIN_MOVE_METERS < move <= thresholds.max_projection_distance_m:
+                            conf = int(max(60, 100 * (1.0 - move / thresholds.max_projection_distance_m)))
                             projection_candidate = _build_candidate(
                                 row_idx=int(row_idx),
                                 row=row,
@@ -294,7 +379,7 @@ def build_interactive_correction_review(
                                 current_residual_m=current_residual,
                                 proposed_residual_m=0.0,
                                 reason=f"Station ray matches the confirmed track; move {move * 1000.0:.0f} mm.",
-                                safety="safe",
+                                safety=f"{conf}%",
                             )
 
         adjacent_candidate = None
@@ -343,6 +428,7 @@ def build_interactive_correction_review(
                 if not (_MIN_MOVE_METERS < move <= thresholds.max_projection_distance_m):
                     continue
 
+                conf = int(max(30, 90 * (1.0 - move / thresholds.max_projection_distance_m)))
                 candidate = _build_candidate(
                     row_idx=int(row_idx),
                     row=row,
@@ -358,7 +444,7 @@ def build_interactive_correction_review(
                         "Adjacent track reduces residual from "
                         f"{current_residual * 1000.0:.0f} mm to {adjacent_residual * 1000.0:.0f} mm."
                     ),
-                    safety="review",
+                    safety=f"{conf}%",
                 )
                 if (
                     adjacent_candidate is None
