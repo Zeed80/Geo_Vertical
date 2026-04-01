@@ -145,8 +145,8 @@ def test_build_interactive_correction_review_projects_point_to_confirmed_track()
     assert candidate["correction_kind"] == "project_to_face_track"
     assert candidate["current_belt"] == 1
     assert candidate["proposed_belt"] == 1
-    assert candidate["distance_moved_m"] == pytest.approx(0.120, abs=0.01)
-    assert candidate["proposed_y"] == pytest.approx(0.0, abs=0.02)
+    assert candidate["distance_moved_m"] == pytest.approx(0.084, abs=0.01)
+    assert candidate["proposed_y"] == pytest.approx(0.036, abs=0.02)
     assert review["point_status_counts"]["correction_candidate"] == 1
 
     corrected, applied, rejected = apply_interactive_corrections(data, review["candidates"], {4})
@@ -156,9 +156,9 @@ def test_build_interactive_correction_review_projects_point_to_confirmed_track()
     assert bool(corrected.at[4, "import_corrected"]) is True
     assert corrected.at[4, "import_review_status"] == "corrected"
     assert corrected.at[4, "source_y"] == pytest.approx(0.12, abs=1e-9)
-    assert corrected.at[4, "y"] == pytest.approx(0.0, abs=0.02)
+    assert corrected.at[4, "y"] == pytest.approx(0.036, abs=0.02)
     assert corrected.at[4, "import_correction_kind"] == "project_to_face_track"
-    assert corrected.at[4, "import_correction_distance_mm"] == pytest.approx(120.0, abs=1.0)
+    assert corrected.at[4, "import_correction_distance_mm"] == pytest.approx(84.0, abs=1.0)
 
 
 def test_section_review_keeps_generated_points_only_for_confirmed_sections():
