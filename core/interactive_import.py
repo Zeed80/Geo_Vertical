@@ -148,62 +148,6 @@ def _resolve_station_xy(data: pd.DataFrame) -> np.ndarray | None:
         return None
 
 
-def _robust_track_fit(xy: np.ndarray, max_trials: int = 50, inlier_threshold: float = 0.05) -> tuple[np.ndarray, np.ndarray]:
-    """Robustly fit a 2D line using a simple RANSAC approach to reject outliers."""
-    n_points = len(xy)
-    if n_points < 2:
-        return np.mean(xy, axis=0, dtype=float), np.array([1.0, 0.0], dtype=float)
-        
-    if n_points == 2:
-        direction = xy[1] - xy[0]
-        norm = float(np.linalg.norm(direction))
-        if norm > 1e-9:
-            direction = direction / norm
-        else:
-            direction = np.array([1.0, 0.0], dtype=float)
-        return np.mean(xy, axis=0, dtype=float), direction
-
-    best_inliers = 0
-    best_center = np.mean(xy, axis=0, dtype=float)
-    
-    centered = xy - best_center
-    _, _, vh = np.linalg.svd(centered, full_matrices=False)
-    best_direction = np.asarray(vh[0], dtype=float)
-
-    # Fast RANSAC
-    for _ in range(max_trials):
-        idx = np.random.choice(n_points, 2, replace=False)
-        p1, p2 = xy[idx[0]], xy[idx[1]]
-        direction = p2 - p1
-        norm = float(np.linalg.norm(direction))
-        if norm < 1e-9:
-            continue
-        direction = direction / norm
-        
-        diff = xy - p1
-        cross = diff[:, 0] * direction[1] - diff[:, 1] * direction[0]
-        distances = np.abs(cross)
-        
-        inliers = distances < inlier_threshold
-        n_inliers = int(np.sum(inliers))
-        
-        if n_inliers > best_inliers:
-            best_inliers = n_inliers
-            inlier_pts = xy[inliers]
-            best_center = np.mean(inlier_pts, axis=0, dtype=float)
-            centered_inliers = inlier_pts - best_center
-            _, _, vh_in = np.linalg.svd(centered_inliers, full_matrices=False)
-            best_direction = np.asarray(vh_in[0], dtype=float)
-
-    norm = float(np.linalg.norm(best_direction))
-    if norm > 1e-9:
-        best_direction = best_direction / norm
-    else:
-        best_direction = np.array([1.0, 0.0], dtype=float)
-        
-    return best_center, best_direction
-
-
 def _build_track_models(data: pd.DataFrame, station_xy: np.ndarray | None) -> dict[tuple[int, int], dict[str, Any]]:
     working = data.loc[build_working_tower_mask(data)].copy()
     models: dict[tuple[int, int], dict[str, Any]] = {}
@@ -222,7 +166,14 @@ def _build_track_models(data: pd.DataFrame, station_xy: np.ndarray | None) -> di
         if len(subset) < 2:
             continue
         xy = subset[["x", "y"]].to_numpy(dtype=float)
-        center, direction = _robust_track_fit(xy)
+        center = np.mean(xy, axis=0, dtype=float)
+        centered = xy - center
+        _, _, vh = np.linalg.svd(centered, full_matrices=False)
+        direction = np.asarray(vh[0], dtype=float)
+        norm = float(np.linalg.norm(direction))
+        if norm <= 1e-9:
+            continue
+        direction = direction / norm
         z_values = pd.to_numeric(subset["z"], errors="coerce").dropna().to_numpy(dtype=float)
         level_values = pd.to_numeric(subset.get("height_level"), errors="coerce").dropna().to_numpy(dtype=int)
         model: dict[str, Any] = {
