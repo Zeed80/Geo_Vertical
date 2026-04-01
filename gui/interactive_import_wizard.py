@@ -537,11 +537,17 @@ class InteractiveImportWizard(DataImportWizard):
         self.correction_preview_plot.plot([curr_x, prop_x], [curr_y, prop_y], pen=pg.mkPen('y', width=2, style=Qt.PenStyle.DashLine))
 
     def _select_safe_corrections(self) -> None:
-        self.selected_correction_rows = {
-            int(candidate["row_index"])
-            for candidate in self.correction_review.get("candidates", [])
-            if str(candidate.get("safety", "")).lower() == "safe"
-        }
+        self.selected_correction_rows = set()
+        for candidate in self.correction_review.get("candidates", []):
+            safety = str(candidate.get("safety", "")).lower()
+            if safety == "safe":
+                self.selected_correction_rows.add(int(candidate["row_index"]))
+            elif safety.endswith("%"):
+                try:
+                    if int(safety[:-1]) >= 50:
+                        self.selected_correction_rows.add(int(candidate["row_index"]))
+                except ValueError:
+                    pass
         self._populate_correction_table()
 
     def _clear_correction_selection(self) -> None:
