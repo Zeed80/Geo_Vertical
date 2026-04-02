@@ -21,6 +21,98 @@ from core.point_utils import (
 )
 
 
+def _build_belt_profile_arrays(
+    belt_points: pd.DataFrame,
+) -> tuple[pd.DataFrame, list[float], list[float]]:
+    belt_sorted = belt_points.sort_values("z").copy()
+    if belt_sorted.empty:
+        return belt_sorted, [], []
+
+    deflections = [0.0] * len(belt_sorted)
+    section_lengths = [0.0] * len(belt_sorted)
+    points_array = belt_sorted[["x", "y", "z"]].to_numpy(dtype=float)
+
+    if len(points_array) == 1:
+        return belt_sorted, deflections, section_lengths
+
+    if len(points_array) == 2:
+        span = abs(float(points_array[-1][2] - points_array[0][2]))
+        section_lengths = [span, span]
+        return belt_sorted, deflections, section_lengths
+
+    section_start = 0
+    while section_start + 2 < len(points_array):
+        first_point = points_array[section_start]
+        middle_point = points_array[section_start + 1]
+        last_point = points_array[section_start + 2]
+
+        span = abs(float(last_point[2] - first_point[2]))
+        for idx in (section_start, section_start + 1, section_start + 2):
+            section_lengths[idx] = max(section_lengths[idx], span)
+
+        line_direction = last_point - first_point
+        line_length = float(np.linalg.norm(line_direction))
+        if np.isfinite(line_length) and line_length >= 1e-9:
+            line_dir_norm = line_direction / line_length
+            vector_to_middle = middle_point - first_point
+            projection = np.dot(vector_to_middle, line_dir_norm) * line_dir_norm
+            perpendicular = vector_to_middle - projection
+            deflection_m = float(np.linalg.norm(perpendicular))
+            sign = 1.0 if perpendicular[0] >= 0.0 else -1.0
+            deflections[section_start + 1] = sign * deflection_m * 1000.0
+
+        section_start += 2
+
+    if any(length > 0.0 for length in section_lengths):
+        last_non_zero = 0.0
+        for idx, length in enumerate(section_lengths):
+            if length > 0.0:
+                last_non_zero = length
+                continue
+            if last_non_zero > 0.0:
+                section_lengths[idx] = last_non_zero
+
+        next_non_zero = 0.0
+        for idx in range(len(section_lengths) - 1, -1, -1):
+            length = section_lengths[idx]
+            if length > 0.0:
+                next_non_zero = length
+                continue
+            if next_non_zero > 0.0:
+                section_lengths[idx] = next_non_zero
+    else:
+        fallback_span = abs(float(points_array[-1][2] - points_array[0][2]))
+        section_lengths = [fallback_span] * len(points_array)
+
+    return belt_sorted, deflections, section_lengths
+
+
+def calculate_belt_profile_metrics(belt_points: pd.DataFrame) -> list[dict[str, float]]:
+    """Return canonical per-point straightness metrics for a single belt profile."""
+    belt_sorted, deflections, section_lengths = _build_belt_profile_arrays(belt_points)
+    if belt_sorted.empty:
+        return []
+
+    metrics: list[dict[str, float]] = []
+    for idx, (_, point) in enumerate(belt_sorted.iterrows()):
+        section_length_m = float(section_lengths[idx] if idx < len(section_lengths) else 0.0)
+        tolerance_mm = (
+            float(get_straightness_tolerance(section_length_m) * 1000.0)
+            if section_length_m > 0.0
+            else 0.0
+        )
+        metrics.append(
+            {
+                "z": float(point["z"]),
+                "deflection_mm": float(deflections[idx] if idx < len(deflections) else 0.0),
+                "section_length_m": section_length_m,
+                "tolerance_mm": tolerance_mm,
+            }
+        )
+
+    return metrics
+
+
 def calculate_belt_deflections(
     belt_points: pd.DataFrame,
     part_min_height: float | None = None,
@@ -41,33 +133,10 @@ def calculate_belt_deflections(
     """
     del part_min_height, part_max_height
 
-    belt_sorted = belt_points.sort_values("z").copy()
-    if len(belt_sorted) < 2:
-        return [0.0] * len(belt_sorted)
-
-    deflections = [0.0] * len(belt_sorted)
-    points_array = belt_sorted[["x", "y", "z"]].to_numpy(dtype=float)
-
-    section_start = 0
-    while section_start + 2 < len(points_array):
-        first_point = points_array[section_start]
-        middle_point = points_array[section_start + 1]
-        last_point = points_array[section_start + 2]
-
-        line_direction = last_point - first_point
-        line_length = float(np.linalg.norm(line_direction))
-        if np.isfinite(line_length) and line_length >= 1e-9:
-            line_dir_norm = line_direction / line_length
-            vector_to_middle = middle_point - first_point
-            projection = np.dot(vector_to_middle, line_dir_norm) * line_dir_norm
-            perpendicular = vector_to_middle - projection
-            deflection_m = float(np.linalg.norm(perpendicular))
-            sign = 1.0 if perpendicular[0] >= 0.0 else -1.0
-            deflections[section_start + 1] = sign * deflection_m * 1000.0
-
-        section_start += 2
-
-    return deflections
+    return [
+        float(item["deflection_mm"])
+        for item in calculate_belt_profile_metrics(belt_points)
+    ]
 
 
 def calculate_belt_angle(belt_points: pd.DataFrame) -> float:
@@ -145,22 +214,30 @@ def build_straightness_profiles(
         part_points["belt"] = numeric_belts.loc[part_points.index].astype(int)
         part_min_height = float(part_points["z"].min())
         part_max_height = float(part_points["z"].max())
-        part_height = max(0.0, part_max_height - part_min_height)
-        tolerance_mm = float(get_straightness_tolerance(part_height) * 1000.0) if part_height > 0 else 0.0
-
         for belt_num, belt_points in part_points.groupby("belt"):
             belt_sorted = belt_points.sort_values("z").copy()
             if len(belt_sorted) < 2:
                 continue
 
-            deflections = calculate_belt_deflections(belt_sorted)
+            point_metrics = calculate_belt_profile_metrics(belt_sorted)
+            max_section_length_m = max(
+                (float(item.get("section_length_m", 0.0) or 0.0) for item in point_metrics),
+                default=0.0,
+            )
+            max_tolerance_mm = max(
+                (float(item.get("tolerance_mm", 0.0) or 0.0) for item in point_metrics),
+                default=0.0,
+            )
             profile_points = []
             for idx, (_, point) in enumerate(belt_sorted.iterrows()):
+                point_metric = point_metrics[idx] if idx < len(point_metrics) else {}
                 profile_points.append(
                     {
                         "source_index": point.name,
                         "z": float(point["z"]),
-                        "deflection_mm": float(deflections[idx] if idx < len(deflections) else 0.0),
+                        "deflection_mm": float(point_metric.get("deflection_mm", 0.0) or 0.0),
+                        "section_length_m": float(point_metric.get("section_length_m", 0.0) or 0.0),
+                        "tolerance_mm": float(point_metric.get("tolerance_mm", 0.0) or 0.0),
                     }
                 )
 
@@ -168,8 +245,8 @@ def build_straightness_profiles(
                 {
                     "part_number": int(part_num),
                     "belt": int(belt_num),
-                    "section_length_m": float(part_height),
-                    "tolerance_mm": tolerance_mm,
+                    "section_length_m": max_section_length_m,
+                    "tolerance_mm": max_tolerance_mm,
                     "max_deflection_mm": float(
                         max((abs(item["deflection_mm"]) for item in profile_points), default=0.0)
                     ),

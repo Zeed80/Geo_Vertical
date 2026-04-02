@@ -346,7 +346,10 @@ class ReportPreviewDialog(QDialog):
                     for belt_num, belt_data in belts_data.items():
                         for item in belt_data:
                             height_rounded = round(float(item['height']), 1)
-                            belt_height_deflection[(belt_num, height_rounded)] = float(item.get('deflection', 0.0) or 0.0)
+                            belt_height_deflection[(belt_num, height_rounded)] = {
+                                'deflection': float(item.get('deflection', 0.0) or 0.0),
+                                'tolerance': float(item.get('tolerance', 0.0) or 0.0),
+                            }
 
                     for height in sorted_heights:
                         html_parts.append('<tr>')
@@ -355,8 +358,10 @@ class ReportPreviewDialog(QDialog):
                         for belt_num in sorted_belts:
                             key = (belt_num, height)
                             if key in belt_height_deflection:
-                                deflection = belt_height_deflection[key]
-                                status_class = 'status-error' if abs(deflection) > max_tolerance else 'status-ok'
+                                payload = belt_height_deflection[key]
+                                deflection = float(payload.get('deflection', 0.0) or 0.0)
+                                tolerance = float(payload.get('tolerance', max_tolerance) or max_tolerance)
+                                status_class = 'status-error' if abs(deflection) > tolerance else 'status-ok'
                                 html_parts.append(f'<td class="{status_class}">{deflection:+.1f}</td>')
                             else:
                                 html_parts.append('<td>-</td>')

@@ -176,6 +176,21 @@ def test_assembler_enriches_data(tmp_path):
     )
     processed = {
         "centers": centers,
+        "straightness_profiles": [
+            {
+                "part_number": 1,
+                "belt": 1,
+                "section_length_m": 5.0,
+                "tolerance_mm": 6.6666666667,
+                "max_deflection_mm": 6.2,
+                "part_min_height": 5.0,
+                "part_max_height": 10.0,
+                "points": [
+                    {"z": 5.0, "deflection_mm": 0.0, "tolerance_mm": 6.6666666667},
+                    {"z": 10.0, "deflection_mm": 6.2, "tolerance_mm": 6.6666666667},
+                ],
+            }
+        ],
         "thickness_summary": "Максимальное снижение толщины 5%",
         "residual_resource": {"ok": True, "years": 120, "notes": "Без ограничений"},
     }

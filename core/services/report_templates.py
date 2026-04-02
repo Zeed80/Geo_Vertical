@@ -44,6 +44,7 @@ from core.services.verticality_sections import (
     get_preferred_verticality_sections,
     normalize_verticality_sections,
 )
+from core.services.straightness_profiles import get_preferred_straightness_profiles
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 USER_DATA_DIR = PROJECT_ROOT / "user_data" / "report_templates"
@@ -534,11 +535,18 @@ class ReportDataAssembler:
             if max_deflection_mm > 0:
                 return {"max_straightness_mm": max_deflection_mm}
 
-        centers = self.processed.get("centers")
-        if isinstance(centers, pd.DataFrame) and not centers.empty and "straightness_deviation" in centers.columns:
-            deviation_mm = (centers["straightness_deviation"].abs() * 1000).dropna()
-            if not deviation_mm.empty and deviation_mm.max() > 0:
-                return {"max_straightness_mm": float(deviation_mm.max())}
+        profiles = get_preferred_straightness_profiles(
+            self.processed.get("straightness_profiles"),
+            points=self.raw,
+            tower_parts_info=self.processed.get("tower_parts_info"),
+        )
+        if profiles:
+            max_deflection_mm = max(
+                float(profile.get("max_deflection_mm", 0.0) or 0.0)
+                for profile in profiles
+            )
+            if max_deflection_mm > 0:
+                return {"max_straightness_mm": max_deflection_mm}
         return {}
 
     def _build_measurement_summaries(self) -> list[MeasurementSummary]:
@@ -677,38 +685,26 @@ class ReportDataAssembler:
         return normalize_verticality_sections(payload)
 
     def _build_straightness_records(self) -> list[StraightnessRecord]:
-        profiles = self.processed.get("straightness_profiles")
-        if isinstance(profiles, list) and profiles:
+        profiles = get_preferred_straightness_profiles(
+            self.processed.get("straightness_profiles"),
+            points=self.raw,
+            tower_parts_info=self.processed.get("tower_parts_info"),
+        )
+        if profiles:
             records: list[StraightnessRecord] = []
             for profile in profiles:
                 belt_number = int(profile.get("belt", 0))
-                tolerance_mm = float(profile.get("tolerance_mm", 0.0))
+                profile_tolerance_mm = float(profile.get("tolerance_mm", 0.0) or 0.0)
                 for point in profile.get("points", []):
                     records.append(
                         StraightnessRecord(
                             belt_number=belt_number,
                             height_m=float(point.get("z", 0.0)),
                             deviation_mm=float(point.get("deflection_mm", 0.0)),
-                            tolerance_mm=tolerance_mm,
+                            tolerance_mm=float(point.get("tolerance_mm", profile_tolerance_mm) or profile_tolerance_mm),
                         )
                     )
             records.sort(key=lambda item: (item.belt_number, item.height_m))
-            return records
-
-        centers = self.processed.get("centers")
-        if isinstance(centers, pd.DataFrame) and not centers.empty:
-            records: list[StraightnessRecord] = []
-            for idx, (_, row) in enumerate(centers.reset_index(drop=True).iterrows(), start=1):
-                deviation = self._to_mm(row.get("straightness_deviation"))
-                tolerance = self._to_mm(row.get("section_length")) / 750 if row.get("section_length") else 0.0
-                records.append(
-                    StraightnessRecord(
-                        belt_number=idx,
-                        height_m=float(row.get("z", 0.0)),
-                        deviation_mm=deviation or 0.0,
-                        tolerance_mm=tolerance or 0.0,
-                    )
-                )
             return records
         return []
 

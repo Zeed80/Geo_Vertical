@@ -218,8 +218,8 @@ def _summarize_straightness_profiles(straightness_profiles: list[dict]) -> dict[
     for profile in straightness_profiles:
         part_number = int(profile.get('part_number', 1))
         belt = int(profile.get('belt', 0))
-        tolerance_mm = float(profile.get('tolerance_mm', 0.0))
-        section_length_m = float(profile.get('section_length_m', 0.0))
+        profile_tolerance_mm = float(profile.get('tolerance_mm', 0.0) or 0.0)
+        profile_section_length_m = float(profile.get('section_length_m', 0.0) or 0.0)
         summary['max_deflection_mm'] = max(
             summary['max_deflection_mm'],
             float(profile.get('max_deflection_mm', 0.0)),
@@ -227,6 +227,10 @@ def _summarize_straightness_profiles(straightness_profiles: list[dict]) -> dict[
 
         for point in profile.get('points', []):
             deviation_mm = float(point.get('deflection_mm', 0.0))
+            tolerance_mm = float(point.get('tolerance_mm', profile_tolerance_mm) or profile_tolerance_mm)
+            section_length_m = float(
+                point.get('section_length_m', profile_section_length_m) or profile_section_length_m
+            )
             if abs(deviation_mm) <= tolerance_mm:
                 summary['passed'] += 1
                 continue

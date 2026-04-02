@@ -4,10 +4,12 @@
 
 from datetime import datetime
 from pathlib import Path
+from typing import Any
 
 import pandas as pd
 
-from core.normatives import get_straightness_tolerance, get_vertical_tolerance
+from core.normatives import get_vertical_tolerance
+from core.services.straightness_profiles import get_preferred_straightness_part_map
 
 
 class ReportGenerator:
@@ -15,6 +17,107 @@ class ReportGenerator:
 
     def __init__(self):
         self.timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+
+    @staticmethod
+    def _get_preferred_straightness_data(
+        processed_data: dict | None,
+        raw_data: pd.DataFrame | None = None,
+        straightness_widget=None,
+    ) -> dict[int, dict]:
+        widget_data = {}
+        if straightness_widget and hasattr(straightness_widget, 'get_all_belts_data'):
+            try:
+                widget_data = straightness_widget.get_all_belts_data()
+            except Exception as exc:
+                print(f"Не удалось получить данные прямолинейности из виджета: {exc}")
+
+        return get_preferred_straightness_part_map(
+            processed_data.get('straightness_profiles') if isinstance(processed_data, dict) else None,
+            widget_data,
+            points=raw_data,
+            tower_parts_info=processed_data.get('tower_parts_info') if isinstance(processed_data, dict) else None,
+        )
+
+    @staticmethod
+    def _summarize_straightness_data(straightness_data: dict[int, dict]) -> dict[str, Any]:
+        summary = {
+            'total': 0,
+            'passed': 0,
+            'failed': 0,
+            'max_deflection_mm': 0.0,
+            'max_tolerance_mm': 0.0,
+            'max_height_m': 0.0,
+            'max_belt_num': None,
+            'max_part_num': None,
+        }
+
+        for part_num, part_info in (straightness_data or {}).items():
+            belts_data = (part_info or {}).get('belts', {}) or {}
+            for belt_num, belt_points in belts_data.items():
+                for item in belt_points or []:
+                    try:
+                        height_m = float(item.get('height', 0.0) or 0.0)
+                        deviation_mm = float(item.get('deflection', 0.0) or 0.0)
+                        tolerance_mm = float(item.get('tolerance', 0.0) or 0.0)
+                    except (TypeError, ValueError):
+                        continue
+
+                    abs_deviation = abs(deviation_mm)
+                    summary['total'] += 1
+                    if abs_deviation <= tolerance_mm + 1e-9:
+                        summary['passed'] += 1
+                    else:
+                        summary['failed'] += 1
+
+                    if abs_deviation > summary['max_deflection_mm']:
+                        summary['max_deflection_mm'] = abs_deviation
+                        summary['max_tolerance_mm'] = tolerance_mm
+                        summary['max_height_m'] = height_m
+                        summary['max_belt_num'] = int(belt_num)
+                        summary['max_part_num'] = int(part_num)
+
+        return summary
+
+    @staticmethod
+    def _resolve_straightness_at_height(
+        straightness_data: dict[int, dict],
+        target_height: float,
+        tolerance: float = 0.25,
+    ) -> float | None:
+        matched_values: list[float] = []
+        nearest_value: float | None = None
+        nearest_delta: float | None = None
+
+        for part_info in (straightness_data or {}).values():
+            belts_data = (part_info or {}).get('belts', {}) or {}
+            for belt_points in belts_data.values():
+                for item in belt_points or []:
+                    try:
+                        height_m = float(item.get('height', 0.0) or 0.0)
+                        deviation_mm = abs(float(item.get('deflection', 0.0) or 0.0))
+                    except (TypeError, ValueError):
+                        continue
+
+                    delta = abs(height_m - target_height)
+                    if delta <= tolerance:
+                        matched_values.append(deviation_mm)
+                    if nearest_delta is None or delta < nearest_delta:
+                        nearest_delta = delta
+                        nearest_value = deviation_mm
+
+        if matched_values:
+            return max(matched_values)
+        return nearest_value
+
+    @staticmethod
+    def _iter_straightness_rows(straightness_data: dict[int, dict]):
+        for part_num in sorted((straightness_data or {}).keys()):
+            part_info = (straightness_data or {}).get(part_num) or {}
+            belts_data = (part_info or {}).get('belts', {}) or {}
+            for belt_num in sorted(belts_data.keys()):
+                for item in belts_data.get(belt_num) or []:
+                    if isinstance(item, dict):
+                        yield int(part_num), int(belt_num), item
 
     @staticmethod
     def _prepare_matplotlib_figure(figure, width: float, height: float, *, pad: float = 1.2,
@@ -67,6 +170,8 @@ class ReportGenerator:
             ws_results.title = "Результаты"
 
             centers = processed_data['centers']
+            straightness_data = self._get_preferred_straightness_data(processed_data, raw_data)
+            straightness_summary = self._summarize_straightness_data(straightness_data)
 
             ws_results['A1'] = 'Результаты расчетов'
             ws_results['A1'].font = Font(size=14, bold=True)
@@ -102,8 +207,11 @@ class ReportGenerator:
                 ws_results.cell(row=i, column=4, value=round(row['y'], 6))
                 ws_results.cell(row=i, column=5, value=round(row['deviation'] * 1000, 2))
 
-                if 'straightness_deviation' in row:
-                    ws_results.cell(row=i, column=6, value=round(row['straightness_deviation'] * 1000, 2))
+                straightness_mm = self._resolve_straightness_at_height(straightness_data, float(row['z']))
+                if straightness_mm is None and 'straightness_deviation' in row:
+                    straightness_mm = abs(float(row['straightness_deviation']) * 1000.0)
+                if straightness_mm is not None:
+                    ws_results.cell(row=i, column=6, value=round(straightness_mm, 2))
 
                 if 'points_count' in row:
                     ws_results.cell(row=i, column=7, value=int(row['points_count']))
@@ -159,6 +267,86 @@ class ReportGenerator:
                     row_idx += 1
 
             # Лист 3: Журнал угловых измерений
+            if not vertical_check['non_compliant']:
+                row_idx = 12
+
+            if straightness_summary['total'] > 0:
+                row_idx += 1
+                ws3[f'A{row_idx}'] = '\u0420\u0435\u0437\u0443\u043b\u044c\u0442\u0430\u0442\u044b \u043f\u0440\u043e\u0432\u0435\u0440\u043a\u0438 \u043f\u0440\u044f\u043c\u043e\u043b\u0438\u043d\u0435\u0439\u043d\u043e\u0441\u0442\u0438 \u043f\u043e\u044f\u0441\u043e\u0432:'
+                ws3[f'A{row_idx + 1}'] = f"\u0412\u0441\u0435\u0433\u043e \u0442\u043e\u0447\u0435\u043a: {straightness_summary['total']}"
+                ws3[f'A{row_idx + 2}'] = f"\u2713 \u0412 \u043d\u043e\u0440\u043c\u0435: {straightness_summary['passed']}"
+                ws3[f'A{row_idx + 3}'] = f"\u2717 \u041f\u0440\u0435\u0432\u044b\u0448\u0435\u043d\u0438\u0435: {straightness_summary['failed']}"
+                ws3[f'A{row_idx + 2}'].font = Font(color='008000')
+                ws3[f'A{row_idx + 3}'].font = Font(color='FF0000')
+
+                max_location = (
+                    f"\u043f\u043e\u044f\u0441 {straightness_summary['max_belt_num']}, "
+                    f"\u0432\u044b\u0441\u043e\u0442\u0430 {straightness_summary['max_height_m']:.3f} \u043c"
+                )
+                if len(straightness_data) > 1 and straightness_summary['max_part_num'] is not None:
+                    max_location = f"\u0447\u0430\u0441\u0442\u044c {straightness_summary['max_part_num']}, {max_location}"
+
+                ws3[f'A{row_idx + 5}'] = (
+                    '\u041c\u0430\u043a\u0441\u0438\u043c\u0430\u043b\u044c\u043d\u0430\u044f \u0441\u0442\u0440\u0435\u043b\u0430 \u043f\u0440\u043e\u0433\u0438\u0431\u0430: '
+                    f"{straightness_summary['max_deflection_mm']:.1f} \u043c\u043c "
+                    f'\u043f\u0440\u0438 \u0434\u043e\u043f\u0443\u0441\u043a\u0435 {straightness_summary["max_tolerance_mm"]:.1f} \u043c\u043c '
+                    f'({max_location})'
+                )
+                ws3[f'A{row_idx + 5}'].alignment = Alignment(horizontal='left', vertical='center', wrap_text=True)
+
+                ws_straight = wb.create_sheet("\u041f\u0440\u044f\u043c\u043e\u043b\u0438\u043d\u0435\u0439\u043d\u043e\u0441\u0442\u044c")
+                ws_straight['A1'] = '\u0420\u0430\u0441\u0447\u0435\u0442 \u0441\u0442\u0440\u0435\u043b\u044b \u043f\u0440\u043e\u0433\u0438\u0431\u0430 \u043f\u043e\u044f\u0441\u043e\u0432'
+                ws_straight['A1'].font = Font(size=14, bold=True)
+
+                straight_headers = [
+                    '\u0427\u0430\u0441\u0442\u044c',
+                    '\u2116 \u043f\u043e\u044f\u0441\u0430',
+                    '\u0412\u044b\u0441\u043e\u0442\u0430 (\u043c)',
+                    '\u0421\u0442\u0440\u0435\u043b\u0430 \u043f\u0440\u043e\u0433\u0438\u0431\u0430 (\u043c\u043c)',
+                    '\u0414\u043e\u043f\u0443\u0441\u043a (\u043c\u043c)',
+                    '\u0421\u043e\u0441\u0442\u043e\u044f\u043d\u0438\u0435',
+                ]
+
+                for col_idx, header in enumerate(straight_headers, start=1):
+                    cell = ws_straight.cell(row=3, column=col_idx)
+                    cell.value = header
+                    cell.font = Font(bold=True)
+                    cell.fill = PatternFill(start_color='CCCCCC', end_color='CCCCCC', fill_type='solid')
+                    cell.alignment = header_alignment
+                    cell.border = border
+
+                straight_row_idx = 4
+                for part_num, belt_num, item in self._iter_straightness_rows(straightness_data):
+                    height_m = float(item.get('height', 0.0) or 0.0)
+                    deflection_mm = float(item.get('deflection', 0.0) or 0.0)
+                    tolerance_mm = float(item.get('tolerance', 0.0) or 0.0)
+                    is_within_limit = abs(deflection_mm) <= tolerance_mm + 1e-9
+                    status = '\u0421\u043e\u043e\u0442\u0432\u0435\u0442\u0441\u0442\u0432\u0443\u0435\u0442' if is_within_limit else '\u041f\u0440\u0435\u0432\u044b\u0448\u0435\u043d\u0438\u0435'
+
+                    values = [
+                        part_num,
+                        belt_num,
+                        round(height_m, 3),
+                        round(deflection_mm, 2),
+                        round(tolerance_mm, 2),
+                        status,
+                    ]
+                    for col_idx, value in enumerate(values, start=1):
+                        cell = ws_straight.cell(row=straight_row_idx, column=col_idx, value=value)
+                        cell.alignment = data_alignment
+                        cell.border = border
+
+                    ws_straight.cell(row=straight_row_idx, column=6).font = Font(
+                        color='008000' if is_within_limit else 'FF0000',
+                        bold=not is_within_limit,
+                    )
+                    straight_row_idx += 1
+
+                for col_idx, width in enumerate([10, 12, 14, 20, 16, 18], start=1):
+                    ws_straight.column_dimensions[get_column_letter(col_idx)].width = width
+
+                ws_straight.freeze_panes = 'A4'
+
             if angular_measurements and (angular_measurements.get('x') or angular_measurements.get('y')):
                 ws_angular = wb.create_sheet("Журнал угловых измерений")
 
@@ -359,6 +547,13 @@ class ReportGenerator:
             # Таблица результатов (улучшенный стиль)
             data = [['№\nпояса', 'Высота,\nм', 'Отклонение\nот вертикали,\nмм', 'Допуск,\nмм', 'Соответствие\nнормативу']]
 
+            straightness_data = self._get_preferred_straightness_data(
+                processed_data,
+                raw_data,
+                straightness_plot_widget,
+            )
+            straightness_summary = self._summarize_straightness_data(straightness_data)
+
             from core.normatives import get_vertical_tolerance
 
             for i, (idx, row) in enumerate(centers.iterrows(), start=1):
@@ -411,15 +606,32 @@ class ReportGenerator:
             story.append(Spacer(1, 10))
 
             grouped_straightness_figures = []
-            if straightness_plot_widget and hasattr(straightness_plot_widget, 'get_grouped_figures_for_pdf'):
+            if (
+                straightness_plot_widget
+                and len(straightness_data) > 1
+                and hasattr(straightness_plot_widget, 'get_part_figures_for_pdf')
+            ):
+                for part_num in sorted(straightness_data.keys()):
+                    try:
+                        for belt_group, fig in straightness_plot_widget.get_part_figures_for_pdf(part_num):
+                            grouped_straightness_figures.append((part_num, belt_group, fig))
+                    except Exception as exc:
+                        print(
+                            f"РќРµ СѓРґР°Р»РѕСЃСЊ РїРѕР»СѓС‡РёС‚СЊ РіСЂСѓРїРїРѕРІС‹Рµ "
+                            f"РіСЂР°С„РёРєРё РїСЂСЏРјРѕР»РёРЅРµР№РЅРѕСЃС‚Рё РґР»СЏ С‡Р°СЃС‚Рё {part_num}: {exc}"
+                        )
+            if not grouped_straightness_figures and straightness_plot_widget and hasattr(straightness_plot_widget, 'get_grouped_figures_for_pdf'):
                 try:
-                    grouped_straightness_figures = straightness_plot_widget.get_grouped_figures_for_pdf()
+                    grouped_straightness_figures = [
+                        (None, belt_group, fig)
+                        for belt_group, fig in straightness_plot_widget.get_grouped_figures_for_pdf()
+                    ]
                 except Exception as exc:
                     print(f"Не удалось получить сгруппированные графики прямолинейности: {exc}")
 
             if grouped_straightness_figures:
                 figure_index = 2
-                for belt_group, fig in grouped_straightness_figures:
+                for part_num, belt_group, fig in grouped_straightness_figures:
                     width = 9.0 if len(belt_group) == 1 else 10.5
                     original_size = self._prepare_matplotlib_figure(fig, width, 5.8, pad=1.6)
                     with tempfile.NamedTemporaryFile(suffix='.png', delete=False) as tmp:
@@ -431,6 +643,8 @@ class ReportGenerator:
                         fig.set_size_inches(original_size)
 
                     belts_caption = ', '.join(str(b) for b in belt_group)
+                    if part_num is not None and len(straightness_data) > 1:
+                        belts_caption = f'\u0447\u0430\u0441\u0442\u0438 {part_num}, {belts_caption}'
                     story.append(Spacer(1, 6))
                     story.append(Paragraph(
                         f'<i>Рис. {figure_index}. Отклонения от прямолинейности по поясам {belts_caption}</i>',
@@ -476,6 +690,36 @@ class ReportGenerator:
                                       styles['Normal']))
 
             # Генерируем PDF
+            if straightness_summary['total'] > 0:
+                story.append(Spacer(1, 12))
+                story.append(Paragraph('\u041f\u0440\u043e\u0432\u0435\u0440\u043a\u0430 \u043f\u0440\u044f\u043c\u043e\u043b\u0438\u043d\u0435\u0439\u043d\u043e\u0441\u0442\u0438 \u043f\u043e\u044f\u0441\u043e\u0432:', styles['Normal']))
+                story.append(Paragraph(f"\u041f\u0440\u043e\u0432\u0435\u0440\u0435\u043d\u043e \u0442\u043e\u0447\u0435\u043a: {straightness_summary['total']}", styles['Normal']))
+                story.append(Paragraph(f"\u2713 \u0412 \u043d\u043e\u0440\u043c\u0435: {straightness_summary['passed']}", styles['Normal']))
+                story.append(Paragraph(f"\u2717 \u041f\u0440\u0435\u0432\u044b\u0448\u0435\u043d\u0438\u0435: {straightness_summary['failed']}", styles['Normal']))
+
+                max_location = (
+                    f"\u043f\u043e\u044f\u0441 {straightness_summary['max_belt_num']}, "
+                    f"\u0432\u044b\u0441\u043e\u0442\u0430 {straightness_summary['max_height_m']:.3f} \u043c"
+                )
+                if len(straightness_data) > 1 and straightness_summary['max_part_num'] is not None:
+                    max_location = f"\u0447\u0430\u0441\u0442\u044c {straightness_summary['max_part_num']}, {max_location}"
+
+                if straightness_summary['failed'] == 0:
+                    story.append(Paragraph(
+                        '<b>\u0417\u0430\u043a\u043b\u044e\u0447\u0435\u043d\u0438\u0435 \u043f\u043e \u043f\u0440\u044f\u043c\u043e\u043b\u0438\u043d\u0435\u0439\u043d\u043e\u0441\u0442\u0438: '
+                        '\u0441\u0442\u0440\u0435\u043b\u0430 \u043f\u0440\u043e\u0433\u0438\u0431\u0430 \u043f\u043e\u044f\u0441\u043e\u0432 \u043d\u0435 \u043f\u0440\u0435\u0432\u044b\u0448\u0430\u0435\u0442 \u0434\u043e\u043f\u0443\u0441\u0442\u0438\u043c\u044b\u0445 '
+                        '\u0437\u043d\u0430\u0447\u0435\u043d\u0438\u0439.</b>',
+                        styles['Normal'],
+                    ))
+                else:
+                    story.append(Paragraph(
+                        '<b>\u0417\u0430\u043a\u043b\u044e\u0447\u0435\u043d\u0438\u0435 \u043f\u043e \u043f\u0440\u044f\u043c\u043e\u043b\u0438\u043d\u0435\u0439\u043d\u043e\u0441\u0442\u0438: '
+                        f"\u043c\u0430\u043a\u0441\u0438\u043c\u0430\u043b\u044c\u043d\u0430\u044f \u0441\u0442\u0440\u0435\u043b\u0430 \u043f\u0440\u043e\u0433\u0438\u0431\u0430 \u0441\u043e\u0441\u0442\u0430\u0432\u043b\u044f\u0435\u0442 "
+                        f"{straightness_summary['max_deflection_mm']:.1f} \u043c\u043c \u043f\u0440\u0438 \u0434\u043e\u043f\u0443\u0441\u043a\u0435 "
+                        f"{straightness_summary['max_tolerance_mm']:.1f} \u043c\u043c ({max_location}).</b>",
+                        styles['Normal'],
+                    ))
+
             doc.build(story)
 
         except Exception as e:
@@ -574,6 +818,12 @@ class ReportGenerator:
 
             centers = processed_data['centers']
             max_height = float(centers['z'].max()) if len(centers) > 0 else 0.0
+            straightness_data = self._get_preferred_straightness_data(
+                processed_data,
+                raw_data,
+                straightness_widget,
+            )
+            straightness_summary = self._summarize_straightness_data(straightness_data)
 
             # === ТАБЛИЦА ОТКЛОНЕНИЙ СТВОЛА ОТ ВЕРТИКАЛИ ===
             heading = doc.add_paragraph()
@@ -811,7 +1061,7 @@ class ReportGenerator:
             signature_para.add_run('        Вычисления проверил        ____________')
 
             # === РАСЧЕТ СТРЕЛЫ ПРОГИБА (если есть данные) ===
-            if 'straightness' in processed_data and len(processed_data['straightness']) > 0:
+            if straightness_summary['total'] > 0:
                 doc.add_page_break()
 
                 heading3 = doc.add_paragraph()
@@ -861,29 +1111,40 @@ class ReportGenerator:
                 doc.add_paragraph()
 
                 # Заключение по прямолинейности
-                straightness_data = processed_data['straightness']
-                max_deviation = abs(straightness_data['deviation_mm'].max())
+                max_location = (
+                    f"\u043f\u043e\u044f\u0441 {straightness_summary['max_belt_num']}, "
+                    f"\u0432\u044b\u0441\u043e\u0442\u0430 {straightness_summary['max_height_m']:.3f} \u043c"
+                )
+                if len(straightness_data) > 1 and straightness_summary['max_part_num'] is not None:
+                    max_location = f"\u0447\u0430\u0441\u0442\u044c {straightness_summary['max_part_num']}, {max_location}"
+                max_deviation = float(straightness_summary['max_deflection_mm'])
 
-                straight_conclusion_heading = doc.add_paragraph('Заключение:', style='Body Text')
+                straight_conclusion_heading = doc.add_paragraph('\u0417\u0430\u043a\u043b\u044e\u0447\u0435\u043d\u0438\u0435:', style='Body Text')
                 straight_conclusion_heading.runs[0].font.bold = True
 
                 straight_conclusion = doc.add_paragraph(style='Body Text')
                 straight_conclusion.alignment = WD_ALIGN_PARAGRAPH.JUSTIFY
 
-                # Получаем минимальную и максимальную высоту из данных прямолинейности
-                if len(straightness_data) > 0:
-                    segment_length = straightness_data['height_2'].max() - straightness_data['height_1'].min()
-                    tolerance = get_straightness_tolerance(segment_length) * 1000
-
-                    if max_deviation <= tolerance:
-                        straight_conclusion.add_run(f'Стрела прогиба поясов башни не превышает допустимые значения. '
-                                                   f'Максимальное значение составляет {max_deviation:.1f} мм при допуске {tolerance:.1f} мм.')
-                    else:
-                        run = straight_conclusion.add_run(f'Стрела прогиба поясов башни превышает допустимые значения. '
-                                                         f'Максимальное значение составляет {max_deviation:.1f} мм при допуске {tolerance:.1f} мм.')
-                        run.font.color.rgb = RGBColor(255, 0, 0)
-                        run.font.bold = True
-
+                # Straightness conclusion uses canonical profile points and their local tolerances
+                tolerance = float(straightness_summary['max_tolerance_mm'])
+                if straightness_summary['failed'] == 0:
+                    straight_conclusion.add_run(
+                        '\u0421\u0442\u0440\u0435\u043b\u0430 \u043f\u0440\u043e\u0433\u0438\u0431\u0430 \u043f\u043e\u044f\u0441\u043e\u0432 \u0431\u0430\u0448\u043d\u0438 \u043d\u0435 \u043f\u0440\u0435\u0432\u044b\u0448\u0430\u0435\u0442 '
+                        '\u0434\u043e\u043f\u0443\u0441\u0442\u0438\u043c\u044b\u0435 \u0437\u043d\u0430\u0447\u0435\u043d\u0438\u044f. '
+                        f'\u041f\u0440\u043e\u0432\u0435\u0440\u0435\u043d\u043e \u0442\u043e\u0447\u0435\u043a: {straightness_summary["total"]}. '
+                        f'\u041c\u0430\u043a\u0441\u0438\u043c\u0430\u043b\u044c\u043d\u043e\u0435 \u0437\u043d\u0430\u0447\u0435\u043d\u0438\u0435 \u0441\u043e\u0441\u0442\u0430\u0432\u043b\u044f\u0435\u0442 {max_deviation:.1f} \u043c\u043c '
+                        f'\u043f\u0440\u0438 \u0434\u043e\u043f\u0443\u0441\u043a\u0435 {tolerance:.1f} \u043c\u043c ({max_location}).'
+                    )
+                else:
+                    run = straight_conclusion.add_run(
+                        '\u0421\u0442\u0440\u0435\u043b\u0430 \u043f\u0440\u043e\u0433\u0438\u0431\u0430 \u043f\u043e\u044f\u0441\u043e\u0432 \u0431\u0430\u0448\u043d\u0438 \u043f\u0440\u0435\u0432\u044b\u0448\u0430\u0435\u0442 '
+                        '\u0434\u043e\u043f\u0443\u0441\u0442\u0438\u043c\u044b\u0435 \u0437\u043d\u0430\u0447\u0435\u043d\u0438\u044f. '
+                        f'\u041f\u0440\u0435\u0432\u044b\u0448\u0435\u043d\u0438\u0439: {straightness_summary["failed"]} \u0438\u0437 {straightness_summary["total"]} \u0442\u043e\u0447\u0435\u043a. '
+                        f'\u041c\u0430\u043a\u0441\u0438\u043c\u0430\u043b\u044c\u043d\u043e\u0435 \u0437\u043d\u0430\u0447\u0435\u043d\u0438\u0435 \u0441\u043e\u0441\u0442\u0430\u0432\u043b\u044f\u0435\u0442 {max_deviation:.1f} \u043c\u043c '
+                        f'\u043f\u0440\u0438 \u0434\u043e\u043f\u0443\u0441\u043a\u0435 {tolerance:.1f} \u043c\u043c ({max_location}).'
+                    )
+                    run.font.color.rgb = RGBColor(255, 0, 0)
+                    run.font.bold = True
                 doc.add_paragraph()
 
                 # Подписи

@@ -902,7 +902,10 @@ class EnhancedReportGenerator:
                             for belt_num, belt_data in belts_data.items():
                                 for item in belt_data:
                                     height_rounded = round(item['height'], 1)
-                                    belt_height_deflection[(belt_num, height_rounded)] = item.get('deflection', 0)
+                                    belt_height_deflection[(belt_num, height_rounded)] = {
+                                        'deflection': float(item.get('deflection', 0.0) or 0.0),
+                                        'tolerance': float(item.get('tolerance', 0.0) or 0.0),
+                                    }
 
                             # Заголовок таблицы
                             deflection_header = [['Высота,\nм']]
@@ -917,7 +920,8 @@ class EnhancedReportGenerator:
                                 for belt_num in sorted_belts:
                                     key = (belt_num, height)
                                     if key in belt_height_deflection:
-                                        deflection = belt_height_deflection[key]
+                                        payload = belt_height_deflection[key]
+                                        deflection = float(payload.get('deflection', 0.0) or 0.0)
                                         row.append(f"{deflection:+.1f}")
                                     else:
                                         row.append("—")
@@ -1773,7 +1777,10 @@ class EnhancedReportGenerator:
                             for belt_num, belt_data in belts_data.items():
                                 for item in belt_data:
                                     height_rounded = round(item['height'], 1)
-                                    belt_height_deflection[(belt_num, height_rounded)] = item.get('deflection', 0)
+                                    belt_height_deflection[(belt_num, height_rounded)] = {
+                                        'deflection': float(item.get('deflection', 0.0) or 0.0),
+                                        'tolerance': float(item.get('tolerance', 0.0) or 0.0),
+                                    }
 
                             # Создаем таблицу для этой части
                             deflection_table = doc.add_table(rows=len(sorted_heights) + 1, cols=len(sorted_belts) + 2)
@@ -1805,11 +1812,13 @@ class EnhancedReportGenerator:
                                 for j, belt_num in enumerate(sorted_belts, start=1):
                                     key = (belt_num, height)
                                     if key in belt_height_deflection:
-                                        deflection = belt_height_deflection[key]
+                                        payload = belt_height_deflection[key]
+                                        deflection = float(payload.get('deflection', 0.0) or 0.0)
+                                        tolerance = float(payload.get('tolerance', max_tolerance) or max_tolerance)
                                         data_row.cells[j].text = f"{deflection:+.1f}"
 
                                         # Выделяем превышения
-                                        if abs(deflection) > max_tolerance:
+                                        if abs(deflection) > tolerance:
                                             para = data_row.cells[j].paragraphs[0]
                                             para.runs[0].font.color.rgb = RGBColor(255, 0, 0)
                                             para.runs[0].font.bold = True

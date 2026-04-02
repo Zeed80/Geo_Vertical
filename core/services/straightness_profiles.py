@@ -55,15 +55,38 @@ def normalize_straightness_profiles(payload: Any) -> list[dict[str, Any]]:
             except (TypeError, ValueError):
                 continue
 
+            point_section_length_m = float(
+                point.get("section_length_m", section_length_m) or section_length_m
+            )
+            point_tolerance_mm = float(
+                point.get("tolerance_mm")
+                or (
+                    get_straightness_tolerance(point_section_length_m) * 1000.0
+                    if point_section_length_m > 0.0
+                    else tolerance_mm
+                )
+            )
+
             normalized_points.append(
                 {
                     "source_index": _coerce_optional_int(point.get("source_index")),
                     "z": height,
                     "deflection_mm": deflection_mm,
+                    "section_length_m": point_section_length_m,
+                    "tolerance_mm": point_tolerance_mm,
                 }
             )
 
         normalized_points.sort(key=lambda item: float(item.get("z", 0.0) or 0.0))
+        if normalized_points:
+            section_length_m = max(
+                float(item.get("section_length_m", section_length_m) or section_length_m)
+                for item in normalized_points
+            )
+            tolerance_mm = max(
+                float(item.get("tolerance_mm", tolerance_mm) or tolerance_mm)
+                for item in normalized_points
+            )
         max_deflection_mm = max(
             (abs(float(item.get("deflection_mm", 0.0) or 0.0)) for item in normalized_points),
             default=0.0,
@@ -110,7 +133,13 @@ def build_straightness_part_map(payload: Any) -> dict[int, dict[str, Any]]:
             {
                 "height": float(point.get("z", 0.0) or 0.0),
                 "deflection": float(point.get("deflection_mm", 0.0) or 0.0),
-                "tolerance": float(profile.get("tolerance_mm", 0.0) or 0.0),
+                "tolerance": float(
+                    point.get("tolerance_mm", profile.get("tolerance_mm", 0.0)) or 0.0
+                ),
+                "section_length_m": float(
+                    point.get("section_length_m", profile.get("section_length_m", 0.0)) or 0.0
+                ),
+                "source_index": _coerce_optional_int(point.get("source_index")),
             }
             for point in profile.get("points", [])
         ]
@@ -126,6 +155,8 @@ def build_straightness_part_map(payload: Any) -> dict[int, dict[str, Any]]:
                             "height": float(point.get("height", 0.0) or 0.0),
                             "deflection": float(point.get("deflection", 0.0) or 0.0),
                             "tolerance": float(point.get("tolerance", 0.0) or 0.0),
+                            "section_length_m": float(point.get("section_length_m", 0.0) or 0.0),
+                            "source_index": _coerce_optional_int(point.get("source_index")),
                         }
                         for point in belt_points
                         if isinstance(point, dict)
@@ -172,6 +203,8 @@ def _normalize_direct_part_map(payload: dict[Any, Any]) -> dict[int, dict[str, A
                             "height": float(point.get("height", 0.0) or 0.0),
                             "deflection": float(point.get("deflection", 0.0) or 0.0),
                             "tolerance": float(point.get("tolerance", 0.0) or 0.0),
+                            "section_length_m": float(point.get("section_length_m", 0.0) or 0.0),
+                            "source_index": _coerce_optional_int(point.get("source_index")),
                         }
                     )
                 except (TypeError, ValueError):

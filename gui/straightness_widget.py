@@ -17,9 +17,11 @@ from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.figure import Figure
 import logging
 
-from core.normatives import get_straightness_tolerance
 from core.point_utils import build_working_tower_mask
-from core.straightness_calculations import calculate_belt_deflections as calculate_canonical_belt_deflections
+from core.straightness_calculations import (
+    calculate_belt_deflections as calculate_canonical_belt_deflections,
+    calculate_belt_profile_metrics,
+)
 from core.services.straightness_profiles import (
     get_preferred_straightness_part_map,
     get_preferred_straightness_profiles,
@@ -126,8 +128,11 @@ class StraightnessWidget(QWidget):
 
     def _get_profile_lookup(self) -> dict[tuple[int, int], dict]:
         lookup: dict[tuple[int, int], dict] = {}
+        tower_parts_info = self.processed_data.get('tower_parts_info') if isinstance(self.processed_data, dict) else None
         for profile in get_preferred_straightness_profiles(
-            self.processed_data.get('straightness_profiles') if isinstance(self.processed_data, dict) else None
+            self.processed_data.get('straightness_profiles') if isinstance(self.processed_data, dict) else None,
+            points=self._get_working_data(),
+            tower_parts_info=tower_parts_info,
         ):
             try:
                 part_number = int(profile.get('part_number', 1))
@@ -137,33 +142,73 @@ class StraightnessWidget(QWidget):
             lookup[(part_number, belt_number)] = profile
         return lookup
 
+    @staticmethod
+    def _build_fallback_belt_payloads(belt_points: pd.DataFrame) -> list[dict]:
+        belt_sorted = belt_points.sort_values('z').copy()
+        point_metrics = calculate_belt_profile_metrics(belt_sorted)
+        payloads: list[dict] = []
+        for idx, (_, point) in enumerate(belt_sorted.iterrows()):
+            point_metric = point_metrics[idx] if idx < len(point_metrics) else {}
+            payloads.append(
+                {
+                    'source_index': int(point.name) if isinstance(point.name, (int, np.integer)) else None,
+                    'height': float(point['z']),
+                    'deflection': float(point_metric.get('deflection_mm', 0.0) or 0.0),
+                    'tolerance': float(point_metric.get('tolerance_mm', 0.0) or 0.0),
+                    'section_length_m': float(point_metric.get('section_length_m', 0.0) or 0.0),
+                }
+            )
+        return payloads
+
+    def _get_belt_point_payloads(
+        self,
+        belt_points: pd.DataFrame,
+        belt_num: int,
+        part_num: Optional[int],
+    ) -> list[dict]:
+        if belt_points is None or belt_points.empty:
+            return []
+
+        lookup = self._get_profile_lookup()
+        profile = lookup.get((int(part_num or 1), int(belt_num)))
+        if not profile:
+            return self._build_fallback_belt_payloads(belt_points)
+
+        payloads: list[dict] = []
+        for point in profile.get('points', []):
+            if not isinstance(point, dict):
+                continue
+            try:
+                payloads.append(
+                    {
+                        'source_index': point.get('source_index'),
+                        'height': float(point.get('z', 0.0) or 0.0),
+                        'deflection': float(point.get('deflection_mm', 0.0) or 0.0),
+                        'tolerance': float(point.get('tolerance_mm', profile.get('tolerance_mm', 0.0)) or 0.0),
+                        'section_length_m': float(
+                            point.get('section_length_m', profile.get('section_length_m', 0.0)) or 0.0
+                        ),
+                    }
+                )
+            except (TypeError, ValueError):
+                continue
+
+        if not payloads:
+            return self._build_fallback_belt_payloads(belt_points)
+
+        payloads.sort(key=lambda item: float(item.get('height', 0.0) or 0.0))
+        return payloads
+
     def _get_profile_deflections(
         self,
         belt_points: pd.DataFrame,
         belt_num: int,
         part_num: Optional[int],
     ) -> Optional[list[float]]:
-        if belt_points is None or belt_points.empty:
+        payloads = self._get_belt_point_payloads(belt_points, belt_num, part_num)
+        if not payloads:
             return []
-        lookup = self._get_profile_lookup()
-        profile = lookup.get((int(part_num or 1), int(belt_num)))
-        if not profile:
-            return None
-
-        point_map = {}
-        for point in profile.get('points', []):
-            try:
-                point_map[int(point.get('source_index'))] = float(point.get('deflection_mm', 0.0))
-            except (TypeError, ValueError):
-                continue
-
-        belt_sorted = belt_points.sort_values('z')
-        if belt_sorted.empty:
-            return []
-        if not point_map:
-            return [0.0] * len(belt_sorted)
-
-        return [float(point_map.get(int(idx), 0.0)) for idx in belt_sorted.index]
+        return [float(item.get('deflection', 0.0) or 0.0) for item in payloads]
         
     def _cluster_display_heights(self, heights: list[float], tolerance: float = 0.25) -> tuple[list[float], dict[float, float]]:
         if not heights:
@@ -326,6 +371,8 @@ class StraightnessWidget(QWidget):
         self.update_plots()
         
     def update_plots(self):
+        if self._update_plots_from_canonical():
+            return
         """РћР±РЅРѕРІРёС‚СЊ РІСЃРµ РіСЂР°С„РёРєРё РїСЂСЏРјРѕР»РёРЅРµР№РЅРѕСЃС‚Рё РїРѕ РїРѕСЏСЃР°Рј РЅР° РѕРґРЅРѕР№ РІРєР»Р°РґРєРµ"""
         # Р—Р°С‰РёС‚Р° РѕС‚ Р·Р°С†РёРєР»РёРІР°РЅРёСЏ
         if not hasattr(self, '_updating_plots'):
@@ -514,6 +561,114 @@ class StraightnessWidget(QWidget):
         finally:
             self._updating_plots = False
     
+    def _update_plots_from_canonical(self) -> bool:
+        if not hasattr(self, '_updating_plots'):
+            self._updating_plots = False
+
+        if self._updating_plots:
+            logger.debug("Пропуск update_plots: уже выполняется")
+            return True
+
+        self._updating_plots = True
+        try:
+            if self.data is None or self.data.empty:
+                self.info_label.setText('Нет данных для отображения')
+                self._clear_graphs()
+                self.deviation_table.setRowCount(0)
+                return True
+
+            if 'belt' not in self.data.columns:
+                self.info_label.setText('Исходные данные должны содержать информацию о поясах')
+                self._clear_graphs()
+                self.deviation_table.setRowCount(0)
+                return True
+
+            self._clear_graphs()
+            self.deviation_table.setRowCount(0)
+
+            belt_data_by_part = self.get_all_belts_data()
+            if not belt_data_by_part:
+                self.info_label.setText('Нет данных для отображения прямолинейности')
+                self._show_graph_placeholder('Нет данных для построения графиков прямолинейности')
+                return True
+
+            working_data = self._get_working_data()
+            is_multi_part = len(belt_data_by_part) > 1
+            graph_entries_by_part: dict[int, list] = {}
+
+            for part_num, part_info in sorted(belt_data_by_part.items()):
+                part_min_height = float(part_info.get('min_height', 0.0) or 0.0)
+                part_max_height = float(part_info.get('max_height', 0.0) or 0.0)
+                belts_data = part_info.get('belts', {}) or {}
+
+                if not working_data.empty and 'belt' in working_data.columns:
+                    if is_multi_part:
+                        part_mask = working_data.apply(lambda row: self._row_has_part(row, int(part_num)), axis=1)
+                        part_data = working_data.loc[part_mask].copy()
+                    else:
+                        part_data = working_data.copy()
+                else:
+                    part_data = pd.DataFrame()
+
+                for belt_num, belt_payload in sorted(belts_data.items()):
+                    belt_points = pd.DataFrame()
+                    if not part_data.empty:
+                        numeric_belts = pd.to_numeric(part_data['belt'], errors='coerce')
+                        belt_points = part_data.loc[numeric_belts == int(belt_num)].copy()
+
+                    if belt_points.empty:
+                        belt_points = pd.DataFrame(
+                            [
+                                {
+                                    'x': 0.0,
+                                    'y': 0.0,
+                                    'z': float(point.get('height', 0.0) or 0.0),
+                                    'belt': int(belt_num),
+                                }
+                                for point in belt_payload
+                                if isinstance(point, dict)
+                            ]
+                        )
+
+                    if len(belt_points) < 2:
+                        continue
+
+                    graph_entries_by_part.setdefault(int(part_num), []).append(
+                        (
+                            int(belt_num),
+                            belt_points,
+                            int(part_num),
+                            part_min_height,
+                            part_max_height,
+                        )
+                    )
+
+            table_payload_by_part = {
+                int(part_num): dict(part_info.get('belts', {}) or {})
+                for part_num, part_info in belt_data_by_part.items()
+            }
+            self._fill_pivot_table(table_payload_by_part, is_multi_part)
+            self._graph_entries_by_part = graph_entries_by_part
+            self._rendered_graph_parts = set()
+
+            graph_part_keys = sorted(part_num for part_num, entries in graph_entries_by_part.items() if entries)
+            if graph_part_keys:
+                self._setup_graph_tabs(graph_part_keys, is_multi_part)
+            else:
+                self._show_graph_placeholder('Нет данных для построения графиков прямолинейности')
+
+            belts_count = sum(len((part_info.get('belts') or {})) for part_info in belt_data_by_part.values())
+            parts_text = f" ({len(belt_data_by_part)} частей)" if is_multi_part else ""
+            self.info_label.setText(f'Графики построены для {belts_count} поясов{parts_text}')
+            return True
+        except Exception as exc:
+            logger.error(f"Ошибка при обновлении графиков прямолинейности: {exc}", exc_info=True)
+            self.info_label.setText('Ошибка построения графиков прямолинейности')
+            self._show_graph_placeholder('Ошибка построения графиков прямолинейности')
+            return True
+        finally:
+            self._updating_plots = False
+
     def _clear_graphs(self):
         """РћС‡РёСЃС‚РёС‚СЊ РІСЃРµ РіСЂР°С„РёРєРё"""
         self.graph_tabs.clear()
@@ -668,6 +823,34 @@ class StraightnessWidget(QWidget):
 
         target_layout.addWidget(graph_item_widget, stretch=1)
 
+    @staticmethod
+    def _extract_belt_points_payload(belt_payload) -> list[dict]:
+        if isinstance(belt_payload, dict):
+            raw_points = belt_payload.get('points', [])
+        elif isinstance(belt_payload, list):
+            raw_points = belt_payload
+        else:
+            raw_points = []
+
+        result: list[dict] = []
+        for point in raw_points:
+            if not isinstance(point, dict):
+                continue
+            try:
+                result.append(
+                    {
+                        'height': float(point.get('height', 0.0) or 0.0),
+                        'deflection': float(point.get('deflection', 0.0) or 0.0),
+                        'tolerance': float(point.get('tolerance', 0.0) or 0.0),
+                        'section_length_m': float(point.get('section_length_m', 0.0) or 0.0),
+                    }
+                )
+            except (TypeError, ValueError):
+                continue
+
+        result.sort(key=lambda item: float(item.get('height', 0.0) or 0.0))
+        return result
+
     def _populate_part_table(self, table: QTableWidget, belt_data_dict: dict, part_num: Optional[int] = None):
         """Заполняет сводную таблицу по поясам: строки = высоты секций, столбцы = пояса."""
         try:
@@ -682,14 +865,11 @@ class StraightnessWidget(QWidget):
 
             raw_heights = [
                 float(point['height'])
-                for belt_data in belt_data_dict.values()
-                for point in belt_data['points']
+                for belt_payload in belt_data_dict.values()
+                for point in self._extract_belt_points_payload(belt_payload)
             ]
             sorted_heights, display_height_map = self._cluster_display_heights(raw_heights)
             sorted_belts = sorted(belt_data_dict.keys())
-
-            max_tolerance = max(belt_data['tolerance'] for belt_data in belt_data_dict.values())
-            max_tolerance_rounded = round(max_tolerance, 1)
 
             table.setColumnCount(len(sorted_belts) + 2)
             headers = ['Высота, м'] + [f'Пояс {belt}' for belt in sorted_belts] + ['Допустимое, мм']
@@ -697,13 +877,20 @@ class StraightnessWidget(QWidget):
             table.setRowCount(len(sorted_heights))
 
             belt_height_deflection = {}
-            for belt_num, belt_data in belt_data_dict.items():
-                for point in belt_data['points']:
+            row_tolerance_map: dict[float, float] = {}
+            for belt_num, belt_payload in belt_data_dict.items():
+                for point in self._extract_belt_points_payload(belt_payload):
                     display_height = self._display_height(point['height'], display_height_map)
                     belt_height_deflection[(belt_num, display_height)] = {
                         'deflection': round(point['deflection'], 1),
-                        'tolerance': float(belt_data['tolerance']),
+                        'tolerance': float(point.get('tolerance', 0.0) or 0.0),
+                        'section_length_m': float(point.get('section_length_m', 0.0) or 0.0),
                     }
+                    row_tolerance_map[display_height] = max(
+                        row_tolerance_map.get(display_height, 0.0),
+                        float(point.get('tolerance', 0.0) or 0.0),
+                    )
+            max_tolerance_rounded = round(max(row_tolerance_map.values(), default=0.0), 1)
 
             tolerance_col_idx = len(sorted_belts) + 1
             for row_idx, height in enumerate(sorted_heights):
@@ -723,7 +910,7 @@ class StraightnessWidget(QWidget):
                     tolerance = float(payload['tolerance'])
                     deflection_item = QTableWidgetItem(f"{deflection:+.1f}")
                     deflection_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-                    if abs(deflection) > max_tolerance_rounded:
+                    if abs(deflection) > tolerance:
                         deflection_item.setForeground(QColor(220, 50, 50))
                     else:
                         deflection_item.setForeground(QColor(50, 150, 50))
@@ -818,6 +1005,89 @@ class StraightnessWidget(QWidget):
             part_min_height: РњРёРЅРёРјР°Р»СЊРЅР°СЏ РІС‹СЃРѕС‚Р° С‡Р°СЃС‚Рё (РґР»СЏ СЂР°СЃС‡РµС‚Р° РґРѕРїСѓСЃРєР°, РµСЃР»Рё None - РІС‹С‡РёСЃР»СЏРµС‚СЃСЏ РёР· РїРѕСЏСЃР°)
             part_max_height: РњР°РєСЃРёРјР°Р»СЊРЅР°СЏ РІС‹СЃРѕС‚Р° С‡Р°СЃС‚Рё (РґР»СЏ СЂР°СЃС‡РµС‚Р° РґРѕРїСѓСЃРєР°, РµСЃР»Рё None - РІС‹С‡РёСЃР»СЏРµС‚СЃСЏ РёР· РїРѕСЏСЃР°)
         """
+        point_payloads = self._get_belt_point_payloads(belt_points, belt_num, part_num)
+        if point_payloads:
+            absolute_heights = np.array(
+                [float(item.get('height', 0.0) or 0.0) for item in point_payloads],
+                dtype=float,
+            )
+            deflections = np.array(
+                [float(item.get('deflection', 0.0) or 0.0) for item in point_payloads],
+                dtype=float,
+            )
+            tolerances = np.array(
+                [float(item.get('tolerance', 0.0) or 0.0) for item in point_payloads],
+                dtype=float,
+            )
+
+            if len(absolute_heights) < 2:
+                logger.warning("Недостаточно точек на поясе %s для построения графика", belt_num)
+                ax.axis('off')
+                ax.text(0.5, 0.5, "Недостаточно данных", transform=ax.transAxes,
+                        ha='center', va='center', fontsize=9, color='gray')
+                return False
+
+            ax.set_xlabel("Стрела прогиба, мм", fontsize=10)
+            ax.set_ylabel("Высота, м", fontsize=10)
+            ax.set_title(f"Пояс {int(belt_num)}", fontsize=10, fontweight='bold')
+            ax.tick_params(axis='both', labelsize=9)
+            ax.xaxis.set_major_locator(ticker.MaxNLocator(6))
+            ax.yaxis.set_major_locator(ticker.MaxNLocator(integer=True, nbins=8))
+
+            max_deflection_abs = float(np.max(np.abs(deflections))) if len(deflections) else 0.0
+            max_tolerance = float(np.max(tolerances)) if len(tolerances) else 0.0
+            x_limit = max(max_deflection_abs * 1.2, max_tolerance * 1.5, 10.0)
+            ax.set_xlim(-x_limit, x_limit)
+
+            height_range = float(absolute_heights.max() - absolute_heights.min())
+            padding = height_range * 0.05 if height_range > 0.0 else 0.5
+            ax.set_ylim(float(absolute_heights.min() - padding), float(absolute_heights.max() + padding))
+
+            ax.axvline(x=0, color='black', linewidth=1.0, linestyle='-', zorder=1)
+            ax.plot(
+                -tolerances,
+                absolute_heights,
+                color='gray',
+                linewidth=1.5,
+                linestyle='--',
+                zorder=2,
+                alpha=0.7,
+                label="Допуск ±L/750",
+            )
+            ax.plot(
+                tolerances,
+                absolute_heights,
+                color='gray',
+                linewidth=1.5,
+                linestyle='--',
+                zorder=2,
+                alpha=0.7,
+            )
+
+            ax.grid(True, axis='x', linestyle=':', linewidth=0.5, alpha=0.5, color='gray', zorder=0)
+            ax.grid(True, axis='y', linestyle=':', linewidth=0.5, alpha=0.3, color='gray', zorder=0)
+            ax.plot(
+                deflections,
+                absolute_heights,
+                color='red',
+                linewidth=1.5,
+                linestyle='-',
+                marker='o',
+                markersize=4,
+                markerfacecolor='red',
+                markeredgecolor='white',
+                markeredgewidth=0.5,
+                label="Фактический прогиб",
+                zorder=5,
+            )
+
+            ax.legend(loc='best', fontsize=8, framealpha=0.9, frameon=True)
+            ax.spines['top'].set_linewidth(0.5)
+            ax.spines['right'].set_linewidth(0.5)
+            ax.spines['bottom'].set_linewidth(1.0)
+            ax.spines['left'].set_linewidth(1.0)
+            return True
+
         belt_sorted = belt_points.sort_values('z')
         absolute_heights = belt_sorted['z'].values
 

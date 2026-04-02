@@ -21,7 +21,7 @@ from core.full_report_models import (
     RenderTable,
     ValidationIssue,
 )
-from core.normatives import get_straightness_tolerance, get_vertical_tolerance
+from core.normatives import get_vertical_tolerance
 from core.report_schema import ContractorInfo, CustomerInfo, EquipmentEntry, FullReportData, Specialist
 from core.services.report_templates import ReportDataAssembler, ReportTemplateManager
 
@@ -811,8 +811,6 @@ class FullReportBuilder:
         failed = 0
         for item in data.straightness_records:
             tolerance_mm = float(item.tolerance_mm or 0.0)
-            if tolerance_mm <= 0 and item.height_m:
-                tolerance_mm = get_straightness_tolerance(float(item.height_m)) * 1000.0
             deviation = float(item.deviation_mm or 0.0)
             ok = abs(deviation) <= tolerance_mm + 1e-9
             if not ok:

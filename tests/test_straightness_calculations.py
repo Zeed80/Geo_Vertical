@@ -4,6 +4,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
+from core.normatives import get_straightness_tolerance
 from core.services.straightness_profiles import get_preferred_straightness_part_map
 from core.straightness_calculations import (
     auto_detect_split_height,
@@ -172,6 +173,35 @@ class TestBuildStraightnessProfiles:
         assert point_map[104] == 0.0
         assert point_map[101] > 0.0
         assert point_map[103] > 0.0
+
+    def test_profiles_keep_local_section_tolerances_per_point(self):
+        df = pd.DataFrame(
+            [
+                {'x': 0.0, 'y': 0.0, 'z': 0.0, 'belt': 1},
+                {'x': 0.01, 'y': 0.0, 'z': 5.0, 'belt': 1},
+                {'x': 0.0, 'y': 0.0, 'z': 10.0, 'belt': 1},
+                {'x': 0.015, 'y': 0.0, 'z': 20.0, 'belt': 1},
+                {'x': 0.0, 'y': 0.0, 'z': 25.0, 'belt': 1},
+            ],
+            index=[200, 201, 202, 203, 204],
+        )
+
+        profile = build_straightness_profiles(df)[0]
+        point_map = {int(item['source_index']): item for item in profile['points']}
+        tolerance_10m = get_straightness_tolerance(10.0) * 1000.0
+        tolerance_15m = get_straightness_tolerance(15.0) * 1000.0
+
+        assert point_map[200]['section_length_m'] == pytest.approx(10.0, abs=1e-9)
+        assert point_map[201]['section_length_m'] == pytest.approx(10.0, abs=1e-9)
+        assert point_map[202]['section_length_m'] == pytest.approx(15.0, abs=1e-9)
+        assert point_map[203]['section_length_m'] == pytest.approx(15.0, abs=1e-9)
+        assert point_map[204]['section_length_m'] == pytest.approx(15.0, abs=1e-9)
+        assert point_map[200]['tolerance_mm'] == pytest.approx(tolerance_10m, abs=1e-9)
+        assert point_map[201]['tolerance_mm'] == pytest.approx(tolerance_10m, abs=1e-9)
+        assert point_map[202]['tolerance_mm'] == pytest.approx(tolerance_15m, abs=1e-9)
+        assert point_map[203]['tolerance_mm'] == pytest.approx(tolerance_15m, abs=1e-9)
+        assert point_map[204]['tolerance_mm'] == pytest.approx(tolerance_15m, abs=1e-9)
+        assert profile['tolerance_mm'] == pytest.approx(tolerance_15m, abs=1e-9)
 
     def test_part_map_falls_back_to_canonical_profiles_from_raw_points(self):
         df = pd.DataFrame(
